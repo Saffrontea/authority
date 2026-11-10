@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/issuance-authorization-v1.schema.json",
+  "title": "IssuanceAuthorizationV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "issuer", "domain_id", "subject_user_id", "device_id",
+    "target_node_id", "ssh_public_key_fingerprint", "principals", "policy_id",
+    "nonce", "issued_at", "not_before", "expires_at", "audience"
+  ],
+  "properties": {
+    "version": { "const": "1" },
+    "issuer": { "$ref": "#/$defs/identifier" },
+    "domain_id": { "$ref": "#/$defs/identifier" },
+    "subject_user_id": { "$ref": "#/$defs/identifier" },
+    "device_id": { "$ref": "#/$defs/identifier" },
+    "target_node_id": { "$ref": "#/$defs/identifier" },
+    "ssh_public_key_fingerprint": {
+      "type": "string",
+      "pattern": "^SHA256:[A-Za-z0-9+/=_-]+$"
+    },
+    "principals": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/identifier" }
+    },
+    "policy_id": { "$ref": "#/$defs/identifier" },
+    "nonce": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "issued_at": { "type": "integer" },
+    "not_before": { "type": "integer" },
+    "expires_at": { "type": "integer" },
+    "audience": { "$ref": "#/$defs/identifier" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    }
+  }
+}

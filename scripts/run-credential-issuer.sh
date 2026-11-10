@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+SECRETS_DIR="$PROJECT_DIR/.secrets"
+
+AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=${AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE:-$SECRETS_DIR/control-plane-ed25519.pub.pem}
+AUTHORITY_SSH_CA_KEY_FILE=${AUTHORITY_SSH_CA_KEY_FILE:-$SECRETS_DIR/ssh-ca}
+AUTHORITY_SSH_CA_PUBLIC_KEY_FILE=${AUTHORITY_SSH_CA_PUBLIC_KEY_FILE:-$SECRETS_DIR/ssh-ca.pub}
+export AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE AUTHORITY_SSH_CA_KEY_FILE AUTHORITY_SSH_CA_PUBLIC_KEY_FILE
+
+if [ ! -s "$AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE" ]; then
+    echo "credential-issuer: control-plane public key not found; start the control plane first" >&2
+    exit 1
+fi
+
+exec cargo run --offline -p authority-credential-issuer

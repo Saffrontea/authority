@@ -1,0 +1,238 @@
+[tasks."agent:serve"]
+description = "Start the privileged LXC task agent in the foreground"
+run = "./scripts/authority-agent.sh serve"
+
+[tasks."agent:ping"]
+description = "Check whether the privileged task agent is available"
+run = "./scripts/authority-agent.sh ping"
+
+[tasks."agent:list"]
+description = "List tasks exposed by the privileged task agent"
+run = "./scripts/authority-agent.sh list"
+
+[tasks."db:setup"]
+description = "Create the LXC container and initialize PostgreSQL through the agent"
+run = "./scripts/authority-agent.sh run _db:setup"
+
+[tasks."db:create"]
+description = "Create authority-db through the agent"
+run = "./scripts/authority-agent.sh run _db:create"
+
+[tasks."db:start"]
+description = "Start authority-db through the agent"
+run = "./scripts/authority-agent.sh run _db:start"
+
+[tasks."db:install"]
+description = "Install and initialize PostgreSQL through the agent"
+run = "./scripts/authority-agent.sh run _db:install"
+
+[tasks."db:migrate"]
+description = "Apply pending immutable SQL migrations through the agent"
+run = "./scripts/authority-agent.sh run _db:migrate"
+
+[tasks."db:status"]
+description = "Show LXC and PostgreSQL status through the agent"
+run = "./scripts/authority-agent.sh run _db:status"
+
+[tasks."db:verify"]
+description = "Verify the PostgreSQL role, database, SCRAM, and network settings"
+run = "./scripts/authority-agent.sh run _db:verify"
+
+[tasks."db:verify-schema"]
+description = "Verify migration checksums and module schemas"
+run = "./scripts/authority-agent.sh run _db:verify-schema"
+
+[tasks."db:diagnose"]
+description = "Collect detailed LXC startup diagnostics through the agent"
+run = "./scripts/authority-agent.sh run _db:diagnose"
+
+[tasks."db:reset-password"]
+description = "Apply the configured database password through the agent"
+run = "./scripts/authority-agent.sh run _db:reset-password"
+
+[tasks."db:stop"]
+description = "Stop authority-db through the agent"
+run = "./scripts/authority-agent.sh run _db:stop"
+
+# Interactive and destructive operations deliberately bypass the agent.
+[tasks."db:shell"]
+description = "Open a PostgreSQL administrator shell with direct sudo"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh shell"
+
+[tasks."db:destroy"]
+description = "Permanently delete authority-db with direct confirmation"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh destroy"
+
+[tasks."mesh:setup"]
+description = "Create and verify the two-node WireGuard LXC mesh through the agent"
+run = "./scripts/authority-agent.sh run _mesh:setup"
+
+[tasks."mesh:create"]
+description = "Create the two WireGuard LXC nodes through the agent"
+run = "./scripts/authority-agent.sh run _mesh:create"
+
+[tasks."mesh:start"]
+description = "Start the WireGuard LXC nodes and reconcile peer endpoints through the agent"
+run = "./scripts/authority-agent.sh run _mesh:start"
+
+[tasks."mesh:install"]
+description = "Install WireGuard and generate node keys through the agent"
+run = "./scripts/authority-agent.sh run _mesh:install"
+
+[tasks."mesh:configure"]
+description = "Configure the WireGuard peer pair through the agent"
+run = "./scripts/authority-agent.sh run _mesh:configure"
+
+[tasks."mesh:status"]
+description = "Show WireGuard node and handshake state through the agent"
+run = "./scripts/authority-agent.sh run _mesh:status"
+
+[tasks."mesh:verify"]
+description = "Verify encrypted connectivity and a WireGuard handshake"
+run = "./scripts/authority-agent.sh run _mesh:verify"
+
+[tasks."mesh:agent:install"]
+description = "Build and install the signed-grant network agent in the target LXC"
+run = "cargo build --offline -p authority-network-agent && ./scripts/authority-agent.sh run _mesh:agent-install"
+
+[tasks."mesh:agent:status"]
+description = "Show the target LXC network-agent status"
+run = "./scripts/authority-agent.sh run _mesh:agent-status"
+
+[tasks."mesh:stop"]
+description = "Stop the WireGuard LXC nodes through the agent"
+run = "./scripts/authority-agent.sh run _mesh:stop"
+
+[tasks."mesh:destroy"]
+description = "Permanently delete both WireGuard LXC nodes with direct confirmation"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh destroy"
+
+# Internal tasks are accepted only by the root agent. Running one directly
+# still passes through the sudo wrapper and therefore does not bypass auth.
+[tasks."_db:setup"]
+description = "Internal: create LXC and initialize PostgreSQL"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh setup"
+
+[tasks."_db:create"]
+description = "Internal: create authority-db"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh create"
+
+[tasks."_db:start"]
+description = "Internal: start authority-db"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh start"
+
+[tasks."_db:install"]
+description = "Internal: install and initialize PostgreSQL"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh install"
+
+[tasks."_db:migrate"]
+description = "Internal: apply pending immutable SQL migrations"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh migrate"
+
+[tasks."_db:status"]
+description = "Internal: show LXC and PostgreSQL status"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh status"
+
+[tasks."_db:verify"]
+description = "Internal: verify PostgreSQL security settings"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh verify"
+
+[tasks."_db:verify-schema"]
+description = "Internal: verify migration checksums and module schemas"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh verify-schema"
+
+[tasks."_db:diagnose"]
+description = "Internal: collect detailed LXC startup diagnostics"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh diagnose"
+
+[tasks."_db:reset-password"]
+description = "Internal: apply the configured database password"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh reset-password"
+
+[tasks."_db:stop"]
+description = "Internal: stop authority-db"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh stop"
+
+[tasks."_mesh:setup"]
+description = "Internal: create and verify the WireGuard LXC mesh"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh setup"
+
+[tasks."_mesh:create"]
+description = "Internal: create the WireGuard LXC nodes"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh create"
+
+[tasks."_mesh:start"]
+description = "Internal: start the WireGuard LXC nodes and reconcile peer endpoints"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh start"
+
+[tasks."_mesh:install"]
+description = "Internal: install WireGuard and generate node keys"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh install"
+
+[tasks."_mesh:configure"]
+description = "Internal: configure the WireGuard peer pair"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh configure"
+
+[tasks."_mesh:status"]
+description = "Internal: show WireGuard node and handshake state"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh status"
+
+[tasks."_mesh:verify"]
+description = "Internal: verify the WireGuard tunnel"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh verify"
+
+[tasks."_mesh:agent-install"]
+description = "Internal: install the network agent in the target LXC"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-install"
+
+[tasks."_mesh:agent-status"]
+description = "Internal: show the target LXC network-agent status"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-status"
+
+[tasks."_mesh:stop"]
+description = "Internal: stop the WireGuard LXC nodes"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh stop"
+
+[tasks."contracts:check"]
+description = "Validate contract inventory, locked digests, and conformance vectors"
+run = "python3 ./scripts/check-contracts.py && cargo test -p authority-contracts-model"
+
+[tasks."migrations:check"]
+description = "Validate immutable migrations and module boundaries"
+run = "python3 ./scripts/check-migrations.py"
+
+[tasks."rust:fmt"]
+description = "Format the Rust workspace"
+run = "cargo fmt --all"
+
+[tasks."rust:check"]
+description = "Compile all workspace targets"
+run = "cargo check --workspace --all-targets"
+
+[tasks."control-plane:run"]
+description = "Apply migrations and run the Passkey control plane"
+depends = ["db:migrate"]
+run = "./scripts/run-control-plane.sh"
+
+[tasks."issuer:run"]
+description = "Run the isolated short-lived SSH credential issuer"
+run = "./scripts/run-credential-issuer.sh"
+
+[tasks."node-agent:run"]
+description = "Run the local SSH key and certificate agent"
+run = "./scripts/run-node-agent.sh"
+
+[tasks."poc:run"]
+description = "Run the complete Passkey-to-SSH-certificate proof of concept"
+depends = ["db:migrate"]
+run = "./scripts/run-poc.sh"
+
+[tasks."poc:e2e"]
+description = "Run the complete PoC through headless Chromium and a virtual Passkey"
+depends = ["db:migrate"]
+run = "./scripts/run-poc-e2e.sh"
+
+[tasks.test]
+description = "Run contract checks and all Rust tests"
+depends = ["contracts:check", "migrations:check"]
+run = "cargo test --workspace"

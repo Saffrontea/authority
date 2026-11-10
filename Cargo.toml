@@ -1,0 +1,41 @@
+[workspace]
+members = [
+  "bins/control-plane",
+  "bins/credential-issuer",
+  "bins/node-agent",
+  "bins/network-agent",
+  "crates/contracts-model",
+  "crates/credential-crypto-openssl",
+  "crates/issuer-core",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.98"
+
+[workspace.dependencies]
+authority-contracts-model = { path = "crates/contracts-model" }
+authority-credential-crypto-openssl = { path = "crates/credential-crypto-openssl" }
+authority-issuer-core = { path = "crates/issuer-core" }
+axum = "0.8.9"
+openssl = { version = "0.10.81", features = ["vendored"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "json"] }
+ssh-key = { version = "0.6.7", features = ["ed25519", "getrandom"] }
+thiserror = "2.0.20"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower-http = { version = "0.7.1", features = ["cors", "fs", "trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.29.2", features = ["serde", "v4"] }
+webauthn-rs = "0.6.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

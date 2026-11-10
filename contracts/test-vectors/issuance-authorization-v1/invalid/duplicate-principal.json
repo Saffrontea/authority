@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "issuer": "domain-authority:example",
+  "domain_id": "domain_example",
+  "subject_user_id": "user_01",
+  "device_id": "device_01",
+  "target_node_id": "node_01",
+  "ssh_public_key_fingerprint": "SHA256:AbCdEf0123456789_-",
+  "principals": ["deploy", "deploy"],
+  "policy_id": "policy_01",
+  "nonce": "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm",
+  "issued_at": 1794326400,
+  "not_before": 1794326400,
+  "expires_at": 1794326700,
+  "audience": "credential-issuer"
+}

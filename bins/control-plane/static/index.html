@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Authority PoC</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #11130f; color: #edf0e8; }
+    body { max-width: 760px; margin: 0 auto; padding: 48px 24px; }
+    h1 { font-size: 2.2rem; margin-bottom: 8px; }
+    h2 { font-size: 1.15rem; }
+    p { color: #aeb6a8; }
+    section { background: #1a1e18; border: 1px solid #343b30; border-radius: 14px; padding: 22px; margin: 20px 0; }
+    label { display: block; margin: 12px 0; color: #cbd1c6; }
+    input { box-sizing: border-box; width: 100%; margin-top: 6px; padding: 10px 12px; border: 1px solid #46503f; border-radius: 8px; background: #10130f; color: inherit; }
+    button { margin-top: 8px; padding: 10px 16px; border: 0; border-radius: 8px; background: #b9e46f; color: #18200d; font-weight: 700; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    pre { min-height: 48px; overflow-wrap: anywhere; white-space: pre-wrap; color: #b9e46f; }
+  </style>
+</head>
+<body>
+  <h1>Authority</h1>
+  <p>Passkey-native access control proof of concept.</p>
+  <p><small>No local authenticator? In Chromium DevTools, open <strong>More tools → WebAuthn</strong>, enable the virtual authenticator environment, and add a CTAP2 internal authenticator with user verification.</small></p>
+
+  <section id="setup">
+    <h2>Bootstrap identity</h2>
+    <label>Username <input id="new-username" autocomplete="username" value="demo"></label>
+    <label>Display name <input id="display-name" autocomplete="name" value="Saffron"></label>
+    <button id="register">Create user and Passkey</button>
+  </section>
+
+  <section>
+    <h2>Sign in</h2>
+    <label>Username <input id="username" autocomplete="username" value="demo"></label>
+    <button id="login">Sign in with Passkey</button>
+  </section>
+
+  <section>
+    <h2>Result</h2>
+    <pre id="result">Ready.</pre>
+  </section>
+
+  <script>
+    const result = document.querySelector('#result');
+    const pageParameters = new URLSearchParams(location.search);
+    const issuerOrigin = pageParameters.get('issuer_origin') ?? `${location.protocol}//${location.hostname}:3001`;
+    const nodeAgentOrigin = pageParameters.get('node_agent_origin') ?? `${location.protocol}//${location.hostname}:3002`;
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    if (fragment.has('bootstrap')) {
+      sessionStorage.setItem('authority-bootstrap', fragment.get('bootstrap'));
+      history.replaceState(null, '', location.pathname + location.search);
+    }
+    const bootstrap = sessionStorage.getItem('authority-bootstrap');
+    const networkAgentOrigin = pageParameters.get('network_agent_origin');
+    if (!bootstrap) document.querySelector('#setup').hidden = true;
+
+    const decode = value => {
+      const base64 = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
+      return Uint8Array.from(atob(base64), char => char.charCodeAt(0));
+    };
+    const encode = value => btoa(String.fromCharCode(...new Uint8Array(value)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    function creationOptions(json) {
+      if (PublicKeyCredential.parseCreationOptionsFromJSON) {
+        return PublicKeyCredential.parseCreationOptionsFromJSON(json);
+      }
+      return {
+        ...json,
+        challenge: decode(json.challenge),
+        user: { ...json.user, id: decode(json.user.id) },
+        excludeCredentials: json.excludeCredentials?.map(item => ({ ...item, id: decode(item.id) })),
+      };
+    }
+
+    function requestOptions(json) {
+      if (PublicKeyCredential.parseRequestOptionsFromJSON) {
+        return PublicKeyCredential.parseRequestOptionsFromJSON(json);
+      }
+      return {
+        ...json,
+        challenge: decode(json.challenge),
+        allowCredentials: json.allowCredentials?.map(item => ({ ...item, id: decode(item.id) })),
+      };
+    }
+
+    function credentialJson(credential) {
+      if (credential.toJSON) return credential.toJSON();
+      const response = credential.response;
+      const json = {
+        id: credential.id,
+        rawId: encode(credential.rawId),
+        type: credential.type,
+        authenticatorAttachment: credential.authenticatorAttachment,
+        clientExtensionResults: credential.getClientExtensionResults(),
+        response: { clientDataJSON: encode(response.clientDataJSON) },
+      };
+      if ('attestationObject' in response) {
+        json.response.attestationObject = encode(response.attestationObject);
+        json.response.transports = response.getTransports?.() ?? [];
+      } else {
+        json.response.authenticatorData = encode(response.authenticatorData);
+        json.response.signature = encode(response.signature);
+        json.response.userHandle = response.userHandle ? encode(response.userHandle) : null;
+      }
+      return json;
+    }
+
+    async function api(path, body, headers = {}) {
+      const response = await fetch(path, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+      });
+      const value = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`${response.status} ${value.error ?? response.statusText}`);
+      return value;
+    }
+
+    async function getJson(path) {
+      const response = await fetch(path);
+      const value = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(`${response.status} ${value.error ?? response.statusText}`);
+      return value;
+    }
+
+    async function busy(button, operation) {
+      button.disabled = true;
+      result.textContent = 'Waiting for authenticator…';
+      try { await operation(); } catch (error) { result.textContent = error.message; }
+      finally { button.disabled = false; }
+    }
+
+    document.querySelector('#register').addEventListener('click', event => busy(event.currentTarget, async () => {
+      const headers = { 'x-authority-bootstrap-token': bootstrap };
+      const username = document.querySelector('#new-username').value;
+      const user = await api('/v1/bootstrap/users', {
+        username,
+        display_name: document.querySelector('#display-name').value,
+      }, headers);
+      const start = await api('/v1/passkeys/registration/start', { user_id: user.user_id }, headers);
+      const credential = await navigator.credentials.create({ publicKey: creationOptions(start.options.publicKey) });
+      const finish = await api('/v1/passkeys/registration/finish', {
+        challenge_id: start.challenge_id,
+        credential: credentialJson(credential),
+      });
+      const wireguardPublicKey = pageParameters.get('wireguard_public_key');
+      const access = await api('/v1/bootstrap/demo-access', {
+        user_id: user.user_id,
+        wireguard_public_key: wireguardPublicKey,
+      }, headers);
+      sessionStorage.setItem('authority-demo-access', JSON.stringify(access));
+      document.querySelector('#username').value = username;
+      result.textContent = `Passkey registered.\nuser=${user.user_id}\ncredential=${finish.credential_id}\ntarget=${access.target_node_id}`;
+    }));
+
+    document.querySelector('#login').addEventListener('click', event => busy(event.currentTarget, async () => {
+      const start = await api('/v1/passkeys/authentication/start', {
+        username: document.querySelector('#username').value,
+      });
+      const credential = await navigator.credentials.get({ publicKey: requestOptions(start.options.publicKey) });
+      const session = await api('/v1/passkeys/authentication/finish', {
+        challenge_id: start.challenge_id,
+        credential: credentialJson(credential),
+      });
+      sessionStorage.setItem('authority-session', session.session_token);
+      const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
+      if (!access) {
+        result.textContent = `Authenticated.\nuser=${session.user_id}\nsession expires=${new Date(session.expires_at * 1000).toISOString()}`;
+        return;
+      }
+      const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
+      const envelope = await api('/v1/issuance-authorizations', {
+        device_id: access.device_id,
+        target_node_id: access.target_node_id,
+        ssh_public_key_fingerprint: sshKey.fingerprint,
+      }, { authorization: `Bearer ${session.session_token}` });
+      const issued = await api(`${issuerOrigin}/v1/ssh-certificates`, {
+        authorization: envelope,
+        ssh_public_key: sshKey.public_key,
+      });
+      const installed = await api(`${nodeAgentOrigin}/v1/ssh-certificate`, {
+        certificate: issued.certificate,
+      });
+      let networkResult = '';
+      if (wireguardPublicKey && networkAgentOrigin) {
+        const grant = await api('/v1/network-access-grants', {
+          device_id: access.device_id,
+          target_node_id: access.target_node_id,
+          wireguard_public_key: wireguardPublicKey,
+          mesh_address: '10.77.0.1',
+        }, { authorization: `Bearer ${session.session_token}` });
+        const applied = await api(`${networkAgentOrigin}/v1/network-grants`, grant);
+        networkResult = `\nWireGuard peer applied.\npeer=${applied.peer_public_key}\nallowed=${applied.allowed_ip}\nnetwork expires=${new Date(applied.expires_at * 1000).toISOString()}`;
+      }
+      result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}${networkResult}\n\n${issued.certificate}`;
+    }));
+  </script>
+</body>
+</html>

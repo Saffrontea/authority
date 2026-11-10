@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/network-access-grant-v1.schema.json",
+  "title": "NetworkAccessGrantV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version", "issuer", "domain_id", "subject_user_id", "device_id",
+    "target_node_id", "wireguard_public_key", "mesh_address", "policy_id",
+    "nonce", "issued_at", "not_before", "expires_at", "audience"
+  ],
+  "properties": {
+    "version": { "const": "1" },
+    "issuer": { "$ref": "#/$defs/identifier" },
+    "domain_id": { "$ref": "#/$defs/identifier" },
+    "subject_user_id": { "$ref": "#/$defs/identifier" },
+    "device_id": { "$ref": "#/$defs/identifier" },
+    "target_node_id": { "$ref": "#/$defs/identifier" },
+    "wireguard_public_key": {
+      "type": "string",
+      "minLength": 44,
+      "maxLength": 44,
+      "pattern": "^[A-Za-z0-9+/]{43}=$"
+    },
+    "mesh_address": { "type": "string", "format": "ipv4" },
+    "policy_id": { "$ref": "#/$defs/identifier" },
+    "nonce": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "issued_at": { "type": "integer" },
+    "not_before": { "type": "integer" },
+    "expires_at": { "type": "integer" },
+    "audience": { "$ref": "#/$defs/identifier" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    }
+  }
+}

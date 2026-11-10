@@ -1,0 +1,52 @@
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
+use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
+use ssh_key::PrivateKey;
+
+#[derive(Clone)]
+pub struct AppState(Arc<Inner>);
+
+struct Inner {
+    verifier: OpenSslEd25519Verifier,
+    ca_key: PrivateKey,
+    consumed_nonces: Mutex<HashSet<String>>,
+    next_serial: AtomicU64,
+}
+
+impl AppState {
+    pub fn new(verifier: OpenSslEd25519Verifier, ca_key: PrivateKey, initial_serial: u64) -> Self {
+        Self(Arc::new(Inner {
+            verifier,
+            ca_key,
+            consumed_nonces: Mutex::new(HashSet::new()),
+            next_serial: AtomicU64::new(initial_serial),
+        }))
+    }
+
+    pub fn verifier(&self) -> &OpenSslEd25519Verifier {
+        &self.0.verifier
+    }
+
+    pub fn ca_key(&self) -> &PrivateKey {
+        &self.0.ca_key
+    }
+
+    pub fn consume_nonce(&self, nonce: String) -> Result<bool, String> {
+        Ok(self
+            .0
+            .consumed_nonces
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(nonce))
+    }
+
+    pub fn next_serial(&self) -> u64 {
+        self.0.next_serial.fetch_add(1, Ordering::Relaxed)
+    }
+}

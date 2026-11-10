@@ -1,0 +1,20 @@
+{
+  "artifacts": {
+    "artifacts/network-access-grant-v1.schema.json": {
+      "version": 1,
+      "sha256": "7059469f04f89f6e77baedf6a2f431fda316f634292b25e840f08d73932ea520"
+    },
+    "artifacts/issuance-authorization-v1.schema.json": {
+      "version": 1,
+      "sha256": "6cbc0ba82281028a4aabd97286ce9dfd77794263df234f84cafeb3cea08e354f"
+    },
+    "artifacts/signed-issuance-authorization-v1.schema.json": {
+      "version": 1,
+      "sha256": "c6bd0132ff78b3139514dc1f528068d4e670763c99b14bd0fb6ba614c1e7766f"
+    },
+    "artifacts/signed-network-access-grant-v1.schema.json": {
+      "version": 1,
+      "sha256": "1ab47a205e8336e85ec495f89b51b193354a61519bab309d34f0b09011df7927"
+    }
+  }
+}

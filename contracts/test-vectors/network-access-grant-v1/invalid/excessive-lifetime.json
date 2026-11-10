@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "issuer": "domain-authority:example",
+  "domain_id": "domain_example",
+  "subject_user_id": "user_01",
+  "device_id": "device_01",
+  "target_node_id": "node_01",
+  "wireguard_public_key": "fX5OQRjDxV9YDJAcmAiiLINEuu1d2Bju+Bfh5SlAlX4=",
+  "mesh_address": "10.77.0.1",
+  "policy_id": "policy_01",
+  "nonce": "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm",
+  "issued_at": 1794326400,
+  "not_before": 1794326400,
+  "expires_at": 1794327001,
+  "audience": "node-agent"
+}

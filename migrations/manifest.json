@@ -1,0 +1,13 @@
+{
+  "migrations": {
+    "0001_initial.sql": {
+      "sha256": "e7c3dff6ae34213bc6c36694d145a6a0459868f2aecf01fef1a16c7b88642378"
+    },
+    "0002_identity_username.sql": {
+      "sha256": "6927bece147873f4000f881c37dac6f3c56c629190051f8a87daa9d6d6e40164"
+    },
+    "0003_webauthn_passkey_state.sql": {
+      "sha256": "9e58200ab36b4fddbae204672b88f32c75ff1c238a82ae77e72e8206c73cace3"
+    }
+  }
+}
