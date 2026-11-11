@@ -200,29 +200,32 @@
       return api(path, body, await deviceProofHeaders(sessionToken, action, bindings));
     }
 
-    window.authorityPrepareNetworkGrant = async function () {
+    window.authorityPrepareAccessAuthorization = async function () {
       const sessionToken = sessionStorage.getItem('authority-session');
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
       if (!sessionToken || !access || !wireguardPublicKey) {
-        throw new Error('Network grant prerequisites are missing.');
+        throw new Error('Access authorization prerequisites are missing.');
       }
-      const networkRequest = {
+      const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
+      const request = {
         device_id: access.device_id,
         target_node_id: access.target_node_id,
+        ssh_public_key_fingerprint: sshKey.fingerprint,
         wireguard_public_key: wireguardPublicKey,
       };
       const bindings = [
-        access.device_id, access.target_node_id, wireguardPublicKey,
+        access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey,
       ];
       return {
-        body: networkRequest,
-        headers: await deviceProofHeaders(sessionToken, 'network.grant', bindings),
+        body: request,
+        headers: await deviceProofHeaders(sessionToken, 'access.authorize', bindings),
       };
     };
 
     window.authorityRequestNetworkGrant = async function () {
-      const prepared = await window.authorityPrepareNetworkGrant();
-      return api('/v1/network-access-grants', prepared.body, prepared.headers);
+      const prepared = await window.authorityPrepareAccessAuthorization();
+      const authorization = await api('/v1/access-authorizations', prepared.body, prepared.headers);
+      return authorization.network_grant;
     };
 
     async function getJson(path) {
@@ -289,17 +292,31 @@
       });
       sessionStorage.setItem('authority-session', session.session_token);
       const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
-      const sshRequest = {
-        device_id: access.device_id,
-        target_node_id: access.target_node_id,
-        ssh_public_key_fingerprint: sshKey.fingerprint,
-      };
-      const envelope = await authorizedApi(
-        '/v1/issuance-authorizations', sshRequest, session.session_token, 'ssh.issue',
-        [access.device_id, access.target_node_id, sshKey.fingerprint],
-      );
+      let authorization;
+      if (wireguardPublicKey) {
+        const accessRequest = {
+          device_id: access.device_id,
+          target_node_id: access.target_node_id,
+          ssh_public_key_fingerprint: sshKey.fingerprint,
+          wireguard_public_key: wireguardPublicKey,
+        };
+        authorization = await authorizedApi(
+          '/v1/access-authorizations', accessRequest, session.session_token, 'access.authorize',
+          [access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey],
+        );
+      } else {
+        const sshRequest = {
+          device_id: access.device_id,
+          target_node_id: access.target_node_id,
+          ssh_public_key_fingerprint: sshKey.fingerprint,
+        };
+        authorization = { ssh_authorization: await authorizedApi(
+          '/v1/issuance-authorizations', sshRequest, session.session_token, 'ssh.issue',
+          [access.device_id, access.target_node_id, sshKey.fingerprint],
+        ) };
+      }
       const issued = await api(`${issuerOrigin}/v1/ssh-certificates`, {
-        authorization: envelope,
+        authorization: authorization.ssh_authorization,
         ssh_public_key: sshKey.public_key,
       });
       const installed = await api(`${nodeAgentOrigin}/v1/ssh-certificate`, {
@@ -307,9 +324,8 @@
       });
       let networkResult = '';
       if (wireguardPublicKey && networkAgentOrigin) {
-        const grant = await window.authorityRequestNetworkGrant();
-        const applied = await api(`${networkAgentOrigin}/v1/network-grants`, grant);
-        networkResult = `\nWireGuard peer applied.\npeer=${applied.peer_public_key}\nallowed=${applied.allowed_ip}\nnetwork expires=${new Date(applied.expires_at * 1000).toISOString()}`;
+        const applied = await api(`${networkAgentOrigin}/v1/network-grants`, authorization.network_grant);
+        networkResult = `\ndecision=${authorization.decision_id}\nWireGuard peer applied.\npeer=${applied.peer_public_key}\nallowed=${applied.allowed_ip}\nnetwork expires=${new Date(applied.expires_at * 1000).toISOString()}`;
       }
       result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}${networkResult}\n\n${issued.certificate}`;
     }));

@@ -70,8 +70,8 @@ done
 # build; an empty unauthenticated request reaches it and returns 401.
 grant_probe_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --request POST --header 'content-type: application/json' \
-    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
-    "${AUTHORITY_POC_CONTROL_ORIGIN}/v1/network-access-grants")"
+    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","ssh_public_key_fingerprint":"SHA256:test","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
+    "${AUTHORITY_POC_CONTROL_ORIGIN}/v1/access-authorizations")"
 if [[ "${grant_probe_status}" != "401" ]]; then
     echo "poc:e2e: expected current grant route (401), got HTTP ${grant_probe_status}" >&2
     echo "poc:e2e: stop any existing poc:run/control-plane process and retry" >&2

@@ -160,7 +160,7 @@ printf '%s\n%s\n' "${registered}" "${issued}"
 
 if [[ -n "${wireguard_public_key}" ]]; then
     prepared="$(webdriver POST "/session/${session}/execute/async" \
-        '{"script":"const done = arguments[0]; window.authorityPrepareNetworkGrant().then(prepared => done({prepared})).catch(error => done({error: error.message}));","args":[]}')"
+        '{"script":"const done = arguments[0]; window.authorityPrepareAccessAuthorization().then(prepared => done({prepared})).catch(error => done({error: error.message}));","args":[]}')"
     prepare_error="$(jq -r '.error // empty' <<<"${prepared}")"
     [[ -z "${prepare_error}" ]] || die "network grant proof failed: ${prepare_error}"
     grant_body="$(jq -c '.prepared.body' <<<"${prepared}")"
@@ -173,7 +173,7 @@ if [[ -n "${wireguard_public_key}" ]]; then
     token_only_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
         --request POST --header 'content-type: application/json' \
         --header "authorization: ${authorization}" --data "${grant_body}" \
-        "${control_origin}/v1/network-access-grants")"
+        "${control_origin}/v1/access-authorizations")"
     [[ "${token_only_status}" == "401" ]] || die "token-only request returned HTTP ${token_only_status}"
 
     grant_status="$(curl --silent --output "${grant_response}" --write-out '%{http_code}' \
@@ -182,9 +182,15 @@ if [[ -n "${wireguard_public_key}" ]]; then
         --header "x-authority-timestamp: ${timestamp}" \
         --header "x-authority-nonce: ${nonce}" \
         --header "x-authority-device-signature: ${signature}" \
-        --data "${grant_body}" "${control_origin}/v1/network-access-grants")"
+        --data "${grant_body}" "${control_origin}/v1/access-authorizations")"
     [[ "${grant_status}" == "200" ]] || die "device-bound request returned HTTP ${grant_status}: $(<"${grant_response}")"
-    grant="$(<"${grant_response}")"
+    decision="$(<"${grant_response}")"
+    grant="$(jq -c '.network_grant' <<<"${decision}")"
+    decision_id="$(jq -r '.decision_id' <<<"${decision}")"
+    ssh_decision_id="$(jq -r '.ssh_authorization.authorization.nonce' <<<"${decision}")"
+    network_decision_id="$(jq -r '.network_grant.grant.nonce' <<<"${decision}")"
+    [[ "${decision_id}" == "${ssh_decision_id}" && "${decision_id}" == "${network_decision_id}" ]] ||
+        die 'SSH and WireGuard artifacts do not share the signed decision id'
 
     replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
         --request POST --header 'content-type: application/json' \
@@ -192,10 +198,10 @@ if [[ -n "${wireguard_public_key}" ]]; then
         --header "x-authority-timestamp: ${timestamp}" \
         --header "x-authority-nonce: ${nonce}" \
         --header "x-authority-device-signature: ${signature}" \
-        --data "${grant_body}" "${control_origin}/v1/network-access-grants")"
+        --data "${grant_body}" "${control_origin}/v1/access-authorizations")"
     rm -f "${grant_response}"
     [[ "${replay_status}" == "401" ]] || die "replayed device proof returned HTTP ${replay_status}"
-    printf 'Session PoP: token-only denied, signed request accepted, replay denied\n'
+    printf 'Unified decision %s: token-only denied, signed request accepted, replay denied\n' "${decision_id}"
     applied="$(json_post "${network_agent_origin}/v1/network-grants" "${grant}")"
     printf 'WireGuard peer applied.\npeer=%s\nallowed=%s\nexpires=%s\n' \
         "$(jq -r '.peer_public_key' <<<"${applied}")" \

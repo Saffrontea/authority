@@ -61,6 +61,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/session", get(get_session))
         .route("/v1/issuance-authorizations", post(issue_authorization))
         .route("/v1/network-access-grants", post(issue_network_grant))
+        .route(
+            "/v1/access-authorizations",
+            post(issue_access_authorization),
+        )
         .with_state(state)
 }
 
@@ -764,6 +768,134 @@ struct IssueNetworkGrantRequest {
     device_id: Uuid,
     target_node_id: Uuid,
     wireguard_public_key: String,
+}
+
+#[derive(Deserialize)]
+struct IssueAccessAuthorizationRequest {
+    device_id: Uuid,
+    target_node_id: Uuid,
+    ssh_public_key_fingerprint: String,
+    wireguard_public_key: String,
+}
+
+#[derive(Serialize)]
+struct AccessAuthorizationResponse {
+    decision_id: String,
+    ssh_authorization: SignedIssuanceAuthorizationV1,
+    network_grant: SignedNetworkAccessGrantV1,
+}
+
+async fn issue_access_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<IssueAccessAuthorizationRequest>,
+) -> Result<Json<AccessAuthorizationResponse>, ApiError> {
+    let bindings = vec![
+        request.device_id.to_string(),
+        request.target_node_id.to_string(),
+        request.ssh_public_key_fingerprint.clone(),
+        request.wireguard_public_key.clone(),
+    ];
+    let session = authenticated_session(&state, &headers, "access.authorize", &bindings)?;
+    if request.device_id != session.device_id {
+        return Err(ApiError::forbidden("session_device_mismatch"));
+    }
+    let issued_at = unix_timestamp()?;
+    let decision = access_policy::authorize(
+        state.pool(),
+        access_policy::request(
+            state.domain_id(),
+            session.user_id,
+            session.device_id,
+            request.target_node_id,
+            issued_at,
+        ),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let Some(decision) = decision else {
+        record_access_decision(&state, session.user_id, request.target_node_id, "deny").await?;
+        return Err(ApiError::forbidden("policy_denied"));
+    };
+    if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
+        return Err(ApiError::forbidden("wireguard_key_mismatch"));
+    }
+
+    // A shared nonce is the cryptographic decision identifier: both signed
+    // adapter contracts bind it, the policy, subject, device, target, and time.
+    let decision_id = Uuid::new_v4().simple().to_string();
+    let common_issuer = format!("domain-authority:{}", state.domain_id());
+    let common_domain = state.domain_id().to_string();
+    let common_subject = session.user_id.to_string();
+    let common_device = request.device_id.to_string();
+    let common_target = request.target_node_id.to_string();
+    let common_policy = decision.policy_id.to_string();
+    let ssh_authorization = sign_authorization(
+        IssuanceAuthorizationV1 {
+            version: "1".to_owned(),
+            issuer: common_issuer.clone(),
+            domain_id: common_domain.clone(),
+            subject_user_id: common_subject.clone(),
+            device_id: common_device.clone(),
+            target_node_id: common_target.clone(),
+            ssh_public_key_fingerprint: request.ssh_public_key_fingerprint,
+            principals: vec![decision.ssh_principal],
+            policy_id: common_policy.clone(),
+            nonce: decision_id.clone(),
+            issued_at,
+            not_before: issued_at,
+            expires_at: issued_at + 300,
+            audience: "credential-issuer".to_owned(),
+        },
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let network_grant = sign_network_grant(
+        NetworkAccessGrantV1 {
+            version: "1".to_owned(),
+            issuer: common_issuer,
+            domain_id: common_domain,
+            subject_user_id: common_subject,
+            device_id: common_device,
+            target_node_id: common_target,
+            wireguard_public_key: request.wireguard_public_key,
+            mesh_address: decision.device_mesh_address,
+            policy_id: common_policy,
+            nonce: decision_id.clone(),
+            issued_at,
+            not_before: issued_at,
+            expires_at: issued_at + state.network_grant_ttl_seconds(),
+            audience: "node-agent".to_owned(),
+        },
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    record_access_decision(&state, session.user_id, request.target_node_id, "allow").await?;
+    Ok(Json(AccessAuthorizationResponse {
+        decision_id,
+        ssh_authorization,
+        network_grant,
+    }))
+}
+
+async fn record_access_decision(
+    state: &AppState,
+    user_id: Uuid,
+    target_node_id: Uuid,
+    decision: &str,
+) -> Result<(), ApiError> {
+    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
+    record_audit(
+        &mut transaction,
+        state.domain_id(),
+        user_id,
+        "access.authorize",
+        "node",
+        target_node_id,
+        decision,
+    )
+    .await?;
+    transaction.commit().await.map_err(ApiError::internal)
 }
 
 async fn issue_network_grant(
