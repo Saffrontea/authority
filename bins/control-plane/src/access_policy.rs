@@ -16,11 +16,14 @@ pub async fn authorize(
                 policy.ssh_principal, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
                 client.status = 'active' AS device_active, \
-                target.status = 'active' AS target_active, client.wireguard_public_key \
+                target.status = 'active' AND target_device.status = 'active' \
+                    AND target_device.domain_id = policy.domain_id AS target_active, \
+                client.wireguard_public_key \
                 , host(client.mesh_address) AS device_mesh_address \
          FROM policy.access_policies AS policy \
          JOIN device.devices AS client ON client.id = $3 \
          JOIN device.nodes AS target ON target.id = $4 \
+         JOIN device.devices AS target_device ON target_device.id = target.device_id \
          WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
            AND policy.target_node_id = $4 AND policy.enabled \
            AND policy.revoked_at IS NULL \
