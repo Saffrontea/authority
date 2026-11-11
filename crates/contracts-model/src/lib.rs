@@ -82,6 +82,74 @@ pub struct AccessAuthorizationBundleV1 {
     pub network_grant: SignedNetworkAccessGrantV1,
 }
 
+/// Auditable explanation of one policy decision and its adapter projections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyDecisionEvaluatedV1 {
+    pub decision_id: String,
+    pub intent: PolicyIntentV1,
+    pub required_capabilities: Vec<PolicyCapabilityV1>,
+    pub policy_sources: Vec<PolicySourceV1>,
+    pub adapter_grants: Vec<AdapterGrantV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyIntentV1 {
+    pub outcomes: Vec<PolicyOutcomeV1>,
+    pub route: PolicyRouteV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PolicyOutcomeV1 {
+    #[serde(rename = "ssh")]
+    Ssh,
+    #[serde(rename = "network.reachability")]
+    NetworkReachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyRouteV1 {
+    #[serde(rename = "direct")]
+    Direct,
+    #[serde(rename = "mesh_required")]
+    MeshRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PolicyCapabilityV1 {
+    #[serde(rename = "mesh.join")]
+    MeshJoin,
+    #[serde(rename = "network.reach")]
+    NetworkReach,
+    #[serde(rename = "ssh.issue")]
+    SshIssue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySourceV1 {
+    pub capability: PolicyCapabilityV1,
+    pub policy_id: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdapterGrantKindV1 {
+    #[serde(rename = "ssh.certificate")]
+    SshCertificate,
+    #[serde(rename = "wireguard.peer")]
+    WireGuardPeer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterGrantV1 {
+    pub kind: AdapterGrantKindV1,
+    pub audience: String,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContractError {
     #[error("unsupported contract version")]
@@ -98,6 +166,8 @@ pub enum ContractError {
     InvalidTimeRange,
     #[error("credential lifetime exceeds {MAX_TTL_SECONDS} seconds")]
     LifetimeTooLong,
+    #[error("policy decision trace is incomplete or inconsistent")]
+    InvalidPolicyDecision,
     #[error("signature algorithm must be Ed25519")]
     InvalidSignatureAlgorithm,
     #[error("signature must be an unpadded base64url value")]
@@ -371,6 +441,44 @@ impl AccessAuthorizationBundleV1 {
         }
         if ssh.not_before != network.not_before {
             return Err(ContractError::BundleMismatch("not_before"));
+        }
+        Ok(())
+    }
+}
+
+impl PolicyDecisionEvaluatedV1 {
+    /// Validates completeness and one source for every required capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] when the decision trace cannot explain its
+    /// required capability set or adapter projections.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        let outcomes: HashSet<_> = self.intent.outcomes.iter().collect();
+        let required: HashSet<_> = self.required_capabilities.iter().collect();
+        let sourced: HashSet<_> = self
+            .policy_sources
+            .iter()
+            .map(|source| &source.capability)
+            .collect();
+        if !valid_identifier(&self.decision_id)
+            || outcomes.is_empty()
+            || outcomes.len() != self.intent.outcomes.len()
+            || required.is_empty()
+            || required.len() != self.required_capabilities.len()
+            || required != sourced
+            || sourced.len() != self.policy_sources.len()
+            || self
+                .policy_sources
+                .iter()
+                .any(|source| !valid_identifier(&source.policy_id) || source.revision <= 0)
+            || self.adapter_grants.is_empty()
+            || self
+                .adapter_grants
+                .iter()
+                .any(|grant| !valid_identifier(&grant.audience) || grant.expires_at <= 0)
+        {
+            return Err(ContractError::InvalidPolicyDecision);
         }
         Ok(())
     }

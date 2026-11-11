@@ -1,0 +1,10 @@
+{
+  "decision_id": "invalid-decision",
+  "intent": {
+    "outcomes": ["ssh"],
+    "route": "mesh_required"
+  },
+  "required_capabilities": ["ssh-over-wireguard"],
+  "policy_sources": [],
+  "adapter_grants": []
+}

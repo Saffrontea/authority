@@ -1,8 +1,10 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{
-    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
-    SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, IssuanceAuthorizationV1,
+    NetworkAccessGrantV1, PolicyCapabilityV1, PolicyDecisionEvaluatedV1, PolicyIntentV1,
+    PolicyOutcomeV1, PolicyRouteV1, PolicySourceV1, SignedIssuanceAuthorizationV1,
+    SignedNetworkAccessGrantV1,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{
@@ -804,6 +806,7 @@ async fn issue_authorization(
     let policy_id = policy_reference(&decision.decision);
     let ssh_principal = decision
         .ssh_principal
+        .clone()
         .ok_or_else(|| ApiError::internal("SSH decision has no principal binding"))?;
     let authorization = IssuanceAuthorizationV1 {
         version: "1".to_owned(),
@@ -824,14 +827,21 @@ async fn issue_authorization(
     let envelope = sign_authorization(authorization, state.signer()).map_err(ApiError::internal)?;
 
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    record_audit(
+    record_policy_allow(
         &mut transaction,
-        state.domain_id(),
-        session.user_id,
-        "issuance.authorize",
-        "node",
-        request.target_node_id,
-        "allow",
+        PolicyAuditContext {
+            domain_id: state.domain_id(),
+            actor_id: session.user_id,
+            action: "issuance.authorize",
+            target_node_id: request.target_node_id,
+        },
+        &decision,
+        &envelope.authorization.nonce,
+        vec![AdapterGrantV1 {
+            kind: AdapterGrantKindV1::SshCertificate,
+            audience: envelope.authorization.audience.clone(),
+            expires_at: envelope.authorization.expires_at,
+        }],
     )
     .await?;
     transaction.commit().await.map_err(ApiError::internal)?;
@@ -889,6 +899,7 @@ async fn issue_access_authorization(
             request.target_node_id,
             "deny",
             None,
+            None,
         )
         .await?;
         return Err(ApiError::forbidden("policy_denied"));
@@ -903,6 +914,7 @@ async fn issue_access_authorization(
         session.user_id,
         request.target_node_id,
         "allow",
+        Some(&decision),
         Some(&response),
     )
     .await?;
@@ -984,20 +996,29 @@ async fn record_access_decision(
     user_id: Uuid,
     target_node_id: Uuid,
     decision: &str,
+    evaluated: Option<&access_policy::AuthorizedAccess>,
     authorization: Option<&AccessAuthorizationBundleV1>,
 ) -> Result<(), ApiError> {
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    let payload = authorization.map_or_else(
-        || json!({ "reason": "no_applicable_policy" }),
-        |bundle| {
-            json!({
-                "decision_id": bundle.decision_id,
-                "policy": bundle.ssh_authorization.authorization.policy_id,
-                "ssh_expires_at": bundle.ssh_authorization.authorization.expires_at,
-                "network_expires_at": bundle.network_grant.grant.expires_at,
-            })
-        },
-    );
+    let payload = match authorization.zip(evaluated) {
+        Some((bundle, evaluated)) => policy_decision_payload(
+            evaluated,
+            &bundle.decision_id,
+            vec![
+                AdapterGrantV1 {
+                    kind: AdapterGrantKindV1::SshCertificate,
+                    audience: bundle.ssh_authorization.authorization.audience.clone(),
+                    expires_at: bundle.ssh_authorization.authorization.expires_at,
+                },
+                AdapterGrantV1 {
+                    kind: AdapterGrantKindV1::WireGuardPeer,
+                    audience: bundle.network_grant.grant.audience.clone(),
+                    expires_at: bundle.network_grant.grant.expires_at,
+                },
+            ],
+        )?,
+        None => json!({ "reason": "no_applicable_policy" }),
+    };
     sqlx::query(
         "INSERT INTO audit.events \
          (domain_id, actor_type, actor_id, action, target_type, target_id, decision, reason, payload) \
@@ -1008,11 +1029,12 @@ async fn record_access_decision(
     .bind(target_node_id.to_string())
     .bind(decision)
     .bind((decision == "deny").then_some("no_applicable_policy"))
-    .bind(payload)
+    .bind(&payload)
     .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
     if let Some(bundle) = authorization {
+        insert_decision_outbox(&mut transaction, &bundle.decision_id, &payload).await?;
         sqlx::query(
             "INSERT INTO outbox.events \
              (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
@@ -1027,6 +1049,110 @@ async fn record_access_decision(
         .map_err(ApiError::internal)?;
     }
     transaction.commit().await.map_err(ApiError::internal)
+}
+
+fn policy_decision_payload(
+    evaluated: &access_policy::AuthorizedAccess,
+    decision_id: &str,
+    adapter_grants: Vec<AdapterGrantV1>,
+) -> Result<Value, ApiError> {
+    let decision = &evaluated.decision;
+    let contract = PolicyDecisionEvaluatedV1 {
+        decision_id: decision_id.to_owned(),
+        intent: PolicyIntentV1 {
+            outcomes: decision
+                .intent
+                .outcomes
+                .iter()
+                .map(|outcome| match outcome {
+                    authority_policy_core::Outcome::Ssh => PolicyOutcomeV1::Ssh,
+                    authority_policy_core::Outcome::NetworkReachability => {
+                        PolicyOutcomeV1::NetworkReachability
+                    }
+                })
+                .collect(),
+            route: match decision.intent.route {
+                Route::Direct => PolicyRouteV1::Direct,
+                Route::MeshRequired => PolicyRouteV1::MeshRequired,
+            },
+        },
+        required_capabilities: decision
+            .required
+            .iter()
+            .map(|capability| policy_capability(*capability))
+            .collect(),
+        policy_sources: decision
+            .sources
+            .iter()
+            .map(|(capability, policy)| PolicySourceV1 {
+                capability: policy_capability(*capability),
+                policy_id: policy.policy_id.to_string(),
+                revision: policy.revision,
+            })
+            .collect(),
+        adapter_grants,
+    };
+    contract.validate().map_err(ApiError::internal)?;
+    serde_json::to_value(contract).map_err(ApiError::internal)
+}
+
+fn policy_capability(capability: authority_policy_core::Capability) -> PolicyCapabilityV1 {
+    match capability {
+        authority_policy_core::Capability::MeshJoin => PolicyCapabilityV1::MeshJoin,
+        authority_policy_core::Capability::NetworkReach => PolicyCapabilityV1::NetworkReach,
+        authority_policy_core::Capability::SshIssue => PolicyCapabilityV1::SshIssue,
+    }
+}
+
+async fn insert_decision_outbox(
+    transaction: &mut Transaction<'_, Postgres>,
+    decision_id: &str,
+    payload: &Value,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        "INSERT INTO outbox.events \
+         (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
+         VALUES ($1, 'policy', 'access_decision', $2, \
+                 'policy.decision.evaluated', 1, $3, now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(decision_id)
+    .bind(payload)
+    .execute(&mut **transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(())
+}
+
+struct PolicyAuditContext<'a> {
+    domain_id: Uuid,
+    actor_id: Uuid,
+    action: &'a str,
+    target_node_id: Uuid,
+}
+
+async fn record_policy_allow(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: PolicyAuditContext<'_>,
+    evaluated: &access_policy::AuthorizedAccess,
+    decision_id: &str,
+    adapter_grants: Vec<AdapterGrantV1>,
+) -> Result<(), ApiError> {
+    let payload = policy_decision_payload(evaluated, decision_id, adapter_grants)?;
+    sqlx::query(
+        "INSERT INTO audit.events \
+         (domain_id, actor_type, actor_id, action, target_type, target_id, decision, payload) \
+         VALUES ($1, 'user', $2, $3, 'node', $4, 'allow', $5)",
+    )
+    .bind(context.domain_id)
+    .bind(context.actor_id.to_string())
+    .bind(context.action)
+    .bind(context.target_node_id.to_string())
+    .bind(&payload)
+    .execute(&mut **transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    insert_decision_outbox(transaction, decision_id, &payload).await
 }
 
 fn policy_reference(decision: &authority_policy_core::AccessDecision) -> String {
@@ -1094,7 +1220,7 @@ async fn issue_network_grant(
         device_id: request.device_id.to_string(),
         target_node_id: request.target_node_id.to_string(),
         wireguard_public_key: request.wireguard_public_key,
-        mesh_address: decision.device_mesh_address,
+        mesh_address: decision.device_mesh_address.clone(),
         policy_id,
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
@@ -1108,14 +1234,21 @@ async fn issue_network_grant(
     })?;
 
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    record_audit(
+    record_policy_allow(
         &mut transaction,
-        state.domain_id(),
-        session.user_id,
-        "network.authorize",
-        "node",
-        request.target_node_id,
-        "allow",
+        PolicyAuditContext {
+            domain_id: state.domain_id(),
+            actor_id: session.user_id,
+            action: "network.authorize",
+            target_node_id: request.target_node_id,
+        },
+        &decision,
+        &envelope.grant.nonce,
+        vec![AdapterGrantV1 {
+            kind: AdapterGrantKindV1::WireGuardPeer,
+            audience: envelope.grant.audience.clone(),
+            expires_at: envelope.grant.expires_at,
+        }],
     )
     .await?;
     transaction.commit().await.map_err(ApiError::internal)?;
@@ -1336,6 +1469,10 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use authority_policy_core::{AccessDecision, Capability, PolicyRef};
+
     use super::*;
 
     #[test]
@@ -1354,5 +1491,56 @@ mod tests {
         assert_eq!(session_token_digest(&first).ok(), Some(first_digest));
         assert_ne!(session_token_digest(&second).ok(), Some(first_digest));
         assert!(session_token_digest("not-a-session-token").is_err());
+    }
+
+    #[test]
+    fn decision_audit_explains_intent_capabilities_sources_and_adapters() {
+        let policy = PolicyRef {
+            policy_id: Uuid::new_v4(),
+            revision: 7,
+        };
+        let evaluated = access_policy::AuthorizedAccess {
+            decision: AccessDecision {
+                intent: AccessIntent::ssh(Route::MeshRequired),
+                required: BTreeSet::from([
+                    Capability::MeshJoin,
+                    Capability::NetworkReach,
+                    Capability::SshIssue,
+                ]),
+                sources: BTreeMap::from([
+                    (Capability::MeshJoin, policy),
+                    (Capability::NetworkReach, policy),
+                    (Capability::SshIssue, policy),
+                ]),
+            },
+            ssh_principal: Some("deploy".to_owned()),
+            wireguard_public_key: Vec::new(),
+            device_mesh_address: "10.77.0.1".to_owned(),
+        };
+        let Ok(payload) = policy_decision_payload(
+            &evaluated,
+            "decision-1",
+            vec![
+                AdapterGrantV1 {
+                    kind: AdapterGrantKindV1::SshCertificate,
+                    audience: "credential-issuer".to_owned(),
+                    expires_at: 100,
+                },
+                AdapterGrantV1 {
+                    kind: AdapterGrantKindV1::WireGuardPeer,
+                    audience: "node-agent".to_owned(),
+                    expires_at: 100,
+                },
+            ],
+        ) else {
+            panic!("valid policy decision trace");
+        };
+        assert_eq!(payload["intent"]["route"], "mesh_required");
+        assert_eq!(
+            payload["required_capabilities"].as_array().map(Vec::len),
+            Some(3)
+        );
+        assert_eq!(payload["policy_sources"].as_array().map(Vec::len), Some(3));
+        assert_eq!(payload["adapter_grants"].as_array().map(Vec::len), Some(2));
     }
 }

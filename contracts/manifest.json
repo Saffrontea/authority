@@ -8,6 +8,10 @@
       "version": 1,
       "sha256": "7059469f04f89f6e77baedf6a2f431fda316f634292b25e840f08d73932ea520"
     },
+    "artifacts/policy-decision-evaluated-v1.schema.json": {
+      "version": 1,
+      "sha256": "2d933feaee162ae3c031676a825f49eb9f10edba69919854bef0837fcedf23ce"
+    },
     "artifacts/issuance-authorization-v1.schema.json": {
       "version": 1,
       "sha256": "6cbc0ba82281028a4aabd97286ce9dfd77794263df234f84cafeb3cea08e354f"

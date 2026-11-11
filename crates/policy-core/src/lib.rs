@@ -11,10 +11,30 @@ pub enum Outcome {
     NetworkReachability,
 }
 
+impl Outcome {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::NetworkReachability => "network.reachability",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Direct,
     MeshRequired,
+}
+
+impl Route {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::MeshRequired => "mesh_required",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +66,17 @@ pub enum Capability {
     MeshJoin,
     NetworkReach,
     SshIssue,
+}
+
+impl Capability {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MeshJoin => "mesh.join",
+            Self::NetworkReach => "network.reach",
+            Self::SshIssue => "ssh.issue",
+        }
+    }
 }
 
 /// Computes the least set of capabilities required to realize an intent.
@@ -121,6 +152,7 @@ pub struct PolicyRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
+    pub intent: AccessIntent,
     pub required: BTreeSet<Capability>,
     pub sources: BTreeMap<Capability, PolicyRef>,
 }
@@ -193,7 +225,11 @@ pub fn evaluate(
             },
         );
     }
-    Ok(AccessDecision { required, sources })
+    Ok(AccessDecision {
+        intent: request.intent.clone(),
+        required,
+        sources,
+    })
 }
 
 fn applicable(request: &AccessRequest, rule: &PolicyRule) -> bool {

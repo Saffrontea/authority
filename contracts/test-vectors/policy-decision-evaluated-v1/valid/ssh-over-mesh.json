@@ -1,0 +1,37 @@
+{
+  "decision_id": "1765c0a993654c07a7b243df3b67d98d",
+  "intent": {
+    "outcomes": ["ssh"],
+    "route": "mesh_required"
+  },
+  "required_capabilities": ["mesh.join", "network.reach", "ssh.issue"],
+  "policy_sources": [
+    {
+      "capability": "mesh.join",
+      "policy_id": "019a6e6d-4b01-7c31-bb4c-f83220bec101",
+      "revision": 1
+    },
+    {
+      "capability": "network.reach",
+      "policy_id": "019a6e6d-4b01-7c31-bb4c-f83220bec101",
+      "revision": 1
+    },
+    {
+      "capability": "ssh.issue",
+      "policy_id": "019a6e6d-4b01-7c31-bb4c-f83220bec101",
+      "revision": 1
+    }
+  ],
+  "adapter_grants": [
+    {
+      "kind": "ssh.certificate",
+      "audience": "credential-issuer",
+      "expires_at": 1794401486
+    },
+    {
+      "kind": "wireguard.peer",
+      "audience": "node-agent",
+      "expires_at": 1794401482
+    }
+  ]
+}
