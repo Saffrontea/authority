@@ -36,6 +36,8 @@ use crate::{
 
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_mins(15);
+const MAX_SESSIONS: usize = 256;
+const MAX_SESSION_NONCES: usize = 1024;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -137,7 +139,7 @@ async fn create_demo_access(
     headers: HeaderMap,
     Json(request): Json<CreateDemoAccessRequest>,
 ) -> Result<(StatusCode, Json<DemoAccessResponse>), ApiError> {
-    require_bootstrap_token(&state, &headers)?;
+    consume_bootstrap_token(&state, &headers)?;
     let user_exists = sqlx::query(
         "SELECT 1 FROM identity.users \
          WHERE id = $1 AND domain_id = $2 AND status = 'active'",
@@ -565,7 +567,13 @@ async fn finish_authentication(
         .map_err(ApiError::internal)?
         .saturating_add(SESSION_TTL)
         .as_secs();
-    state.sessions().lock().map_err(ApiError::internal)?.insert(
+    let mut sessions = state.sessions().lock().map_err(ApiError::internal)?;
+    let now = Instant::now();
+    sessions.retain(|_, session| session.expires_at > now);
+    if sessions.len() >= MAX_SESSIONS {
+        return Err(ApiError::unavailable("session_capacity_reached"));
+    }
+    sessions.insert(
         session_digest,
         Session {
             user_id: pending.user_id,
@@ -637,11 +645,12 @@ fn authenticated_session(
         .map_err(|_| ApiError::unauthorized("invalid_device_proof"))?;
     let proof_message = session_request_preimage(&token, action, bindings, timestamp, nonce);
     let mut sessions = state.sessions().lock().map_err(ApiError::internal)?;
-    if sessions
+    let now = Instant::now();
+    let requested_expired = sessions
         .get(&token_digest)
-        .is_some_and(|session| Instant::now() > session.expires_at)
-    {
-        sessions.remove(&token_digest);
+        .is_some_and(|session| now > session.expires_at);
+    sessions.retain(|_, session| session.expires_at > now);
+    if requested_expired {
         return Err(ApiError::unauthorized("expired_session"));
     }
     let session = sessions
@@ -649,6 +658,9 @@ fn authenticated_session(
         .ok_or_else(|| ApiError::unauthorized("invalid_session"))?;
     if session.consumed_nonces.contains(nonce) {
         return Err(ApiError::unauthorized("device_proof_replayed"));
+    }
+    if session.consumed_nonces.len() >= MAX_SESSION_NONCES {
+        return Err(ApiError::unauthorized("session_proof_capacity_reached"));
     }
     if !verify_device_signature(&session.device_public_key, &proof_message, &signature)
         .map_err(ApiError::internal)?
@@ -880,14 +892,36 @@ async fn record_audit(
 }
 
 fn require_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let supplied = headers
-        .get("x-authority-bootstrap-token")
-        .and_then(|value| value.to_str().ok());
-    if supplied == Some(state.bootstrap_token()) {
+    let supplied = bootstrap_token_header(headers)?;
+    if state
+        .verify_bootstrap_token(supplied)
+        .map_err(ApiError::internal)?
+    {
         Ok(())
     } else {
         Err(ApiError::unauthorized("invalid_bootstrap_token"))
     }
+}
+
+fn consume_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let supplied = bootstrap_token_header(headers)?;
+    if state
+        .consume_bootstrap_token(supplied)
+        .map_err(ApiError::internal)?
+    {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized(
+            "invalid_or_consumed_bootstrap_token",
+        ))
+    }
+}
+
+fn bootstrap_token_header(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("x-authority-bootstrap-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("invalid_bootstrap_token"))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -1009,6 +1043,13 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
+        }
+    }
+
+    fn unavailable(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
         }
     }
 }

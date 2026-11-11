@@ -51,7 +51,7 @@
       sessionStorage.setItem('authority-bootstrap', fragment.get('bootstrap'));
       history.replaceState(null, '', location.pathname + location.search);
     }
-    const bootstrap = sessionStorage.getItem('authority-bootstrap');
+    let bootstrap = sessionStorage.getItem('authority-bootstrap');
     const networkAgentOrigin = pageParameters.get('network_agent_origin');
     const wireguardPublicKey = pageParameters.get('wireguard_public_key');
     if (!bootstrap) document.querySelector('#setup').hidden = true;
@@ -263,6 +263,8 @@
         device_signature: deviceSignature,
         wireguard_public_key: wireguardPublicKey,
       }, headers);
+      sessionStorage.removeItem('authority-bootstrap');
+      bootstrap = null;
       sessionStorage.setItem('authority-demo-access', JSON.stringify(access));
       document.querySelector('#username').value = username;
       result.textContent = `Passkey registered.\nuser=${user.user_id}\ncredential=${finish.credential_id}\ntarget=${access.target_node_id}`;

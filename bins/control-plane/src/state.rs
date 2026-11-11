@@ -19,7 +19,7 @@ struct Inner {
     pool: PgPool,
     webauthn: Webauthn,
     domain_id: Uuid,
-    bootstrap_token: String,
+    bootstrap_token: Mutex<Option<String>>,
     registrations: Mutex<HashMap<Uuid, PendingRegistration>>,
     authentications: Mutex<HashMap<Uuid, PendingAuthentication>>,
     sessions: Mutex<HashMap<[u8; 32], Session>>,
@@ -64,7 +64,7 @@ impl AppState {
             pool,
             webauthn,
             domain_id,
-            bootstrap_token,
+            bootstrap_token: Mutex::new(Some(bootstrap_token)),
             registrations: Mutex::new(HashMap::new()),
             authentications: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -85,8 +85,32 @@ impl AppState {
         self.0.domain_id
     }
 
-    pub fn bootstrap_token(&self) -> &str {
-        &self.0.bootstrap_token
+    pub fn verify_bootstrap_token(&self, supplied: &str) -> Result<bool, String> {
+        let token = self
+            .0
+            .bootstrap_token
+            .lock()
+            .map_err(|error| error.to_string())?;
+        Ok(token
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(expected.as_bytes(), supplied.as_bytes())))
+    }
+
+    pub fn consume_bootstrap_token(&self, supplied: &str) -> Result<bool, String> {
+        let mut token = self
+            .0
+            .bootstrap_token
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if token
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(expected.as_bytes(), supplied.as_bytes()))
+        {
+            token.take();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn registrations(&self) -> &Mutex<HashMap<Uuid, PendingRegistration>> {
@@ -108,4 +132,14 @@ impl AppState {
     pub fn network_grant_ttl_seconds(&self) -> i64 {
         self.0.network_grant_ttl_seconds
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        difference |= usize::from(left_byte ^ right_byte);
+    }
+    difference == 0
 }
