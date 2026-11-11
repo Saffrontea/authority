@@ -52,6 +52,12 @@ deliberately not exposed as plaintext HTTP services on the LAN: doing so would
 leak bootstrap and session material, and a raw LAN origin is not a WebAuthn
 secure context.
 
+The browser-facing issuer and agents also reject cross-origin browser access
+unless the exact origin appears in the comma-separated
+`AUTHORITY_BROWSER_ORIGINS` setting. Wildcard origins are rejected. The LXC
+network-agent deployment allows only the normal localhost PoC origin and the
+dedicated browser-E2E origin.
+
 For a browser running on another machine, forward all three ports and continue
 to use the `localhost` URL:
 

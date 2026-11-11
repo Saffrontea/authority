@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 
     info!(address = %config.bind, "credential issuer listening");
-    axum::serve(listener, api::router(state))
+    axum::serve(listener, api::router(state, config.browser_origins))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

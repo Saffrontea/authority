@@ -4,18 +4,18 @@ use ::ssh_key::{Certificate, HashAlg};
 use axum::{
     Json, Router,
     extract::State,
-    http::{Method, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::error;
 
 use crate::state::AppState;
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/ssh-key", get(get_ssh_key))
@@ -23,7 +23,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::list(browser_origins))
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([CONTENT_TYPE]),
         )

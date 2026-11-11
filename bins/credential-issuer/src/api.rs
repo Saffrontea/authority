@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::SignedIssuanceAuthorizationV1;
 use authority_issuer_core::verify_authorization;
-use axum::http::{Method, header::CONTENT_TYPE};
+use axum::http::{HeaderValue, Method, header::CONTENT_TYPE};
 use axum::{
     Json, Router,
     extract::State,
@@ -13,19 +13,19 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use ssh_key::{HashAlg, PublicKey, certificate, rand_core::OsRng};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::error;
 
 use crate::state::AppState;
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/ssh-certificates", post(issue_ssh_certificate))
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::list(browser_origins))
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([CONTENT_TYPE]),
         )

@@ -1,5 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
+use axum::http::HeaderValue;
+
 pub struct Config {
     pub bind: SocketAddr,
     pub control_plane_key_id: String,
@@ -7,6 +9,7 @@ pub struct Config {
     pub ssh_ca_key_file: PathBuf,
     pub ssh_ca_public_key_file: PathBuf,
     pub replay_ledger_file: PathBuf,
+    pub browser_origins: Vec<HeaderValue>,
 }
 
 impl Config {
@@ -22,7 +25,29 @@ impl Config {
             ssh_ca_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_KEY_FILE")?),
             ssh_ca_public_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_PUBLIC_KEY_FILE")?),
             replay_ledger_file: PathBuf::from(required("AUTHORITY_ISSUER_REPLAY_LEDGER_FILE")?),
+            browser_origins: origins("AUTHORITY_BROWSER_ORIGINS", "http://localhost:3000")?,
         })
+    }
+}
+
+fn origins(name: &str, default: &str) -> Result<Vec<HeaderValue>, String> {
+    let raw = value(name, default)?;
+    let parsed = raw
+        .split(',')
+        .map(str::trim)
+        .map(|origin| {
+            if origin.is_empty() || origin == "*" {
+                return Err(format!("{name} contains an invalid origin"));
+            }
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|error| format!("{name} contains an invalid origin: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed.is_empty() {
+        Err(format!("{name} must contain at least one origin"))
+    } else {
+        Ok(parsed)
     }
 }
 

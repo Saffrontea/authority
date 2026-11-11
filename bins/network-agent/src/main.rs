@@ -19,14 +19,14 @@ use authority_replay_ledger::ReplayLedger;
 use axum::{
     Json, Router,
     extract::State,
-    http::{Method, StatusCode, header::CONTENT_TYPE},
+    http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use openssl::sha::sha256;
 use serde::Serialize;
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -70,6 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let bind: SocketAddr = value("AUTHORITY_NETWORK_AGENT_BIND", "0.0.0.0:3003")?.parse()?;
     let interface = value("AUTHORITY_WIREGUARD_INTERFACE", "wg0")?;
+    let browser_origins = origins(
+        "AUTHORITY_BROWSER_ORIGINS",
+        "http://localhost:3000,http://localhost:3100",
+    )?;
     if interface.is_empty()
         || !interface
             .bytes()
@@ -115,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(state)
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::list(browser_origins))
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([CONTENT_TYPE]),
         );
@@ -294,6 +298,27 @@ fn value(name: &str, default: &str) -> Result<String, String> {
         Ok(value) => Ok(value),
         Err(env::VarError::NotPresent) => Ok(default.to_owned()),
         Err(error) => Err(format!("cannot read {name}: {error}")),
+    }
+}
+
+fn origins(name: &str, default: &str) -> Result<Vec<HeaderValue>, String> {
+    let raw = value(name, default)?;
+    let parsed = raw
+        .split(',')
+        .map(str::trim)
+        .map(|origin| {
+            if origin.is_empty() || origin == "*" {
+                return Err(format!("{name} contains an invalid origin"));
+            }
+            origin
+                .parse::<HeaderValue>()
+                .map_err(|error| format!("{name} contains an invalid origin: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed.is_empty() {
+        Err(format!("{name} must contain at least one origin"))
+    } else {
+        Ok(parsed)
     }
 }
 

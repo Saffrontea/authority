@@ -321,6 +321,7 @@ Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane
 Environment=AUTHORITY_WIREGUARD_INTERFACE=wg0
 Environment=AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE=/var/lib/authority/network-agent-replay-ledger
 Environment=AUTHORITY_NETWORK_AGENT_IDENTITY_FILE=/var/lib/authority/node-identity.pem
+Environment=AUTHORITY_BROWSER_ORIGINS=http://localhost:3000,http://localhost:3100
 StateDirectory=authority
 Restart=on-failure
 
