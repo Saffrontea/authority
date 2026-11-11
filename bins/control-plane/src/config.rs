@@ -20,7 +20,7 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let bind = value("AUTHORITY_BIND", "0.0.0.0:3000")?
+        let bind = value("AUTHORITY_BIND", "127.0.0.1:3000")?
             .parse()
             .map_err(|error| format!("AUTHORITY_BIND is not a socket address: {error}"))?;
         let domain_id = value(

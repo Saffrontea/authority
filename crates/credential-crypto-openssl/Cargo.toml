@@ -11,6 +11,7 @@ openssl.workspace = true
 
 [dev-dependencies]
 authority-contracts-model.workspace = true
+authority-device-auth-core.workspace = true
 
 [lints]
 workspace = true

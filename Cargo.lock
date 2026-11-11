@@ -152,8 +152,11 @@ version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
  "authority-credential-crypto-openssl",
+ "authority-device-auth-core",
  "authority-issuer-core",
+ "authority-policy-core",
  "axum",
+ "openssl",
  "serde",
  "serde_json",
  "sqlx",
@@ -170,6 +173,7 @@ name = "authority-credential-crypto-openssl"
 version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
+ "authority-device-auth-core",
  "authority-issuer-core",
  "openssl",
 ]
@@ -189,6 +193,13 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "authority-device-auth-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -228,6 +239,14 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "authority-policy-core"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]

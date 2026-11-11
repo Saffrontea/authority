@@ -1,3 +1,4 @@
+mod access_policy;
 mod api;
 mod config;
 mod state;

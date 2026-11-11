@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -22,7 +22,7 @@ struct Inner {
     bootstrap_token: String,
     registrations: Mutex<HashMap<Uuid, PendingRegistration>>,
     authentications: Mutex<HashMap<Uuid, PendingAuthentication>>,
-    sessions: Mutex<HashMap<Uuid, Session>>,
+    sessions: Mutex<HashMap<[u8; 32], Session>>,
     signer: OpenSslEd25519Signer,
     network_grant_ttl_seconds: i64,
 }
@@ -35,12 +35,18 @@ pub struct PendingRegistration {
 
 pub struct PendingAuthentication {
     pub user_id: Uuid,
+    pub device_id: Uuid,
+    pub device_public_key: [u8; 32],
+    pub device_challenge: String,
     pub state: PasskeyAuthentication,
     pub expires_at: Instant,
 }
 
 pub struct Session {
     pub user_id: Uuid,
+    pub device_id: Uuid,
+    pub device_public_key: [u8; 32],
+    pub consumed_nonces: HashSet<String>,
     pub expires_at: Instant,
     pub expires_at_unix: u64,
 }
@@ -91,7 +97,7 @@ impl AppState {
         &self.0.authentications
     }
 
-    pub fn sessions(&self) -> &Mutex<HashMap<Uuid, Session>> {
+    pub fn sessions(&self) -> &Mutex<HashMap<[u8; 32], Session>> {
         &self.0.sessions
     }
 

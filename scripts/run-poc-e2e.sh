@@ -14,10 +14,10 @@ target_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-target:/ { 
 }
 AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
 AUTHORITY_NETWORK_GRANT_TTL_SECONDS=5
-AUTHORITY_BIND=0.0.0.0:3100
+AUTHORITY_BIND=127.0.0.1:3100
 AUTHORITY_RP_ORIGIN=http://localhost:3100
-AUTHORITY_ISSUER_BIND=0.0.0.0:3101
-AUTHORITY_NODE_AGENT_BIND=0.0.0.0:3102
+AUTHORITY_ISSUER_BIND=127.0.0.1:3101
+AUTHORITY_NODE_AGENT_BIND=127.0.0.1:3102
 AUTHORITY_POC_CONTROL_ORIGIN=http://localhost:3100
 AUTHORITY_POC_ISSUER_ORIGIN=http://localhost:3101
 AUTHORITY_POC_NODE_ORIGIN=http://localhost:3102
@@ -70,7 +70,7 @@ done
 # build; an empty unauthenticated request reaches it and returns 401.
 grant_probe_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --request POST --header 'content-type: application/json' \
-    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","mesh_address":"10.77.0.1"}' \
+    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' \
     "${AUTHORITY_POC_CONTROL_ORIGIN}/v1/network-access-grants")"
 if [[ "${grant_probe_status}" != "401" ]]; then
     echo "poc:e2e: expected current grant route (401), got HTTP ${grant_probe_status}" >&2

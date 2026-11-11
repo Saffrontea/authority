@@ -11,7 +11,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         Ok(Self {
-            bind: value("AUTHORITY_ISSUER_BIND", "0.0.0.0:3001")?
+            bind: value("AUTHORITY_ISSUER_BIND", "127.0.0.1:3001")?
                 .parse()
                 .map_err(|error| format!("AUTHORITY_ISSUER_BIND is invalid: {error}"))?,
             control_plane_key_id: value("AUTHORITY_CONTROL_PLANE_KEY_ID", "control-plane-key-1")?,

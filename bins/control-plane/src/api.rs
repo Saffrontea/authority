@@ -4,6 +4,11 @@ use authority_contracts_model::{
     IssuanceAuthorizationV1, NetworkAccessGrantV1, SignedIssuanceAuthorizationV1,
     SignedNetworkAccessGrantV1,
 };
+use authority_credential_crypto_openssl::verify_device_signature;
+use authority_device_auth_core::{
+    authentication_preimage, decode_public_key, decode_signature, encode_base64url,
+    enrollment_preimage, session_request_preimage,
+};
 use authority_issuer_core::{sign_authorization, sign_network_grant};
 use axum::{
     Json, Router,
@@ -12,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use openssl::{rand::rand_bytes, sha::sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
@@ -22,8 +28,11 @@ use webauthn_rs::prelude::{
     RequestChallengeResponse,
 };
 
-use crate::state::{AppState, PendingAuthentication, PendingRegistration, Session};
 use crate::ui;
+use crate::{
+    access_policy,
+    state::{AppState, PendingAuthentication, PendingRegistration, Session},
+};
 
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_mins(15);
@@ -111,6 +120,8 @@ async fn create_user(
 #[derive(Deserialize)]
 struct CreateDemoAccessRequest {
     user_id: Uuid,
+    device_public_key: String,
+    device_signature: String,
     wireguard_public_key: Option<String>,
 }
 
@@ -141,6 +152,12 @@ async fn create_demo_access(
         return Err(ApiError::not_found("user_not_found"));
     }
 
+    let client_wireguard_key = request
+        .wireguard_public_key
+        .clone()
+        .unwrap_or_else(|| "poc-client-wireguard-unset".to_owned());
+    let device_public_key = verify_device_enrollment(&request, &client_wireguard_key)?;
+
     let proposed_device_id = Uuid::new_v4();
     let target_device_id = Uuid::new_v4();
     let target_node_id = Uuid::new_v4();
@@ -152,25 +169,25 @@ async fn create_demo_access(
         address_seed[1].clamp(1, 254)
     );
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    let client_wireguard_key = request
-        .wireguard_public_key
-        .unwrap_or_else(|| format!("poc-client-wireguard-{proposed_device_id}"));
     // This endpoint is guarded by the bootstrap token. Reusing the physical
     // PoC client key deliberately reassigns that demo device to the newly
     // bootstrapped user, making repeated E2E runs idempotent without weakening
     // the device key uniqueness constraint used by normal authorization.
     let device_id: Uuid = sqlx::query_scalar(
         "INSERT INTO device.devices \
-         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
-         VALUES ($1, $2, $3, $4, $5, 'active', now()) \
+         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, mesh_address, status, enrolled_at) \
+         VALUES ($1, $2, $3, $4, $5, '10.77.0.1'::inet, 'active', now()) \
          ON CONFLICT (domain_id, wireguard_public_key) DO UPDATE \
-         SET owner_user_id = EXCLUDED.owner_user_id, status = 'active', enrolled_at = now() \
+         SET owner_user_id = EXCLUDED.owner_user_id, \
+             device_public_key = EXCLUDED.device_public_key, \
+             mesh_address = EXCLUDED.mesh_address, \
+             status = 'active', enrolled_at = now() \
          RETURNING id",
     )
     .bind(proposed_device_id)
     .bind(state.domain_id())
     .bind(request.user_id)
-    .bind(format!("poc-client-device-{proposed_device_id}").into_bytes())
+    .bind(device_public_key.as_slice())
     .bind(client_wireguard_key.into_bytes())
     .fetch_one(&mut *transaction)
     .await
@@ -223,6 +240,26 @@ async fn create_demo_access(
             principal: "deploy".to_owned(),
         }),
     ))
+}
+
+fn verify_device_enrollment(
+    request: &CreateDemoAccessRequest,
+    wireguard_public_key: &str,
+) -> Result<[u8; 32], ApiError> {
+    let public_key = decode_public_key(&request.device_public_key)
+        .map_err(|_| ApiError::bad_request("invalid_device_public_key"))?;
+    let signature = decode_signature(&request.device_signature)
+        .map_err(|_| ApiError::bad_request("invalid_device_signature"))?;
+    let message = enrollment_preimage(
+        &request.user_id.to_string(),
+        &request.device_public_key,
+        wireguard_public_key,
+    );
+    if verify_device_signature(&public_key, &message, &signature).map_err(ApiError::internal)? {
+        Ok(public_key)
+    } else {
+        Err(ApiError::unauthorized("invalid_device_signature"))
+    }
 }
 
 #[derive(Deserialize)]
@@ -368,12 +405,14 @@ async fn finish_registration(
 #[derive(Deserialize)]
 struct StartAuthenticationRequest {
     username: String,
+    device_id: Uuid,
 }
 
 #[derive(Serialize)]
 struct StartAuthenticationResponse {
     challenge_id: Uuid,
     options: RequestChallengeResponse,
+    device_challenge: String,
 }
 
 async fn start_authentication(
@@ -381,16 +420,26 @@ async fn start_authentication(
     Json(request): Json<StartAuthenticationRequest>,
 ) -> Result<Json<StartAuthenticationResponse>, ApiError> {
     let user = sqlx::query(
-        "SELECT id FROM identity.users \
-         WHERE domain_id = $1 AND username = $2 AND status = 'active'",
+        "SELECT users.id, devices.device_public_key FROM identity.users AS users \
+         JOIN device.devices AS devices \
+           ON devices.id = $3 AND devices.domain_id = users.domain_id \
+          AND devices.owner_user_id = users.id AND devices.status = 'active' \
+         WHERE users.domain_id = $1 AND users.username = $2 AND users.status = 'active'",
     )
     .bind(state.domain_id())
     .bind(&request.username)
+    .bind(request.device_id)
     .fetch_optional(state.pool())
     .await
     .map_err(ApiError::internal)?
     .ok_or_else(|| ApiError::unauthorized("authentication_failed"))?;
     let user_id: Uuid = user.try_get("id").map_err(ApiError::internal)?;
+    let device_public_key: Vec<u8> = user
+        .try_get("device_public_key")
+        .map_err(ApiError::internal)?;
+    let device_public_key: [u8; 32] = device_public_key
+        .try_into()
+        .map_err(|_| ApiError::unauthorized("invalid_device_identity"))?;
     let passkeys = load_passkeys(&state, user_id).await?;
     if passkeys.is_empty() {
         return Err(ApiError::unauthorized("authentication_failed"));
@@ -401,6 +450,9 @@ async fn start_authentication(
         .start_passkey_authentication(&passkeys)
         .map_err(ApiError::internal)?;
     let challenge_id = Uuid::new_v4();
+    let mut device_challenge_bytes = [0_u8; 32];
+    rand_bytes(&mut device_challenge_bytes).map_err(ApiError::internal)?;
+    let device_challenge = encode_base64url(&device_challenge_bytes);
     state
         .authentications()
         .lock()
@@ -409,6 +461,9 @@ async fn start_authentication(
             challenge_id,
             PendingAuthentication {
                 user_id,
+                device_id: request.device_id,
+                device_public_key,
+                device_challenge: device_challenge.clone(),
                 state: authentication,
                 expires_at: Instant::now() + CHALLENGE_TTL,
             },
@@ -417,6 +472,7 @@ async fn start_authentication(
     Ok(Json(StartAuthenticationResponse {
         challenge_id,
         options,
+        device_challenge,
     }))
 }
 
@@ -424,12 +480,14 @@ async fn start_authentication(
 struct FinishAuthenticationRequest {
     challenge_id: Uuid,
     credential: PublicKeyCredential,
+    device_signature: String,
 }
 
 #[derive(Serialize)]
 struct FinishAuthenticationResponse {
-    session_token: Uuid,
+    session_token: String,
     user_id: Uuid,
+    device_id: Uuid,
     expires_at: u64,
 }
 
@@ -445,6 +503,15 @@ async fn finish_authentication(
         .ok_or_else(|| ApiError::bad_request("unknown_or_consumed_challenge"))?;
     if Instant::now() > pending.expires_at {
         return Err(ApiError::bad_request("expired_challenge"));
+    }
+    let signature = decode_signature(&request.device_signature)
+        .map_err(|_| ApiError::unauthorized("invalid_device_signature"))?;
+    let device_message =
+        authentication_preimage(&request.challenge_id.to_string(), &pending.device_challenge);
+    if !verify_device_signature(&pending.device_public_key, &device_message, &signature)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::unauthorized("invalid_device_signature"));
     }
 
     let result = state
@@ -491,16 +558,20 @@ async fn finish_authentication(
     .await?;
     transaction.commit().await.map_err(ApiError::internal)?;
 
-    let session_token = Uuid::new_v4();
+    let session_token = generate_session_token()?;
+    let session_digest = session_token_digest(&session_token)?;
     let expires_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(ApiError::internal)?
         .saturating_add(SESSION_TTL)
         .as_secs();
     state.sessions().lock().map_err(ApiError::internal)?.insert(
-        session_token,
+        session_digest,
         Session {
             user_id: pending.user_id,
+            device_id: pending.device_id,
+            device_public_key: pending.device_public_key,
+            consumed_nonces: std::collections::HashSet::new(),
             expires_at: Instant::now() + SESSION_TTL,
             expires_at_unix: expires_at,
         },
@@ -509,6 +580,7 @@ async fn finish_authentication(
     Ok(Json(FinishAuthenticationResponse {
         session_token,
         user_id: pending.user_id,
+        device_id: pending.device_id,
         expires_at,
     }))
 }
@@ -516,6 +588,7 @@ async fn finish_authentication(
 #[derive(Serialize)]
 struct SessionResponse {
     user_id: Uuid,
+    device_id: Uuid,
     expires_at: u64,
 }
 
@@ -523,33 +596,69 @@ async fn get_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let session = authenticated_session(&state, &headers)?;
+    let session = authenticated_session(&state, &headers, "session.read", &[])?;
     Ok(Json(SessionResponse {
         user_id: session.user_id,
+        device_id: session.device_id,
         expires_at: session.expires_at,
     }))
 }
 
 struct AuthenticatedSession {
     user_id: Uuid,
+    device_id: Uuid,
     expires_at: u64,
 }
 
 fn authenticated_session(
     state: &AppState,
     headers: &HeaderMap,
+    action: &str,
+    bindings: &[String],
 ) -> Result<AuthenticatedSession, ApiError> {
     let token = bearer_token(headers)?;
+    let token_digest = session_token_digest(&token)?;
+    let timestamp = required_header(headers, "x-authority-timestamp")?;
+    let timestamp_value = timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::unauthorized("invalid_device_proof"))?;
+    if unix_timestamp()?.abs_diff(timestamp_value) > 30 {
+        return Err(ApiError::unauthorized("stale_device_proof"));
+    }
+    let nonce = required_header(headers, "x-authority-nonce")?;
+    if !(16..=128).contains(&nonce.len())
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(ApiError::unauthorized("invalid_device_proof"));
+    }
+    let signature = decode_signature(required_header(headers, "x-authority-device-signature")?)
+        .map_err(|_| ApiError::unauthorized("invalid_device_proof"))?;
+    let proof_message = session_request_preimage(&token, action, bindings, timestamp, nonce);
     let mut sessions = state.sessions().lock().map_err(ApiError::internal)?;
-    let session = sessions
-        .get(&token)
-        .ok_or_else(|| ApiError::unauthorized("invalid_session"))?;
-    if Instant::now() > session.expires_at {
-        sessions.remove(&token);
+    if sessions
+        .get(&token_digest)
+        .is_some_and(|session| Instant::now() > session.expires_at)
+    {
+        sessions.remove(&token_digest);
         return Err(ApiError::unauthorized("expired_session"));
     }
+    let session = sessions
+        .get_mut(&token_digest)
+        .ok_or_else(|| ApiError::unauthorized("invalid_session"))?;
+    if session.consumed_nonces.contains(nonce) {
+        return Err(ApiError::unauthorized("device_proof_replayed"));
+    }
+    if !verify_device_signature(&session.device_public_key, &proof_message, &signature)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::unauthorized("invalid_device_proof"));
+    }
+    session.consumed_nonces.insert(nonce.to_owned());
     Ok(AuthenticatedSession {
         user_id: session.user_id,
+        device_id: session.device_id,
         expires_at: session.expires_at_unix,
     })
 }
@@ -566,31 +675,30 @@ async fn issue_authorization(
     headers: HeaderMap,
     Json(request): Json<IssueAuthorizationRequest>,
 ) -> Result<Json<SignedIssuanceAuthorizationV1>, ApiError> {
-    let session = authenticated_session(&state, &headers)?;
-    let policy = sqlx::query(
-        "SELECT policy.id, policy.ssh_principal \
-         FROM policy.access_policies AS policy \
-         JOIN device.devices AS client \
-           ON client.id = $3 AND client.domain_id = policy.domain_id \
-          AND client.owner_user_id = policy.subject_user_id AND client.status = 'active' \
-         JOIN device.nodes AS target \
-           ON target.id = policy.target_node_id AND target.status = 'active' \
-         WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
-           AND policy.target_node_id = $4 AND policy.enabled \
-           AND (policy.required_device_id IS NULL OR policy.required_device_id = $3) \
-           AND (policy.valid_from IS NULL OR policy.valid_from <= now()) \
-           AND (policy.valid_until IS NULL OR policy.valid_until > now()) \
-         ORDER BY policy.id LIMIT 1",
+    let bindings = vec![
+        request.device_id.to_string(),
+        request.target_node_id.to_string(),
+        request.ssh_public_key_fingerprint.clone(),
+    ];
+    let session = authenticated_session(&state, &headers, "ssh.issue", &bindings)?;
+    if request.device_id != session.device_id {
+        return Err(ApiError::forbidden("session_device_mismatch"));
+    }
+    let issued_at = unix_timestamp()?;
+    let decision = access_policy::authorize(
+        state.pool(),
+        access_policy::request(
+            state.domain_id(),
+            session.user_id,
+            session.device_id,
+            request.target_node_id,
+            issued_at,
+        ),
     )
-    .bind(state.domain_id())
-    .bind(session.user_id)
-    .bind(request.device_id)
-    .bind(request.target_node_id)
-    .fetch_optional(state.pool())
     .await
     .map_err(ApiError::internal)?;
 
-    let Some(policy) = policy else {
+    let Some(decision) = decision else {
         let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
         record_audit(
             &mut transaction,
@@ -606,11 +714,6 @@ async fn issue_authorization(
         return Err(ApiError::forbidden("policy_denied"));
     };
 
-    let policy_id: Uuid = policy.try_get("id").map_err(ApiError::internal)?;
-    let principal: String = policy
-        .try_get("ssh_principal")
-        .map_err(ApiError::internal)?;
-    let issued_at = unix_timestamp()?;
     let authorization = IssuanceAuthorizationV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
@@ -619,8 +722,8 @@ async fn issue_authorization(
         device_id: request.device_id.to_string(),
         target_node_id: request.target_node_id.to_string(),
         ssh_public_key_fingerprint: request.ssh_public_key_fingerprint,
-        principals: vec![principal],
-        policy_id: policy_id.to_string(),
+        principals: vec![decision.ssh_principal],
+        policy_id: decision.policy_id.to_string(),
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
         not_before: issued_at,
@@ -649,7 +752,6 @@ struct IssueNetworkGrantRequest {
     device_id: Uuid,
     target_node_id: Uuid,
     wireguard_public_key: String,
-    mesh_address: String,
 }
 
 async fn issue_network_grant(
@@ -657,41 +759,47 @@ async fn issue_network_grant(
     headers: HeaderMap,
     Json(request): Json<IssueNetworkGrantRequest>,
 ) -> Result<Json<SignedNetworkAccessGrantV1>, ApiError> {
-    let session = authenticated_session(&state, &headers)?;
-    let policy = sqlx::query(
-        "SELECT policy.id, client.wireguard_public_key \
-         FROM policy.access_policies AS policy \
-         JOIN device.devices AS client \
-           ON client.id = $3 AND client.domain_id = policy.domain_id \
-          AND client.owner_user_id = policy.subject_user_id AND client.status = 'active' \
-         JOIN device.nodes AS target \
-           ON target.id = policy.target_node_id AND target.status = 'active' \
-         WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
-           AND policy.target_node_id = $4 AND policy.enabled \
-           AND (policy.required_device_id IS NULL OR policy.required_device_id = $3) \
-           AND (policy.valid_from IS NULL OR policy.valid_from <= now()) \
-           AND (policy.valid_until IS NULL OR policy.valid_until > now()) \
-         ORDER BY policy.id LIMIT 1",
+    let bindings = vec![
+        request.device_id.to_string(),
+        request.target_node_id.to_string(),
+        request.wireguard_public_key.clone(),
+    ];
+    let session = authenticated_session(&state, &headers, "network.grant", &bindings)?;
+    if request.device_id != session.device_id {
+        return Err(ApiError::forbidden("session_device_mismatch"));
+    }
+    let issued_at = unix_timestamp()?;
+    let decision = access_policy::authorize(
+        state.pool(),
+        access_policy::request(
+            state.domain_id(),
+            session.user_id,
+            session.device_id,
+            request.target_node_id,
+            issued_at,
+        ),
     )
-    .bind(state.domain_id())
-    .bind(session.user_id)
-    .bind(request.device_id)
-    .bind(request.target_node_id)
-    .fetch_optional(state.pool())
     .await
     .map_err(ApiError::internal)?;
 
-    let Some(policy) = policy else {
+    let Some(decision) = decision else {
+        let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
+        record_audit(
+            &mut transaction,
+            state.domain_id(),
+            session.user_id,
+            "network.authorize",
+            "node",
+            request.target_node_id,
+            "deny",
+        )
+        .await?;
+        transaction.commit().await.map_err(ApiError::internal)?;
         return Err(ApiError::forbidden("policy_denied"));
     };
-    let policy_id: Uuid = policy.try_get("id").map_err(ApiError::internal)?;
-    let registered_key: Vec<u8> = policy
-        .try_get("wireguard_public_key")
-        .map_err(ApiError::internal)?;
-    if registered_key != request.wireguard_public_key.as_bytes() {
+    if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
         return Err(ApiError::forbidden("wireguard_key_mismatch"));
     }
-    let issued_at = unix_timestamp()?;
     let grant = NetworkAccessGrantV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
@@ -700,8 +808,8 @@ async fn issue_network_grant(
         device_id: request.device_id.to_string(),
         target_node_id: request.target_node_id.to_string(),
         wireguard_public_key: request.wireguard_public_key,
-        mesh_address: request.mesh_address,
-        policy_id: policy_id.to_string(),
+        mesh_address: decision.device_mesh_address,
+        policy_id: decision.policy_id.to_string(),
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
         not_before: issued_at,
@@ -782,15 +890,47 @@ fn require_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), 
     }
 }
 
-fn bearer_token(headers: &HeaderMap) -> Result<Uuid, ApiError> {
+fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
     let value = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or_else(|| ApiError::unauthorized("invalid_session"))?;
-    value
-        .parse()
-        .map_err(|_| ApiError::unauthorized("invalid_session"))
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(value.to_owned())
+    } else {
+        Err(ApiError::unauthorized("invalid_session"))
+    }
+}
+
+fn required_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<&'a str, ApiError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("missing_device_proof"))
+}
+
+fn generate_session_token() -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 32];
+    rand_bytes(&mut bytes).map_err(ApiError::internal)?;
+    Ok(encode_hex(&bytes))
+}
+
+fn session_token_digest(token: &str) -> Result<[u8; 32], ApiError> {
+    if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::unauthorized("invalid_session"));
+    }
+    Ok(sha256(token.as_bytes()))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
 }
 
 fn unix_timestamp() -> Result<i64, ApiError> {
@@ -876,5 +1016,28 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.code }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_tokens_are_random_and_only_digests_are_stable() {
+        let Ok(first) = generate_session_token() else {
+            panic!("generate first token");
+        };
+        let Ok(second) = generate_session_token() else {
+            panic!("generate second token");
+        };
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, second);
+        let Ok(first_digest) = session_token_digest(&first) else {
+            panic!("digest first token");
+        };
+        assert_eq!(session_token_digest(&first).ok(), Some(first_digest));
+        assert_ne!(session_token_digest(&second).ok(), Some(first_digest));
+        assert!(session_token_digest("not-a-session-token").is_err());
     }
 }

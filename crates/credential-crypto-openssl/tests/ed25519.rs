@@ -1,7 +1,9 @@
 use authority_contracts_model::IssuanceAuthorizationV1;
-use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
+use authority_credential_crypto_openssl::{
+    OpenSslEd25519Signer, OpenSslEd25519Verifier, verify_device_signature,
+};
 use authority_issuer_core::{sign_authorization, verify_authorization};
-use openssl::pkey::PKey;
+use openssl::{pkey::PKey, sign::Signer};
 
 #[test]
 fn openssl_signs_verifies_and_rejects_tampering() {
@@ -29,6 +31,24 @@ fn constructors_reject_non_ed25519_keys() {
 
     assert!(OpenSslEd25519Signer::from_pem("wrong-key", &private_key).is_err());
     assert!(OpenSslEd25519Verifier::from_pem("wrong-key", &public_key).is_err());
+}
+
+#[test]
+fn raw_device_key_verifies_and_rejects_tampering() {
+    let key = PKey::generate_ed25519().expect("generate device key");
+    let public_key: [u8; 32] = key
+        .raw_public_key()
+        .expect("raw public key")
+        .try_into()
+        .expect("Ed25519 public key length");
+    let mut signer = Signer::new_without_digest(&key).expect("device signer");
+    let signature: [u8; 64] = signer
+        .sign_oneshot_to_vec(b"device proof")
+        .expect("sign device proof")
+        .try_into()
+        .expect("Ed25519 signature length");
+    assert!(verify_device_signature(&public_key, b"device proof", &signature).expect("verify"));
+    assert!(!verify_device_signature(&public_key, b"tampered", &signature).expect("reject"));
 }
 
 fn fixture() -> IssuanceAuthorizationV1 {

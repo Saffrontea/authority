@@ -10,7 +10,7 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         Ok(Self {
-            bind: value("AUTHORITY_NODE_AGENT_BIND", "0.0.0.0:3002")?
+            bind: value("AUTHORITY_NODE_AGENT_BIND", "127.0.0.1:3002")?
                 .parse()
                 .map_err(|error| format!("AUTHORITY_NODE_AGENT_BIND is invalid: {error}"))?,
             ssh_private_key_file: PathBuf::from(required("AUTHORITY_NODE_SSH_KEY_FILE")?),

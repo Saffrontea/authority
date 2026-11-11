@@ -8,8 +8,11 @@ rust-version.workspace = true
 [dependencies]
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
+authority-device-auth-core.workspace = true
 authority-issuer-core.workspace = true
+authority-policy-core.workspace = true
 axum.workspace = true
+openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

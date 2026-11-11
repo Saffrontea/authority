@@ -5,8 +5,10 @@ members = [
   "bins/node-agent",
   "bins/network-agent",
   "crates/contracts-model",
+  "crates/device-auth-core",
   "crates/credential-crypto-openssl",
   "crates/issuer-core",
+  "crates/policy-core",
 ]
 resolver = "3"
 
@@ -17,8 +19,10 @@ rust-version = "1.98"
 
 [workspace.dependencies]
 authority-contracts-model = { path = "crates/contracts-model" }
+authority-device-auth-core = { path = "crates/device-auth-core" }
 authority-credential-crypto-openssl = { path = "crates/credential-crypto-openssl" }
 authority-issuer-core = { path = "crates/issuer-core" }
+authority-policy-core = { path = "crates/policy-core" }
 axum = "0.8.9"
 openssl = { version = "0.10.81", features = ["vendored"] }
 serde = { version = "1.0.229", features = ["derive"] }

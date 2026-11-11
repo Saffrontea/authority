@@ -8,6 +8,9 @@
     },
     "0003_webauthn_passkey_state.sql": {
       "sha256": "9e58200ab36b4fddbae204672b88f32c75ff1c238a82ae77e72e8206c73cace3"
+    },
+    "0004_device_mesh_address.sql": {
+      "sha256": "a37672e8a039ca435488dd7e6e6e52c2999157c57cf95ccc5d01ba42828b335a"
     }
   }
 }

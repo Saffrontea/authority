@@ -8,6 +8,23 @@ use openssl::{
     sign::{Signer, Verifier},
 };
 
+/// Verifies an Ed25519 signature using a raw 32-byte device public key.
+///
+/// # Errors
+///
+/// Returns an error when OpenSSL cannot construct or use the key.
+pub fn verify_device_signature(
+    public_key: &[u8; 32],
+    message: &[u8],
+    signature: &[u8; 64],
+) -> Result<bool, CryptoError> {
+    let key = PKey::public_key_from_raw_bytes(public_key, Id::ED25519).map_err(crypto_error)?;
+    let mut verifier = Verifier::new_without_digest(&key).map_err(crypto_error)?;
+    verifier
+        .verify_oneshot(signature, message)
+        .map_err(crypto_error)
+}
+
 pub struct OpenSslEd25519Signer {
     key_id: String,
     private_key: PKey<Private>,

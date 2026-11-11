@@ -159,15 +159,43 @@ ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q
 printf '%s\n%s\n' "${registered}" "${issued}"
 
 if [[ -n "${wireguard_public_key}" ]]; then
-    browser_state="$(webdriver POST "/session/${session}/execute/sync" \
-        '{"script":"return {token: sessionStorage.getItem(\"authority-session\"), access: JSON.parse(sessionStorage.getItem(\"authority-demo-access\"))};","args":[]}')"
-    session_token="$(jq -r '.token' <<<"${browser_state}")"
-    grant_request="$(jq -nc \
-        --arg device_id "$(jq -r '.access.device_id' <<<"${browser_state}")" \
-        --arg target_node_id "$(jq -r '.access.target_node_id' <<<"${browser_state}")" \
-        --arg wireguard_public_key "${wireguard_public_key}" \
-        '{device_id:$device_id,target_node_id:$target_node_id,wireguard_public_key:$wireguard_public_key,mesh_address:"10.77.0.1"}')"
-    grant="$(json_post "${control_origin}/v1/network-access-grants" "${grant_request}" "${session_token}")"
+    prepared="$(webdriver POST "/session/${session}/execute/async" \
+        '{"script":"const done = arguments[0]; window.authorityPrepareNetworkGrant().then(prepared => done({prepared})).catch(error => done({error: error.message}));","args":[]}')"
+    prepare_error="$(jq -r '.error // empty' <<<"${prepared}")"
+    [[ -z "${prepare_error}" ]] || die "network grant proof failed: ${prepare_error}"
+    grant_body="$(jq -c '.prepared.body' <<<"${prepared}")"
+    authorization="$(jq -r '.prepared.headers.authorization' <<<"${prepared}")"
+    timestamp="$(jq -r '.prepared.headers["x-authority-timestamp"]' <<<"${prepared}")"
+    nonce="$(jq -r '.prepared.headers["x-authority-nonce"]' <<<"${prepared}")"
+    signature="$(jq -r '.prepared.headers["x-authority-device-signature"]' <<<"${prepared}")"
+    grant_response="$(mktemp)"
+
+    token_only_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' \
+        --header "authorization: ${authorization}" --data "${grant_body}" \
+        "${control_origin}/v1/network-access-grants")"
+    [[ "${token_only_status}" == "401" ]] || die "token-only request returned HTTP ${token_only_status}"
+
+    grant_status="$(curl --silent --output "${grant_response}" --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' \
+        --header "authorization: ${authorization}" \
+        --header "x-authority-timestamp: ${timestamp}" \
+        --header "x-authority-nonce: ${nonce}" \
+        --header "x-authority-device-signature: ${signature}" \
+        --data "${grant_body}" "${control_origin}/v1/network-access-grants")"
+    [[ "${grant_status}" == "200" ]] || die "device-bound request returned HTTP ${grant_status}: $(<"${grant_response}")"
+    grant="$(<"${grant_response}")"
+
+    replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' \
+        --header "authorization: ${authorization}" \
+        --header "x-authority-timestamp: ${timestamp}" \
+        --header "x-authority-nonce: ${nonce}" \
+        --header "x-authority-device-signature: ${signature}" \
+        --data "${grant_body}" "${control_origin}/v1/network-access-grants")"
+    rm -f "${grant_response}"
+    [[ "${replay_status}" == "401" ]] || die "replayed device proof returned HTTP ${replay_status}"
+    printf 'Session PoP: token-only denied, signed request accepted, replay denied\n'
     applied="$(json_post "${network_agent_origin}/v1/network-grants" "${grant}")"
     printf 'WireGuard peer applied.\npeer=%s\nallowed=%s\nexpires=%s\n' \
         "$(jq -r '.peer_public_key' <<<"${applied}")" \

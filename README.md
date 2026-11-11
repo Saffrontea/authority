@@ -44,10 +44,10 @@ virtual credential remains available.
 
 ## Connecting from another machine
 
-The three PoC services listen on all interfaces on ports 3000, 3001, and 3002,
-so the UI and health endpoints can be reached through the machine's LAN IP.
-Raw `http://<LAN-IP>:3000` is not a WebAuthn secure context, however, and its
-origin does not match the default `localhost` RP ID.
+The three PoC services bind to loopback on ports 3000, 3001, and 3002. They are
+deliberately not exposed as plaintext HTTP services on the LAN: doing so would
+leak bootstrap and session material, and a raw LAN origin is not a WebAuthn
+secure context.
 
 For a browser running on another machine, forward all three ports and continue
 to use the `localhost` URL:

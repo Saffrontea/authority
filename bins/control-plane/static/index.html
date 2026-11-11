@@ -63,6 +63,65 @@
     const encode = value => btoa(String.fromCharCode(...new Uint8Array(value)))
       .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
+    function openDeviceStore() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open('authority-device', 1);
+        request.onupgradeneeded = () => request.result.createObjectStore('identity');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async function deviceIdentity() {
+      const database = await openDeviceStore();
+      const existing = await new Promise((resolve, reject) => {
+        const request = database.transaction('identity').objectStore('identity').get('current');
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      if (existing) return existing;
+
+      const generated = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+      const publicKey = encode(await crypto.subtle.exportKey('raw', generated.publicKey));
+      const privateBytes = await crypto.subtle.exportKey('pkcs8', generated.privateKey);
+      const privateKey = await crypto.subtle.importKey(
+        'pkcs8', privateBytes, 'Ed25519', false, ['sign'],
+      );
+      const identity = { publicKey, privateKey };
+      await new Promise((resolve, reject) => {
+        const transaction = database.transaction('identity', 'readwrite');
+        transaction.objectStore('identity').put(identity, 'current');
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+      });
+      return identity;
+    }
+
+    function devicePreimage(domain, values) {
+      const encoder = new TextEncoder();
+      const parts = [encoder.encode(`${domain}\0`)];
+      for (const value of values) {
+        const bytes = encoder.encode(value);
+        const length = new Uint8Array(4);
+        new DataView(length.buffer).setUint32(0, bytes.length, false);
+        parts.push(length, bytes);
+      }
+      const size = parts.reduce((total, part) => total + part.length, 0);
+      const output = new Uint8Array(size);
+      let offset = 0;
+      for (const part of parts) {
+        output.set(part, offset);
+        offset += part.length;
+      }
+      return output;
+    }
+
+    async function signDevice(identity, domain, values) {
+      return encode(await crypto.subtle.sign(
+        'Ed25519', identity.privateKey, devicePreimage(domain, values),
+      ));
+    }
+
     function creationOptions(json) {
       if (PublicKeyCredential.parseCreationOptionsFromJSON) {
         return PublicKeyCredential.parseCreationOptionsFromJSON(json);
@@ -119,6 +178,53 @@
       return value;
     }
 
+    async function deviceProofHeaders(sessionToken, action, bindings) {
+      const identity = await deviceIdentity();
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonceBytes = crypto.getRandomValues(new Uint8Array(24));
+      const nonce = encode(nonceBytes);
+      const signature = await signDevice(
+        identity,
+        'AUTHORITY-DEVICE-SESSION-REQUEST-V1',
+        [sessionToken, action, ...bindings, timestamp, nonce],
+      );
+      return {
+        authorization: `Bearer ${sessionToken}`,
+        'x-authority-timestamp': timestamp,
+        'x-authority-nonce': nonce,
+        'x-authority-device-signature': signature,
+      };
+    }
+
+    async function authorizedApi(path, body, sessionToken, action, bindings) {
+      return api(path, body, await deviceProofHeaders(sessionToken, action, bindings));
+    }
+
+    window.authorityPrepareNetworkGrant = async function () {
+      const sessionToken = sessionStorage.getItem('authority-session');
+      const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
+      if (!sessionToken || !access || !wireguardPublicKey) {
+        throw new Error('Network grant prerequisites are missing.');
+      }
+      const networkRequest = {
+        device_id: access.device_id,
+        target_node_id: access.target_node_id,
+        wireguard_public_key: wireguardPublicKey,
+      };
+      const bindings = [
+        access.device_id, access.target_node_id, wireguardPublicKey,
+      ];
+      return {
+        body: networkRequest,
+        headers: await deviceProofHeaders(sessionToken, 'network.grant', bindings),
+      };
+    };
+
+    window.authorityRequestNetworkGrant = async function () {
+      const prepared = await window.authorityPrepareNetworkGrant();
+      return api('/v1/network-access-grants', prepared.body, prepared.headers);
+    };
+
     async function getJson(path) {
       const response = await fetch(path);
       const value = await response.json().catch(() => ({}));
@@ -146,8 +252,15 @@
         challenge_id: start.challenge_id,
         credential: credentialJson(credential),
       });
+      const identity = await deviceIdentity();
+      const enrolledWireGuardKey = wireguardPublicKey ?? 'poc-client-wireguard-unset';
+      const deviceSignature = await signDevice(identity, 'AUTHORITY-DEVICE-ENROLLMENT-V1', [
+        user.user_id, identity.publicKey, enrolledWireGuardKey,
+      ]);
       const access = await api('/v1/bootstrap/demo-access', {
         user_id: user.user_id,
+        device_public_key: identity.publicKey,
+        device_signature: deviceSignature,
         wireguard_public_key: wireguardPublicKey,
       }, headers);
       sessionStorage.setItem('authority-demo-access', JSON.stringify(access));
@@ -156,26 +269,33 @@
     }));
 
     document.querySelector('#login').addEventListener('click', event => busy(event.currentTarget, async () => {
+      const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
+      if (!access) throw new Error('Device enrollment is required before authentication.');
       const start = await api('/v1/passkeys/authentication/start', {
         username: document.querySelector('#username').value,
+        device_id: access.device_id,
       });
+      const identity = await deviceIdentity();
       const credential = await navigator.credentials.get({ publicKey: requestOptions(start.options.publicKey) });
+      const deviceSignature = await signDevice(identity, 'AUTHORITY-DEVICE-AUTHENTICATION-V1', [
+        start.challenge_id, start.device_challenge,
+      ]);
       const session = await api('/v1/passkeys/authentication/finish', {
         challenge_id: start.challenge_id,
         credential: credentialJson(credential),
+        device_signature: deviceSignature,
       });
       sessionStorage.setItem('authority-session', session.session_token);
-      const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
-      if (!access) {
-        result.textContent = `Authenticated.\nuser=${session.user_id}\nsession expires=${new Date(session.expires_at * 1000).toISOString()}`;
-        return;
-      }
       const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
-      const envelope = await api('/v1/issuance-authorizations', {
+      const sshRequest = {
         device_id: access.device_id,
         target_node_id: access.target_node_id,
         ssh_public_key_fingerprint: sshKey.fingerprint,
-      }, { authorization: `Bearer ${session.session_token}` });
+      };
+      const envelope = await authorizedApi(
+        '/v1/issuance-authorizations', sshRequest, session.session_token, 'ssh.issue',
+        [access.device_id, access.target_node_id, sshKey.fingerprint],
+      );
       const issued = await api(`${issuerOrigin}/v1/ssh-certificates`, {
         authorization: envelope,
         ssh_public_key: sshKey.public_key,
@@ -185,12 +305,7 @@
       });
       let networkResult = '';
       if (wireguardPublicKey && networkAgentOrigin) {
-        const grant = await api('/v1/network-access-grants', {
-          device_id: access.device_id,
-          target_node_id: access.target_node_id,
-          wireguard_public_key: wireguardPublicKey,
-          mesh_address: '10.77.0.1',
-        }, { authorization: `Bearer ${session.session_token}` });
+        const grant = await window.authorityRequestNetworkGrant();
         const applied = await api(`${networkAgentOrigin}/v1/network-grants`, grant);
         networkResult = `\nWireGuard peer applied.\npeer=${applied.peer_public_key}\nallowed=${applied.allowed_ip}\nnetwork expires=${new Date(applied.expires_at * 1000).toISOString()}`;
       }
