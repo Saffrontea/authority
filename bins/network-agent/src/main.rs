@@ -8,7 +8,6 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex},
-    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -54,6 +53,8 @@ struct ApplyResponse {
     allowed_ip: String,
     expires_at: i64,
 }
+
+const MAX_ACTIVE_PEERS: usize = 1024;
 
 #[derive(Serialize)]
 struct IdentityResponse {
@@ -176,6 +177,14 @@ async fn apply_grant(
     let now = unix_timestamp().map_err(ApiError::internal)?;
     verify_network_grant_for_node(&envelope, &state.0.verifier, &state.0.node_id, now)
         .map_err(|cause| ApiError::unauthorized("invalid_network_grant", cause))?;
+    let peer = envelope.grant.wireguard_public_key.clone();
+    let allowed_ip = format!("{}/32", envelope.grant.mesh_address);
+    {
+        let peers = state.0.active_peers.lock().map_err(ApiError::internal)?;
+        if peers.len() >= MAX_ACTIVE_PEERS && !peers.contains_key(&peer) {
+            return Err(ApiError::unavailable("peer_capacity_reached"));
+        }
+    }
     let nonce = envelope.grant.nonce.clone();
     if !state
         .0
@@ -187,9 +196,6 @@ async fn apply_grant(
     {
         return Err(ApiError::conflict("network_grant_replayed"));
     }
-
-    let peer = envelope.grant.wireguard_public_key.clone();
-    let allowed_ip = format!("{}/32", envelope.grant.mesh_address);
     run_wg(&[
         "set",
         &state.0.interface,
@@ -210,8 +216,8 @@ async fn apply_grant(
     let interface = state.0.interface.clone();
     let expiry_state = state.clone();
     let delay = u64::try_from(expires_at.saturating_sub(now)).unwrap_or(0);
-    thread::spawn(move || {
-        thread::sleep(Duration::from_secs(delay));
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(delay)).await;
         let should_remove = expiry_state
             .0
             .active_peers
@@ -317,6 +323,13 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             code: "internal_error",
+        }
+    }
+
+    fn unavailable(code: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
         }
     }
 }
