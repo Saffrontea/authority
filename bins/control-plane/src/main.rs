@@ -7,7 +7,7 @@ mod ui;
 use authority_credential_crypto_openssl::OpenSslEd25519Signer;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
-use state::AppState;
+use state::{AppState, EnrollmentConfig};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -40,7 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.domain_id,
         config.bootstrap_token,
         signer,
-        config.target_identity_file,
+        EnrollmentConfig {
+            target_identity_file: config.target_identity_file,
+            client_wireguard_public_key: config.client_wireguard_public_key,
+        },
         (
             config.network_grant_ttl_seconds,
             config.ssh_authorization_ttl_seconds,

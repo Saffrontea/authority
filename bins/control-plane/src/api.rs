@@ -45,7 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(ui::index))
         .route("/health", get(health))
         .route("/v1/bootstrap/users", post(create_user))
-        .route("/v1/bootstrap/target-identity", get(target_identity))
+        .route("/v1/bootstrap/config", get(bootstrap_config))
         .route("/v1/bootstrap/demo-access", post(create_demo_access))
         .route("/v1/passkeys/registration/start", post(start_registration))
         .route(
@@ -81,14 +81,23 @@ struct TargetIdentityResponse {
     proof: String,
 }
 
-async fn target_identity(
+#[derive(Serialize)]
+struct BootstrapConfigResponse {
+    target_identity: TargetIdentityResponse,
+    wireguard_public_key: String,
+}
+
+async fn bootstrap_config(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<TargetIdentityResponse>, ApiError> {
+) -> Result<Json<BootstrapConfigResponse>, ApiError> {
     require_bootstrap_token(&state, &headers)?;
     let bytes = std::fs::read(state.target_identity_file()).map_err(ApiError::internal)?;
-    let identity = serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
-    Ok(Json(identity))
+    let target_identity = serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
+    Ok(Json(BootstrapConfigResponse {
+        target_identity,
+        wireguard_public_key: state.client_wireguard_public_key().to_owned(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -147,7 +156,6 @@ struct CreateDemoAccessRequest {
     user_id: Uuid,
     device_public_key: String,
     device_signature: String,
-    wireguard_public_key: Option<String>,
     target_node_id: Uuid,
     target_device_public_key: String,
     target_device_proof: String,
@@ -158,6 +166,7 @@ struct DemoAccessResponse {
     device_id: Uuid,
     target_node_id: Uuid,
     principal: String,
+    wireguard_public_key: String,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -181,10 +190,7 @@ async fn create_demo_access(
         return Err(ApiError::not_found("user_not_found"));
     }
 
-    let client_wireguard_key = request
-        .wireguard_public_key
-        .clone()
-        .unwrap_or_else(|| "poc-client-wireguard-unset".to_owned());
+    let client_wireguard_key = state.client_wireguard_public_key().to_owned();
     let device_public_key = verify_device_enrollment(&request, &client_wireguard_key)?;
     let target_device_public_key = verify_node_enrollment(&request)?;
 
@@ -218,7 +224,7 @@ async fn create_demo_access(
     .bind(state.domain_id())
     .bind(request.user_id)
     .bind(device_public_key.as_slice())
-    .bind(client_wireguard_key.into_bytes())
+    .bind(client_wireguard_key.as_bytes())
     .fetch_one(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
@@ -273,6 +279,7 @@ async fn create_demo_access(
             device_id,
             target_node_id,
             principal: "deploy".to_owned(),
+            wireguard_public_key: client_wireguard_key,
         }),
     ))
 }

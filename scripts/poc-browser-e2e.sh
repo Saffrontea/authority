@@ -157,9 +157,6 @@ webdriver POST "/session/${session}/webauthn/authenticator" \
     '{"protocol":"ctap2","transport":"internal","hasResidentKey":true,"hasUserVerification":true,"isUserConsenting":true,"isUserVerified":true}' >/dev/null
 
 query="issuer_origin=$(jq -rn --arg value "${issuer_origin}" '$value|@uri')&node_agent_origin=$(jq -rn --arg value "${node_origin}" '$value|@uri')"
-if [[ -n "${wireguard_public_key}" ]]; then
-    query+="&wireguard_public_key=$(jq -rn --arg value "${wireguard_public_key}" '$value|@uri')"
-fi
 page_url="${control_origin}/?${query}#bootstrap=${token}"
 webdriver POST "/session/${session}/url" "$(jq -nc --arg url "${page_url}" '{url:$url}')" >/dev/null
 set_value '#new-username' poc-e2e
