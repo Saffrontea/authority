@@ -32,6 +32,19 @@ def main() -> int:
         if digest != expected[relative]["sha256"]:
             print(f"{relative}: digest changed; review compatibility and update manifest", file=sys.stderr)
             return 1
+        if not local_references_exist(document, path.parent):
+            return 1
+
+        vector_root = CONTRACTS / "test-vectors" / path.stem.removesuffix(".schema")
+        for kind in ("valid", "invalid"):
+            vector_directory = vector_root / kind
+            if not vector_directory.is_dir() or not any(vector_directory.glob("*.json")):
+                print(
+                    f"{relative}: missing {kind} vectors in "
+                    f"{vector_directory.relative_to(CONTRACTS)}",
+                    file=sys.stderr,
+                )
+                return 1
 
     vectors = list((CONTRACTS / "test-vectors").rglob("*.json"))
     if not vectors:
@@ -42,6 +55,24 @@ def main() -> int:
 
     print(f"contracts: {len(actual_paths)} artifact(s), {len(vectors)} vector(s), digests verified")
     return 0
+
+
+def local_references_exist(value: object, base: Path) -> bool:
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if (
+            isinstance(reference, str)
+            and "://" not in reference
+            and not reference.startswith("#")
+        ):
+            target = (base / reference.split("#", 1)[0]).resolve()
+            if not target.is_file() or CONTRACTS.resolve() not in target.parents:
+                print(f"unresolved or escaping contract reference: {reference}", file=sys.stderr)
+                return False
+        return all(local_references_exist(child, base) for child in value.values())
+    if isinstance(value, list):
+        return all(local_references_exist(child, base) for child in value)
+    return True
 
 
 if __name__ == "__main__":

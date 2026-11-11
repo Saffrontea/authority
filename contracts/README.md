@@ -19,3 +19,9 @@ The v1 signing representation is defined by
 authorization signature cannot be replayed as a WireGuard peer grant. Its
 signed peer key, mesh address, target node, policy, audience, and validity
 window are all checked before application.
+
+`AccessAuthorizationBundleV1` is the provider-facing result of one policy
+evaluation. It contains the independently signed SSH and WireGuard projections
+and requires both to share the decision nonce, issuer, domain, subject, device,
+target, policy revision, and evaluation time. Consumers still accept only their
+scoped signed projection, so neither consumer gains authority over the other.
