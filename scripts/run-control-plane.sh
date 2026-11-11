@@ -35,7 +35,13 @@ AUTHORITY_SIGNING_PUBLIC_KEY_FILE=${AUTHORITY_SIGNING_PUBLIC_KEY_FILE:-$DEFAULT_
 export AUTHORITY_DB_HOST AUTHORITY_DB_PASSWORD_FILE AUTHORITY_BOOTSTRAP_TOKEN_FILE AUTHORITY_SIGNING_KEY_FILE AUTHORITY_SIGNING_PUBLIC_KEY_FILE
 
 bootstrap_token=$(sed -n '1p' "$bootstrap_token_file")
-echo "[control-plane] bootstrap URL: ${AUTHORITY_RP_ORIGIN:-http://localhost:3000}/#bootstrap=$bootstrap_token" >&2
+bootstrap_query=''
+if [ -n "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-}" ] && [ -n "${AUTHORITY_POC_WG_PUBLIC_KEY:-}" ]; then
+    network_agent_origin_encoded=$(jq -rn --arg value "$AUTHORITY_POC_NETWORK_AGENT_ORIGIN" '$value|@uri')
+    wireguard_public_key_encoded=$(jq -rn --arg value "$AUTHORITY_POC_WG_PUBLIC_KEY" '$value|@uri')
+    bootstrap_query="?network_agent_origin=${network_agent_origin_encoded}&wireguard_public_key=${wireguard_public_key_encoded}"
+fi
+echo "[control-plane] bootstrap URL: ${AUTHORITY_RP_ORIGIN:-http://localhost:3000}/${bootstrap_query}#bootstrap=$bootstrap_token" >&2
 unset bootstrap_token
 
 exec cargo run --offline -p authority-control-plane

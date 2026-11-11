@@ -130,7 +130,6 @@ node_origin="${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}"
 log_file="$(mktemp)"
 
 if [[ -n "${wireguard_public_key}" ]]; then
-    mise run mesh:agent:install
     for _ in {1..50}; do
         curl --silent --fail "${network_agent_origin}/v1/identity" >/dev/null 2>&1 && break
         sleep 0.2
