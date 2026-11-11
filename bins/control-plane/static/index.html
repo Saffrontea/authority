@@ -66,7 +66,6 @@
       history.replaceState(null, '', location.pathname + location.search);
     }
     let bootstrap = sessionStorage.getItem('authority-bootstrap');
-    const networkAgentOrigin = pageParameters.get('network_agent_origin');
     const wireguardPublicKey = pageParameters.get('wireguard_public_key');
     const terminalSection = document.querySelector('#terminal');
     const terminalOutput = document.querySelector('#terminal-output');
@@ -308,8 +307,8 @@
       return authorization.network_grant;
     };
 
-    async function getJson(path) {
-      const response = await fetch(path);
+    async function getJson(path, headers = {}) {
+      const response = await fetch(path, { headers });
       const value = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(`${response.status} ${value.error ?? response.statusText}`);
       return value;
@@ -336,8 +335,7 @@
         credential: credentialJson(credential),
       });
       const identity = await deviceIdentity();
-      if (!networkAgentOrigin) throw new Error('Target node identity endpoint is required for enrollment.');
-      const targetIdentity = await getJson(`${networkAgentOrigin}/v1/identity`);
+      const targetIdentity = await getJson('/v1/bootstrap/target-identity', headers);
       const enrolledWireGuardKey = wireguardPublicKey ?? 'poc-client-wireguard-unset';
       const deviceSignature = await signDevice(identity, 'AUTHORITY-DEVICE-ENROLLMENT-V1', [
         user.user_id, identity.publicKey, enrolledWireGuardKey,

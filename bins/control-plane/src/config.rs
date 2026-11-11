@@ -15,6 +15,7 @@ pub struct Config {
     pub signing_key_id: String,
     pub signing_key_file: PathBuf,
     pub signing_public_key_file: PathBuf,
+    pub target_identity_file: PathBuf,
     pub network_grant_ttl_seconds: i64,
     pub ssh_authorization_ttl_seconds: i64,
 }
@@ -43,6 +44,7 @@ impl Config {
         let signing_key_id = value("AUTHORITY_SIGNING_KEY_ID", "control-plane-key-1")?;
         let signing_key_file = PathBuf::from(required("AUTHORITY_SIGNING_KEY_FILE")?);
         let signing_public_key_file = PathBuf::from(required("AUTHORITY_SIGNING_PUBLIC_KEY_FILE")?);
+        let target_identity_file = PathBuf::from(required("AUTHORITY_TARGET_IDENTITY_FILE")?);
         let network_grant_ttl_seconds = value("AUTHORITY_NETWORK_GRANT_TTL_SECONDS", "300")?
             .parse::<i64>()
             .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
@@ -83,6 +85,7 @@ impl Config {
             signing_key_id,
             signing_key_file,
             signing_public_key_file,
+            target_identity_file,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
         })

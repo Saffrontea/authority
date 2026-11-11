@@ -45,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(ui::index))
         .route("/health", get(health))
         .route("/v1/bootstrap/users", post(create_user))
+        .route("/v1/bootstrap/target-identity", get(target_identity))
         .route("/v1/bootstrap/demo-access", post(create_demo_access))
         .route("/v1/passkeys/registration/start", post(start_registration))
         .route(
@@ -71,6 +72,23 @@ pub fn router(state: AppState) -> Router {
 
 async fn health() -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+#[derive(Deserialize, Serialize)]
+struct TargetIdentityResponse {
+    node_id: Uuid,
+    public_key: String,
+    proof: String,
+}
+
+async fn target_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TargetIdentityResponse>, ApiError> {
+    require_bootstrap_token(&state, &headers)?;
+    let bytes = std::fs::read(state.target_identity_file()).map_err(ApiError::internal)?;
+    let identity = serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
+    Ok(Json(identity))
 }
 
 #[derive(Deserialize)]

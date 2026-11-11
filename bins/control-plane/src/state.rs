@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -24,6 +25,7 @@ struct Inner {
     authentications: Mutex<HashMap<Uuid, PendingAuthentication>>,
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     signer: OpenSslEd25519Signer,
+    target_identity_file: PathBuf,
     network_grant_ttl_seconds: i64,
     ssh_authorization_ttl_seconds: i64,
 }
@@ -59,9 +61,10 @@ impl AppState {
         domain_id: Uuid,
         bootstrap_token: String,
         signer: OpenSslEd25519Signer,
-        network_grant_ttl_seconds: i64,
-        ssh_authorization_ttl_seconds: i64,
+        target_identity_file: PathBuf,
+        authorization_ttls: (i64, i64),
     ) -> Self {
+        let (network_grant_ttl_seconds, ssh_authorization_ttl_seconds) = authorization_ttls;
         Self(Arc::new(Inner {
             pool,
             webauthn,
@@ -71,6 +74,7 @@ impl AppState {
             authentications: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             signer,
+            target_identity_file,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
         }))
@@ -86,6 +90,10 @@ impl AppState {
 
     pub fn domain_id(&self) -> Uuid {
         self.0.domain_id
+    }
+
+    pub fn target_identity_file(&self) -> &Path {
+        &self.0.target_identity_file
     }
 
     pub fn verify_bootstrap_token(&self, supplied: &str) -> Result<bool, String> {

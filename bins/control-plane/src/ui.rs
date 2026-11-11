@@ -3,14 +3,14 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 
-const CSP_SCRIPT_HASH: &str = "YlBYDyls/N1qN0GlV//NDEdn4H0y+mWCBAkWztAeRDc=";
+const CSP_SCRIPT_HASH: &str = "wdcnVZeSLV4VjF6DJDJtPiGU85tW7FnVyQ5S2y1+Trc=";
 
 pub async fn index() -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_str(&format!(
-            "default-src 'none'; script-src 'sha256-{CSP_SCRIPT_HASH}'; style-src 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* http://10.0.3.110:3003 ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+            "default-src 'none'; script-src 'sha256-{CSP_SCRIPT_HASH}'; style-src 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
         ))
         .expect("static CSP header is valid"),
     );

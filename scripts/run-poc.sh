@@ -9,6 +9,7 @@ cleaned_up=0
 control_origin=${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}
 issuer_origin=${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}
 node_origin=${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}
+AUTHORITY_TARGET_IDENTITY_FILE=${AUTHORITY_TARGET_IDENTITY_FILE:-${SCRIPT_DIR}/../.secrets/target-node-identity.json}
 
 if [[ -z "${AUTHORITY_SSH_TARGET:-}" || -z "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-}" || -z "${AUTHORITY_POC_WG_PUBLIC_KEY:-}" ]]; then
     mesh_status="$(mise run mesh:status)"
@@ -40,7 +41,7 @@ if [[ -z "${AUTHORITY_POC_WG_PUBLIC_KEY:-}" ]]; then
     exit 1
 fi
 AUTHORITY_POC_NETWORK_AGENT_ORIGIN=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-http://${AUTHORITY_SSH_TARGET}:3003}
-export AUTHORITY_SSH_TARGET AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_POC_WG_PUBLIC_KEY
+export AUTHORITY_SSH_TARGET AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_POC_WG_PUBLIC_KEY AUTHORITY_TARGET_IDENTITY_FILE
 echo "[poc] target=${AUTHORITY_SSH_TARGET} network-agent=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}" >&2
 
 cleanup() {
@@ -98,6 +99,11 @@ if ! curl --fail --silent --show-error "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}/v1
     echo "poc:run: target node identity endpoint did not become ready" >&2
     exit 1
 fi
+target_identity_tmp="${AUTHORITY_TARGET_IDENTITY_FILE}.tmp.$$"
+trap 'rm -f -- "${target_identity_tmp}"; cleanup' EXIT
+curl --fail --silent --show-error "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}/v1/identity" >"${target_identity_tmp}"
+chmod 0600 "${target_identity_tmp}"
+mv -f -- "${target_identity_tmp}" "${AUTHORITY_TARGET_IDENTITY_FILE}"
 echo "[poc] target node identity is ready" >&2
 
 "${SCRIPT_DIR}/run-node-agent.sh" &
