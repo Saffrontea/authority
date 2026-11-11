@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     env,
+    fs::{self, OpenOptions},
+    io::Write,
     net::SocketAddr,
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::Command,
     sync::{Arc, Mutex},
@@ -10,8 +13,9 @@ use std::{
 };
 
 use authority_contracts_model::SignedNetworkAccessGrantV1;
-use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
-use authority_issuer_core::verify_network_grant_for_node;
+use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
+use authority_device_auth_core::{encode_base64url, node_enrollment_preimage};
+use authority_issuer_core::{AuthorizationSigner, verify_network_grant_for_node};
 use authority_replay_ledger::ReplayLedger;
 use axum::{
     Json, Router,
@@ -20,6 +24,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use openssl::sha::sha256;
 use serde::Serialize;
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
@@ -35,6 +40,12 @@ struct Inner {
     interface: String,
     replay_ledger: Mutex<ReplayLedger>,
     active_peers: Mutex<HashMap<String, i64>>,
+    identity: NodeIdentity,
+}
+
+struct NodeIdentity {
+    public_key: String,
+    proof: String,
 }
 
 #[derive(Serialize)]
@@ -44,13 +55,19 @@ struct ApplyResponse {
     expires_at: i64,
 }
 
+#[derive(Serialize)]
+struct IdentityResponse {
+    node_id: String,
+    public_key: String,
+    proof: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let bind: SocketAddr = value("AUTHORITY_NETWORK_AGENT_BIND", "0.0.0.0:3003")?.parse()?;
-    let node_id = required("AUTHORITY_NODE_ID")?;
     let interface = value("AUTHORITY_WIREGUARD_INTERFACE", "wg0")?;
     if interface.is_empty()
         || !interface
@@ -63,6 +80,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         value("AUTHORITY_CONTROL_PLANE_KEY_ID", "control-plane-key-1")?,
         PathBuf::from(required("AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE")?),
     )?;
+    let identity_path = PathBuf::from(value(
+        "AUTHORITY_NETWORK_AGENT_IDENTITY_FILE",
+        "/var/lib/authority/node-identity.pem",
+    )?);
+    let identity_signer = load_or_generate_identity(&identity_path)?;
+    let raw_public_key = identity_signer.public_key_raw()?;
+    let node_id = node_id_from_public_key(&raw_public_key);
+    let public_key = encode_base64url(&raw_public_key);
+    let proof =
+        encode_base64url(&identity_signer.sign(&node_enrollment_preimage(&node_id, &public_key))?);
     let now = unix_timestamp()?;
     let replay_ledger = ReplayLedger::open(
         PathBuf::from(value(
@@ -78,9 +105,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         interface,
         replay_ledger: Mutex::new(replay_ledger),
         active_peers: Mutex::new(HashMap::new()),
+        identity: NodeIdentity { public_key, proof },
     }));
     let router = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/v1/identity", get(identity))
         .route("/v1/network-grants", post(apply_grant))
         .with_state(state)
         .layer(
@@ -93,6 +122,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(%bind, "network agent listening");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+async fn identity(State(state): State<AppState>) -> Json<IdentityResponse> {
+    Json(IdentityResponse {
+        node_id: state.0.node_id.clone(),
+        public_key: state.0.identity.public_key.clone(),
+        proof: state.0.identity.proof.clone(),
+    })
+}
+
+fn node_id_from_public_key(public_key: &[u8; 32]) -> String {
+    let digest = sha256(public_key);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
+
+fn load_or_generate_identity(path: &PathBuf) -> Result<OpenSslEd25519Signer, String> {
+    match OpenSslEd25519Signer::from_pem_file("node-identity", path) {
+        Ok(signer) => Ok(signer),
+        Err(_) if !path.exists() => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            let signer = OpenSslEd25519Signer::generate("node-identity")
+                .map_err(|error| error.to_string())?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|error| error.to_string())?;
+            file.write_all(
+                &signer
+                    .private_key_to_pem()
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            file.sync_all().map_err(|error| error.to_string())?;
+            Ok(signer)
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 async fn apply_grant(

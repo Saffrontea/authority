@@ -114,6 +114,17 @@ issuer_origin="${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}"
 node_origin="${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}"
 log_file="$(mktemp)"
 
+if [[ -n "${wireguard_public_key}" ]]; then
+    mise run mesh:agent:install
+    for _ in {1..50}; do
+        curl --silent --fail "${network_agent_origin}/v1/identity" >/dev/null 2>&1 && break
+        sleep 0.2
+    done
+    curl --silent --fail "${network_agent_origin}/v1/identity" >/dev/null ||
+        die 'target network-agent identity endpoint did not become ready'
+    printf '[poc:e2e] target network-agent identity ready\n'
+fi
+
 chromedriver --port=9515 --allowed-ips=127.0.0.1 --log-level=WARNING >"${log_file}" 2>&1 &
 driver_pid=$!
 printf '[poc:e2e] starting ChromeDriver\n'
@@ -144,11 +155,9 @@ registered="$(wait_for_result 'Passkey registered.' 'Passkey registration')"
 if [[ -n "${wireguard_public_key}" ]]; then
     target_id="$(awk -F= '/^target=/ { print $2 }' <<<"${registered}")"
     [[ -n "${target_id}" ]] || die 'registration did not return target node id'
-    install -d -m 0700 "${PROJECT_DIR}/.secrets"
-    printf '%s\n' "${target_id}" >"${PROJECT_DIR}/.secrets/poc-mesh-target-node-id"
-    chmod 0600 "${PROJECT_DIR}/.secrets/poc-mesh-target-node-id"
-    mise run mesh:agent:install
-    printf '[poc:e2e] target network-agent installed\n'
+    reported_target_id="$(curl --silent --fail "${network_agent_origin}/v1/identity" | jq -r '.node_id')"
+    [[ "${target_id}" == "${reported_target_id}" ]] || die 'registered target does not match LXC-held identity'
+    printf '[poc:e2e] target network-agent identity registered\n'
 fi
 
 click '#login'

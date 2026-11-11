@@ -7,7 +7,7 @@ use authority_contracts_model::{
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{
     authentication_preimage, decode_public_key, decode_signature, encode_base64url,
-    enrollment_preimage, session_request_preimage,
+    enrollment_preimage, node_enrollment_preimage, session_request_preimage,
 };
 use authority_issuer_core::{sign_authorization, sign_network_grant};
 use axum::{
@@ -129,6 +129,9 @@ struct CreateDemoAccessRequest {
     device_public_key: String,
     device_signature: String,
     wireguard_public_key: Option<String>,
+    target_node_id: Uuid,
+    target_device_public_key: String,
+    target_device_proof: String,
 }
 
 #[derive(Serialize)]
@@ -138,6 +141,7 @@ struct DemoAccessResponse {
     principal: String,
 }
 
+#[allow(clippy::too_many_lines)]
 async fn create_demo_access(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -163,10 +167,11 @@ async fn create_demo_access(
         .clone()
         .unwrap_or_else(|| "poc-client-wireguard-unset".to_owned());
     let device_public_key = verify_device_enrollment(&request, &client_wireguard_key)?;
+    let target_device_public_key = verify_node_enrollment(&request)?;
 
     let proposed_device_id = Uuid::new_v4();
     let target_device_id = Uuid::new_v4();
-    let target_node_id = Uuid::new_v4();
+    let target_node_id = request.target_node_id;
     let policy_id = Uuid::new_v4();
     let address_seed = target_node_id.as_bytes();
     let mesh_address = format!(
@@ -199,23 +204,28 @@ async fn create_demo_access(
     .await
     .map_err(ApiError::internal)?;
 
-    sqlx::query(
+    let target_device_id: Uuid = sqlx::query_scalar(
         "INSERT INTO device.devices \
          (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
-         VALUES ($1, $2, $3, $4, $5, 'active', now())",
+         VALUES ($1, $2, $3, $4, $5, 'active', now()) \
+         ON CONFLICT (domain_id, device_public_key) DO UPDATE \
+         SET owner_user_id = EXCLUDED.owner_user_id, status = 'active', enrolled_at = now() \
+         RETURNING id",
     )
     .bind(target_device_id)
     .bind(state.domain_id())
     .bind(request.user_id)
-    .bind(format!("poc-target-device-{target_device_id}").into_bytes())
+    .bind(target_device_public_key.as_slice())
     .bind(format!("poc-target-wireguard-{target_device_id}").into_bytes())
-    .execute(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
     sqlx::query(
         "INSERT INTO device.nodes \
          (id, device_id, hostname, mesh_address, ssh_principals, status) \
-         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active')",
+         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active') \
+         ON CONFLICT (id) DO UPDATE SET device_id = EXCLUDED.device_id, \
+             mesh_address = EXCLUDED.mesh_address, status = 'active'",
     )
     .bind(target_node_id)
     .bind(target_device_id)
@@ -246,6 +256,34 @@ async fn create_demo_access(
             principal: "deploy".to_owned(),
         }),
     ))
+}
+
+fn verify_node_enrollment(request: &CreateDemoAccessRequest) -> Result<[u8; 32], ApiError> {
+    let public_key = decode_public_key(&request.target_device_public_key)
+        .map_err(|_| ApiError::bad_request("invalid_target_device_public_key"))?;
+    if node_id_from_public_key(&public_key) != request.target_node_id {
+        return Err(ApiError::bad_request("target_node_id_key_mismatch"));
+    }
+    let signature = decode_signature(&request.target_device_proof)
+        .map_err(|_| ApiError::bad_request("invalid_target_device_proof"))?;
+    let message = node_enrollment_preimage(
+        &request.target_node_id.to_string(),
+        &request.target_device_public_key,
+    );
+    if verify_device_signature(&public_key, &message, &signature).map_err(ApiError::internal)? {
+        Ok(public_key)
+    } else {
+        Err(ApiError::unauthorized("invalid_target_device_proof"))
+    }
+}
+
+fn node_id_from_public_key(public_key: &[u8; 32]) -> Uuid {
+    let digest = sha256(public_key);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 fn verify_device_enrollment(

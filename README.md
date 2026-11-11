@@ -4,11 +4,14 @@ This workspace demonstrates the initial end-to-end trust flow:
 
 1. authenticate a human with a Passkey;
 2. evaluate an explicit user, device, target, and principal policy;
-3. sign a versioned issuance-authorization contract in the Control Plane;
-4. independently verify that contract in the Credential Issuer;
-5. bind it to a locally generated SSH public key and issue a five-minute
-   OpenSSH user certificate;
-6. verify the CA signature and install the certificate in the Node Agent.
+3. verify proof of possession for both the browser device and the target
+   node's LXC-held Ed25519 identity;
+4. make one policy decision and bind both the SSH authorization and WireGuard
+   grant to its shared signed decision nonce;
+5. independently verify the scoped contracts in the Credential Issuer and
+   target Network Agent, with durable replay ledgers;
+6. issue and install a five-minute OpenSSH user certificate, then apply and
+   expire the short-lived WireGuard peer.
 
 PostgreSQL runs in the `authority-db` LXC container. Start the privileged
 database agent first if it is not already running:

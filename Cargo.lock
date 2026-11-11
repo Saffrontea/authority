@@ -217,15 +217,18 @@ version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
  "authority-credential-crypto-openssl",
+ "authority-device-auth-core",
  "authority-issuer-core",
  "authority-replay-ledger",
  "axum",
+ "openssl",
  "serde",
  "serde_json",
  "tokio",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

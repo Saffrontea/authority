@@ -95,6 +95,21 @@ impl OpenSslEd25519Signer {
     pub fn public_key_to_pem(&self) -> Result<Vec<u8>, CryptoError> {
         self.private_key.public_key_to_pem().map_err(crypto_error)
     }
+
+    /// Returns the canonical 32-byte raw Ed25519 public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when OpenSSL cannot export the public key.
+    pub fn public_key_raw(&self) -> Result<[u8; 32], CryptoError> {
+        self.private_key
+            .raw_public_key()
+            .map_err(crypto_error)?
+            .try_into()
+            .map_err(|_| CryptoError {
+                message: "Ed25519 public key was not 32 bytes".to_owned(),
+            })
+    }
 }
 
 impl OpenSslEd25519Verifier {

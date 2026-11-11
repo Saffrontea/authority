@@ -8,15 +8,18 @@ rust-version.workspace = true
 [dependencies]
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
+authority-device-auth-core.workspace = true
 authority-issuer-core.workspace = true
 authority-replay-ledger.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+openssl.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tower-http.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -256,6 +256,8 @@
         credential: credentialJson(credential),
       });
       const identity = await deviceIdentity();
+      if (!networkAgentOrigin) throw new Error('Target node identity endpoint is required for enrollment.');
+      const targetIdentity = await getJson(`${networkAgentOrigin}/v1/identity`);
       const enrolledWireGuardKey = wireguardPublicKey ?? 'poc-client-wireguard-unset';
       const deviceSignature = await signDevice(identity, 'AUTHORITY-DEVICE-ENROLLMENT-V1', [
         user.user_id, identity.publicKey, enrolledWireGuardKey,
@@ -265,6 +267,9 @@
         device_public_key: identity.publicKey,
         device_signature: deviceSignature,
         wireguard_public_key: wireguardPublicKey,
+        target_node_id: targetIdentity.node_id,
+        target_device_public_key: targetIdentity.public_key,
+        target_device_proof: targetIdentity.proof,
       }, headers);
       sessionStorage.removeItem('authority-bootstrap');
       bootstrap = null;

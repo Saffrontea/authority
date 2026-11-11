@@ -14,7 +14,6 @@ readonly TARGET_MESH_IP="${TARGET_MESH_ADDRESS%/*}"
 readonly WG_PORT=51820
 readonly NETWORK_AGENT_BINARY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/target/debug/authority-network-agent"
 readonly CONTROL_PLANE_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/control-plane-ed25519.pub.pem"
-readonly TARGET_NODE_ID_FILE="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/poc-mesh-target-node-id"
 
 log() {
   printf '[authority-mesh] %s\n' "$*"
@@ -300,21 +299,16 @@ verify_mesh() {
 }
 
 install_network_agent() {
-  local node_id target_underlay
+  local target_underlay
   [[ "$(container_state "${TARGET_NAME}")" == "RUNNING" ]] || die "${TARGET_NAME} is not running"
   [[ -x "${NETWORK_AGENT_BINARY}" ]] || die "network agent binary missing; run cargo build -p authority-network-agent"
   [[ -s "${CONTROL_PLANE_PUBLIC_KEY}" ]] || die "control-plane public key is missing"
-  [[ -s "${TARGET_NODE_ID_FILE}" ]] || die "target node id is missing: ${TARGET_NODE_ID_FILE}"
-  node_id="$(<"${TARGET_NODE_ID_FILE}")"
-  [[ "${node_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || die "invalid target node id"
-
-  log "installing network-agent for node ${node_id}"
+  log "installing network-agent with container-held identity"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
     "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent"
   as_root install -m 0644 "${CONTROL_PLANE_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-control-plane.pub.pem"
-  attach "${TARGET_NAME}" sh -seu -- "${node_id}" <<'CONTAINER_SCRIPT'
-node_id="$1"
+  attach "${TARGET_NAME}" sh -seu <<'CONTAINER_SCRIPT'
 cat > /etc/systemd/system/authority-network-agent.service <<EOF
 [Unit]
 Description=Authority WireGuard network grant agent
@@ -323,10 +317,10 @@ Requires=wg-quick@wg0.service
 
 [Service]
 ExecStart=/usr/local/bin/authority-network-agent
-Environment=AUTHORITY_NODE_ID=${node_id}
 Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
 Environment=AUTHORITY_WIREGUARD_INTERFACE=wg0
 Environment=AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE=/var/lib/authority/network-agent-replay-ledger
+Environment=AUTHORITY_NETWORK_AGENT_IDENTITY_FILE=/var/lib/authority/node-identity.pem
 StateDirectory=authority
 Restart=on-failure
 
@@ -338,7 +332,7 @@ systemctl enable authority-network-agent.service >/dev/null
 systemctl restart authority-network-agent.service
 CONTAINER_SCRIPT
   target_underlay="$(container_ip "${TARGET_NAME}")"
-  log "network-agent=http://${target_underlay}:3003 node=${node_id}"
+  log "network-agent=http://${target_underlay}:3003"
 }
 
 network_agent_status() {

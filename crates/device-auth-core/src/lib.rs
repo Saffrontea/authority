@@ -5,6 +5,7 @@ use thiserror::Error;
 const ENROLLMENT_DOMAIN: &[u8] = b"AUTHORITY-DEVICE-ENROLLMENT-V1\0";
 const AUTHENTICATION_DOMAIN: &[u8] = b"AUTHORITY-DEVICE-AUTHENTICATION-V1\0";
 const SESSION_REQUEST_DOMAIN: &[u8] = b"AUTHORITY-DEVICE-SESSION-REQUEST-V1\0";
+const NODE_ENROLLMENT_DOMAIN: &[u8] = b"AUTHORITY-NODE-ENROLLMENT-V1\0";
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceProofError {
@@ -31,6 +32,11 @@ pub fn enrollment_preimage(
 #[must_use]
 pub fn authentication_preimage(challenge_id: &str, device_challenge: &str) -> Vec<u8> {
     preimage(AUTHENTICATION_DOMAIN, &[challenge_id, device_challenge])
+}
+
+#[must_use]
+pub fn node_enrollment_preimage(node_id: &str, public_key: &str) -> Vec<u8> {
+    preimage(NODE_ENROLLMENT_DOMAIN, &[node_id, public_key])
 }
 
 #[must_use]
