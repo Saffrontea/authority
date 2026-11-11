@@ -10,6 +10,24 @@ control_origin=${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}
 issuer_origin=${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}
 node_origin=${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}
 
+if [[ -z "${AUTHORITY_SSH_TARGET:-}" ]]; then
+    mesh_status="$(mise run mesh:status)"
+    AUTHORITY_SSH_TARGET="$(
+        printf '%s\n' "${mesh_status}" |
+            awk '/^authority-target: RUNNING underlay=/ {
+                sub(/^.*underlay=/, "")
+                if ($0 != "none") print
+                exit
+            }'
+    )"
+    if [[ -z "${AUTHORITY_SSH_TARGET}" ]]; then
+        echo "poc:run: running authority-target LXC not found; run mise run mesh:setup" >&2
+        exit 1
+    fi
+    echo "[poc] SSH target discovered at ${AUTHORITY_SSH_TARGET}" >&2
+fi
+export AUTHORITY_SSH_TARGET
+
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1

@@ -27,6 +27,7 @@ In another terminal, start the complete PoC:
 mise run poc:run
 ```
 
+The runner discovers the running `authority-target` LXC address automatically.
 Open the bootstrap URL printed by the runner. Use **Create user and Passkey**
 once, then **Sign in with Passkey**. A successful run prints the local SSH key
 and certificate paths together with the issued OpenSSH certificate. The page
