@@ -1,7 +1,70 @@
-//! Pure access-policy evaluation shared by every credential adapter.
+//! Storage- and adapter-independent access planning and policy evaluation.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Outcome {
+    Ssh,
+    NetworkReachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Direct,
+    MeshRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessIntent {
+    pub outcomes: BTreeSet<Outcome>,
+    pub route: Route,
+}
+
+impl AccessIntent {
+    #[must_use]
+    pub fn ssh(route: Route) -> Self {
+        Self {
+            outcomes: BTreeSet::from([Outcome::Ssh]),
+            route,
+        }
+    }
+
+    #[must_use]
+    pub fn network() -> Self {
+        Self {
+            outcomes: BTreeSet::from([Outcome::NetworkReachability]),
+            route: Route::MeshRequired,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Capability {
+    MeshJoin,
+    NetworkReach,
+    SshIssue,
+}
+
+/// Computes the least set of capabilities required to realize an intent.
+#[must_use]
+pub fn plan(intent: &AccessIntent) -> BTreeSet<Capability> {
+    let mut required = BTreeSet::new();
+    if intent.outcomes.contains(&Outcome::Ssh) {
+        required.insert(Capability::SshIssue);
+    }
+    if intent.outcomes.contains(&Outcome::NetworkReachability)
+        || (intent.outcomes.contains(&Outcome::Ssh) && intent.route == Route::MeshRequired)
+    {
+        required.insert(Capability::NetworkReach);
+    }
+    if required.contains(&Capability::NetworkReach) && intent.route == Route::MeshRequired {
+        required.insert(Capability::MeshJoin);
+    }
+    required
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessRequest {
@@ -10,10 +73,19 @@ pub struct AccessRequest {
     pub device_id: Uuid,
     pub target_node_id: Uuid,
     pub evaluated_at: i64,
+    pub intent: AccessIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolicyCandidate {
+pub struct IdentityFacts {
+    pub device_domain_id: Uuid,
+    pub device_owner_user_id: Uuid,
+    pub device_active: bool,
+    pub target_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRule {
     pub policy_id: Uuid,
     pub domain_id: Uuid,
     pub subject_user_id: Uuid,
@@ -23,31 +95,16 @@ pub struct PolicyCandidate {
     pub effect: Effect,
     pub priority: i32,
     pub revision: i64,
-    pub capabilities: Vec<String>,
+    pub grants: BTreeSet<Capability>,
     pub revoked_at: Option<i64>,
     pub valid_from: Option<i64>,
     pub valid_until: Option<i64>,
-    pub ssh_principal: String,
-    pub device_domain_id: Uuid,
-    pub device_owner_user_id: Uuid,
-    pub device_active: bool,
-    pub target_active: bool,
-    pub wireguard_public_key: Vec<u8>,
-    pub device_mesh_address: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessDecision {
-    pub policy_id: Uuid,
-    pub policy_revision: i64,
-    pub domain_id: Uuid,
-    pub subject_user_id: Uuid,
-    pub device_id: Uuid,
-    pub target_node_id: Uuid,
-    pub ssh_principal: String,
-    pub wireguard_public_key: Vec<u8>,
-    pub device_mesh_address: String,
-    pub evaluated_at: i64,
+pub struct PolicySnapshot {
+    pub identity: IdentityFacts,
+    pub rules: Vec<PolicyRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,99 +113,104 @@ pub enum Effect {
     Deny,
 }
 
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum DenialReason {
-    #[error("policy identity scope does not match the request")]
-    ScopeMismatch,
-    #[error("device identity does not match the authenticated subject")]
-    DeviceMismatch,
-    #[error("policy requires a different device")]
-    RequiredDeviceMismatch,
-    #[error("policy, device, or target is disabled")]
-    Disabled,
-    #[error("policy explicitly denies access")]
-    ExplicitDeny,
-    #[error("policy does not grant both required adapter capabilities")]
-    MissingCapability,
-    #[error("policy is outside its validity window")]
-    OutsideValidityWindow,
-    #[error("policy has no valid SSH principal")]
-    InvalidPrincipal,
-    #[error("device has no assigned mesh address")]
-    MissingMeshAddress,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PolicyRef {
+    pub policy_id: Uuid,
+    pub revision: i64,
 }
 
-/// Evaluates one repository-provided candidate without knowing its storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessDecision {
+    pub required: BTreeSet<Capability>,
+    pub sources: BTreeMap<Capability, PolicyRef>,
+}
+
+impl AccessDecision {
+    #[must_use]
+    pub fn policies(&self) -> BTreeSet<PolicyRef> {
+        self.sources.values().copied().collect()
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum DenialReason {
+    #[error("device identity does not match the authenticated subject")]
+    DeviceMismatch,
+    #[error("device or target is disabled")]
+    Disabled,
+    #[error("a required capability is explicitly denied")]
+    ExplicitDeny(Capability),
+    #[error("no applicable policy grants a required capability")]
+    MissingCapability(Capability),
+}
+
+/// Evaluates an immutable snapshot using set operations only.
+///
+/// For each required capability, the highest-priority applicable rule wins.
+/// A deny wins an exact priority and revision tie.
 ///
 /// # Errors
 ///
-/// Returns a stable denial reason when any common policy invariant fails.
+/// Returns a stable reason when identity facts or a required capability deny
+/// the requested intent.
 pub fn evaluate(
     request: &AccessRequest,
-    candidate: PolicyCandidate,
+    snapshot: &PolicySnapshot,
 ) -> Result<AccessDecision, DenialReason> {
-    if candidate.domain_id != request.domain_id
-        || candidate.subject_user_id != request.subject_user_id
-        || candidate.target_node_id != request.target_node_id
-    {
-        return Err(DenialReason::ScopeMismatch);
-    }
-    if candidate.device_domain_id != request.domain_id
-        || candidate.device_owner_user_id != request.subject_user_id
+    if snapshot.identity.device_domain_id != request.domain_id
+        || snapshot.identity.device_owner_user_id != request.subject_user_id
     {
         return Err(DenialReason::DeviceMismatch);
     }
-    if candidate
-        .required_device_id
-        .is_some_and(|id| id != request.device_id)
-    {
-        return Err(DenialReason::RequiredDeviceMismatch);
-    }
-    if !candidate.enabled
-        || candidate.revoked_at.is_some()
-        || !candidate.device_active
-        || !candidate.target_active
-    {
+    if !snapshot.identity.device_active || !snapshot.identity.target_active {
         return Err(DenialReason::Disabled);
     }
-    if candidate
-        .valid_from
-        .is_some_and(|valid_from| valid_from > request.evaluated_at)
-        || candidate
-            .valid_until
-            .is_some_and(|valid_until| valid_until <= request.evaluated_at)
-    {
-        return Err(DenialReason::OutsideValidityWindow);
-    }
-    if candidate.ssh_principal.is_empty() {
-        return Err(DenialReason::InvalidPrincipal);
-    }
-    if !candidate.capabilities.iter().any(|value| value == "ssh")
-        || !candidate
-            .capabilities
+
+    let required = plan(&request.intent);
+    let mut sources = BTreeMap::new();
+    for capability in &required {
+        let winner = snapshot
+            .rules
             .iter()
-            .any(|value| value == "wireguard")
-    {
-        return Err(DenialReason::MissingCapability);
+            .filter(|rule| applicable(request, rule) && rule.grants.contains(capability))
+            .max_by_key(|rule| {
+                (
+                    rule.priority,
+                    rule.revision,
+                    matches!(rule.effect, Effect::Deny),
+                    rule.policy_id,
+                )
+            })
+            .ok_or(DenialReason::MissingCapability(*capability))?;
+        if winner.effect == Effect::Deny {
+            return Err(DenialReason::ExplicitDeny(*capability));
+        }
+        sources.insert(
+            *capability,
+            PolicyRef {
+                policy_id: winner.policy_id,
+                revision: winner.revision,
+            },
+        );
     }
-    if candidate.effect == Effect::Deny {
-        return Err(DenialReason::ExplicitDeny);
-    }
-    let device_mesh_address = candidate
-        .device_mesh_address
-        .ok_or(DenialReason::MissingMeshAddress)?;
-    Ok(AccessDecision {
-        policy_id: candidate.policy_id,
-        policy_revision: candidate.revision,
-        domain_id: request.domain_id,
-        subject_user_id: request.subject_user_id,
-        device_id: request.device_id,
-        target_node_id: request.target_node_id,
-        ssh_principal: candidate.ssh_principal,
-        wireguard_public_key: candidate.wireguard_public_key,
-        device_mesh_address,
-        evaluated_at: request.evaluated_at,
-    })
+    Ok(AccessDecision { required, sources })
+}
+
+fn applicable(request: &AccessRequest, rule: &PolicyRule) -> bool {
+    rule.domain_id == request.domain_id
+        && rule.subject_user_id == request.subject_user_id
+        && rule.target_node_id == request.target_node_id
+        && rule
+            .required_device_id
+            .is_none_or(|device_id| device_id == request.device_id)
+        && rule.enabled
+        && rule.revoked_at.is_none()
+        && rule
+            .valid_from
+            .is_none_or(|time| time <= request.evaluated_at)
+        && rule
+            .valid_until
+            .is_none_or(|time| time > request.evaluated_at)
 }
 
 #[cfg(test)]
@@ -156,85 +218,99 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_decision_carries_bindings_for_both_adapters() {
-        let (request, candidate) = fixture();
-        let decision = evaluate(&request, candidate).expect("allow fixture");
-        assert_eq!(decision.ssh_principal, "deploy");
-        assert_eq!(decision.wireguard_public_key, b"registered-wg-key");
-    }
-
-    #[test]
-    fn rejects_wrong_device_and_expired_policy() {
-        let (request, mut candidate) = fixture();
-        candidate.device_owner_user_id = Uuid::new_v4();
+    fn plans_direct_ssh_without_mesh_capabilities() {
         assert_eq!(
-            evaluate(&request, candidate),
-            Err(DenialReason::DeviceMismatch)
-        );
-
-        let (request, mut candidate) = fixture();
-        candidate.valid_until = Some(request.evaluated_at);
-        assert_eq!(
-            evaluate(&request, candidate),
-            Err(DenialReason::OutsideValidityWindow)
+            plan(&AccessIntent::ssh(Route::Direct)),
+            BTreeSet::from([Capability::SshIssue])
         );
     }
 
     #[test]
-    fn rejects_explicit_deny_revocation_and_incomplete_capabilities() {
-        let (request, mut candidate) = fixture();
-        candidate.effect = Effect::Deny;
+    fn plans_network_access_as_mesh_join_and_reachability() {
         assert_eq!(
-            evaluate(&request, candidate),
-            Err(DenialReason::ExplicitDeny)
-        );
-
-        let (request, mut candidate) = fixture();
-        candidate.revoked_at = Some(99);
-        assert_eq!(evaluate(&request, candidate), Err(DenialReason::Disabled));
-
-        let (request, mut candidate) = fixture();
-        candidate.capabilities = vec!["ssh".to_owned()];
-        assert_eq!(
-            evaluate(&request, candidate),
-            Err(DenialReason::MissingCapability)
+            plan(&AccessIntent::network()),
+            BTreeSet::from([Capability::MeshJoin, Capability::NetworkReach])
         );
     }
 
-    fn fixture() -> (AccessRequest, PolicyCandidate) {
+    #[test]
+    fn plans_ssh_over_mesh_as_a_dependency_closure() {
+        assert_eq!(
+            plan(&AccessIntent::ssh(Route::MeshRequired)),
+            BTreeSet::from([
+                Capability::MeshJoin,
+                Capability::NetworkReach,
+                Capability::SshIssue,
+            ])
+        );
+    }
+
+    #[test]
+    fn composes_capabilities_from_independent_rules() {
+        let (request, mut snapshot) = fixture(AccessIntent::ssh(Route::MeshRequired));
+        snapshot.rules[0].grants = BTreeSet::from([Capability::SshIssue]);
+        let mut network = snapshot.rules[0].clone();
+        network.policy_id = Uuid::new_v4();
+        network.grants = BTreeSet::from([Capability::MeshJoin, Capability::NetworkReach]);
+        snapshot.rules.push(network);
+        let decision = evaluate(&request, &snapshot).expect("composed allow");
+        assert_eq!(decision.required.len(), 3);
+        assert_eq!(decision.policies().len(), 2);
+    }
+
+    #[test]
+    fn deny_wins_at_equal_precedence() {
+        let (request, mut snapshot) = fixture(AccessIntent::ssh(Route::Direct));
+        let mut deny = snapshot.rules[0].clone();
+        deny.policy_id = Uuid::new_v4();
+        deny.effect = Effect::Deny;
+        snapshot.rules.push(deny);
+        assert_eq!(
+            evaluate(&request, &snapshot),
+            Err(DenialReason::ExplicitDeny(Capability::SshIssue))
+        );
+    }
+
+    fn fixture(intent: AccessIntent) -> (AccessRequest, PolicySnapshot) {
         let domain_id = Uuid::new_v4();
-        let user_id = Uuid::new_v4();
+        let subject_user_id = Uuid::new_v4();
         let device_id = Uuid::new_v4();
         let target_node_id = Uuid::new_v4();
         (
             AccessRequest {
                 domain_id,
-                subject_user_id: user_id,
+                subject_user_id,
                 device_id,
                 target_node_id,
                 evaluated_at: 100,
+                intent,
             },
-            PolicyCandidate {
-                policy_id: Uuid::new_v4(),
-                domain_id,
-                subject_user_id: user_id,
-                required_device_id: Some(device_id),
-                target_node_id,
-                enabled: true,
-                effect: Effect::Allow,
-                priority: 0,
-                revision: 1,
-                capabilities: vec!["ssh".to_owned(), "wireguard".to_owned()],
-                revoked_at: None,
-                valid_from: Some(50),
-                valid_until: Some(150),
-                ssh_principal: "deploy".to_owned(),
-                device_domain_id: domain_id,
-                device_owner_user_id: user_id,
-                device_active: true,
-                target_active: true,
-                wireguard_public_key: b"registered-wg-key".to_vec(),
-                device_mesh_address: Some("10.77.0.1".to_owned()),
+            PolicySnapshot {
+                identity: IdentityFacts {
+                    device_domain_id: domain_id,
+                    device_owner_user_id: subject_user_id,
+                    device_active: true,
+                    target_active: true,
+                },
+                rules: vec![PolicyRule {
+                    policy_id: Uuid::new_v4(),
+                    domain_id,
+                    subject_user_id,
+                    required_device_id: Some(device_id),
+                    target_node_id,
+                    enabled: true,
+                    effect: Effect::Allow,
+                    priority: 0,
+                    revision: 1,
+                    grants: BTreeSet::from([
+                        Capability::MeshJoin,
+                        Capability::NetworkReach,
+                        Capability::SshIssue,
+                    ]),
+                    revoked_at: None,
+                    valid_from: Some(50),
+                    valid_until: Some(150),
+                }],
             },
         )
     }

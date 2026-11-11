@@ -10,6 +10,7 @@ use authority_device_auth_core::{
     enrollment_preimage, node_enrollment_preimage, session_request_preimage,
 };
 use authority_issuer_core::{sign_authorization, sign_network_grant};
+use authority_policy_core::{AccessIntent, Route};
 use axum::{
     Json, Router,
     extract::State,
@@ -260,8 +261,9 @@ async fn create_demo_access(
     .map_err(ApiError::internal)?;
     sqlx::query(
         "INSERT INTO policy.access_policies \
-         (id, domain_id, subject_user_id, required_device_id, target_node_id, ssh_principal) \
-         VALUES ($1, $2, $3, $4, $5, 'deploy')",
+         (id, domain_id, subject_user_id, required_device_id, target_node_id, ssh_principal, capabilities) \
+         VALUES ($1, $2, $3, $4, $5, 'deploy', \
+                 ARRAY['ssh.issue', 'mesh.join', 'network.reach'])",
     )
     .bind(policy_id)
     .bind(state.domain_id())
@@ -777,6 +779,7 @@ async fn issue_authorization(
             session.device_id,
             request.target_node_id,
             issued_at,
+            AccessIntent::ssh(Route::Direct),
         ),
     )
     .await
@@ -798,7 +801,10 @@ async fn issue_authorization(
         return Err(ApiError::forbidden("policy_denied"));
     };
 
-    let policy_id = policy_reference(&decision);
+    let policy_id = policy_reference(&decision.decision);
+    let ssh_principal = decision
+        .ssh_principal
+        .ok_or_else(|| ApiError::internal("SSH decision has no principal binding"))?;
     let authorization = IssuanceAuthorizationV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
@@ -807,7 +813,7 @@ async fn issue_authorization(
         device_id: request.device_id.to_string(),
         target_node_id: request.target_node_id.to_string(),
         ssh_public_key_fingerprint: request.ssh_public_key_fingerprint,
-        principals: vec![decision.ssh_principal],
+        principals: vec![ssh_principal],
         policy_id,
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
@@ -871,6 +877,7 @@ async fn issue_access_authorization(
             session.device_id,
             request.target_node_id,
             issued_at,
+            AccessIntent::ssh(Route::MeshRequired),
         ),
     )
     .await
@@ -906,7 +913,7 @@ fn build_access_bundle(
     state: &AppState,
     session: &AuthenticatedSession,
     request: &IssueAccessAuthorizationRequest,
-    decision: &authority_policy_core::AccessDecision,
+    decision: &access_policy::AuthorizedAccess,
     issued_at: i64,
 ) -> Result<AccessAuthorizationBundleV1, ApiError> {
     // A shared nonce is the cryptographic decision identifier: both signed
@@ -917,7 +924,11 @@ fn build_access_bundle(
     let common_subject = session.user_id.to_string();
     let common_device = request.device_id.to_string();
     let common_target = request.target_node_id.to_string();
-    let common_policy = policy_reference(decision);
+    let common_policy = policy_reference(&decision.decision);
+    let ssh_principal = decision
+        .ssh_principal
+        .clone()
+        .ok_or_else(|| ApiError::internal("SSH decision has no principal binding"))?;
     let ssh_authorization = sign_authorization(
         IssuanceAuthorizationV1 {
             version: "1".to_owned(),
@@ -927,7 +938,7 @@ fn build_access_bundle(
             device_id: common_device.clone(),
             target_node_id: common_target.clone(),
             ssh_public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
-            principals: vec![decision.ssh_principal.clone()],
+            principals: vec![ssh_principal],
             policy_id: common_policy.clone(),
             nonce: decision_id.clone(),
             issued_at,
@@ -1019,7 +1030,12 @@ async fn record_access_decision(
 }
 
 fn policy_reference(decision: &authority_policy_core::AccessDecision) -> String {
-    format!("{}@{}", decision.policy_id, decision.policy_revision)
+    decision
+        .policies()
+        .into_iter()
+        .map(|policy| format!("{}@{}", policy.policy_id, policy.revision))
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 async fn issue_network_grant(
@@ -1045,6 +1061,7 @@ async fn issue_network_grant(
             session.device_id,
             request.target_node_id,
             issued_at,
+            AccessIntent::network(),
         ),
     )
     .await
@@ -1068,7 +1085,7 @@ async fn issue_network_grant(
     if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
         return Err(ApiError::forbidden("wireguard_key_mismatch"));
     }
-    let policy_id = policy_reference(&decision);
+    let policy_id = policy_reference(&decision.decision);
     let grant = NetworkAccessGrantV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
