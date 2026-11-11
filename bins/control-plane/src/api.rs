@@ -38,6 +38,7 @@ const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_mins(15);
 const MAX_SESSIONS: usize = 256;
 const MAX_SESSION_NONCES: usize = 1024;
+const MAX_PENDING_CHALLENGES: usize = 256;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -358,18 +359,20 @@ async fn start_registration(
         )
         .map_err(ApiError::internal)?;
     let challenge_id = Uuid::new_v4();
-    state
-        .registrations()
-        .lock()
-        .map_err(ApiError::internal)?
-        .insert(
-            challenge_id,
-            PendingRegistration {
-                user_id: request.user_id,
-                state: registration,
-                expires_at: Instant::now() + CHALLENGE_TTL,
-            },
-        );
+    let mut registrations = state.registrations().lock().map_err(ApiError::internal)?;
+    let now = Instant::now();
+    registrations.retain(|_, pending| pending.expires_at > now);
+    if registrations.len() >= MAX_PENDING_CHALLENGES {
+        return Err(ApiError::unavailable("registration_capacity_reached"));
+    }
+    registrations.insert(
+        challenge_id,
+        PendingRegistration {
+            user_id: request.user_id,
+            state: registration,
+            expires_at: now + CHALLENGE_TTL,
+        },
+    );
 
     Ok(Json(StartRegistrationResponse {
         challenge_id,
@@ -497,21 +500,23 @@ async fn start_authentication(
     let mut device_challenge_bytes = [0_u8; 32];
     rand_bytes(&mut device_challenge_bytes).map_err(ApiError::internal)?;
     let device_challenge = encode_base64url(&device_challenge_bytes);
-    state
-        .authentications()
-        .lock()
-        .map_err(ApiError::internal)?
-        .insert(
-            challenge_id,
-            PendingAuthentication {
-                user_id,
-                device_id: request.device_id,
-                device_public_key,
-                device_challenge: device_challenge.clone(),
-                state: authentication,
-                expires_at: Instant::now() + CHALLENGE_TTL,
-            },
-        );
+    let mut authentications = state.authentications().lock().map_err(ApiError::internal)?;
+    let now = Instant::now();
+    authentications.retain(|_, pending| pending.expires_at > now);
+    if authentications.len() >= MAX_PENDING_CHALLENGES {
+        return Err(ApiError::unavailable("authentication_capacity_reached"));
+    }
+    authentications.insert(
+        challenge_id,
+        PendingAuthentication {
+            user_id,
+            device_id: request.device_id,
+            device_public_key,
+            device_challenge: device_challenge.clone(),
+            state: authentication,
+            expires_at: now + CHALLENGE_TTL,
+        },
+    );
 
     Ok(Json(StartAuthenticationResponse {
         challenge_id,
