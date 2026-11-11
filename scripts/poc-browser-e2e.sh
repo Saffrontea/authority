@@ -180,6 +180,28 @@ ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q
     die 'issued certificate does not contain the deploy principal'
 printf '%s\n%s\n' "${registered}" "${issued}"
 
+certificate_only_body="$(jq -nc --rawfile certificate "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" '{certificate:$certificate}')"
+certificate_only_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --request POST --header 'content-type: application/json' --data "${certificate_only_body}" \
+    "${node_origin}/v1/ssh-certificate")"
+[[ "${certificate_only_status}" == "401" ]] ||
+    die "node agent accepted certificate-only install with HTTP ${certificate_only_status}"
+
+unauthorized_terminal_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+    --header 'Connection: Upgrade' --header 'Upgrade: websocket' \
+    --header 'Sec-WebSocket-Version: 13' --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+    --header "Origin: ${control_origin}" "${node_origin}/v1/ssh-terminal")"
+[[ "${unauthorized_terminal_status}" == "403" ]] ||
+    die "terminal without capability returned HTTP ${unauthorized_terminal_status}"
+
+for legacy_route in /v1/issuance-authorizations /v1/network-access-grants; do
+    legacy_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' --data '{}' \
+        "${control_origin}${legacy_route}")"
+    [[ "${legacy_status}" == "404" ]] || die "legacy route ${legacy_route} returned HTTP ${legacy_status}"
+done
+printf 'Local SSH boundary: certificate-only install denied, tokenless terminal denied, legacy routes absent\n'
+
 terminal_command="$(webdriver POST "/session/${session}/execute/async" \
     '{"script":"const done = arguments[0]; window.authorityTerminalCommand(\"printf WEB_TERMINAL_OK\").then(() => done({ok:true})).catch(error => done({error:error.message}));","args":[]}')"
 terminal_error="$(jq -r '.error // empty' <<<"${terminal_command}")"
@@ -275,8 +297,8 @@ if [[ -n "${wireguard_public_key}" ]]; then
         "deploy@${ssh_target}" true; then
         die 'target accepted an expired SSH certificate'
     fi
-    wait_for_terminal 'Permission denied' 'expired web SSH terminal reconnect denial' >/dev/null
-    printf 'OpenSSH certificate expiry: target denied expired certificate\n'
+    wait_for_terminal 'terminal transport error' 'expired web SSH terminal capability denial' >/dev/null
+    printf 'OpenSSH certificate expiry: target denied expired certificate; node-agent denied expired terminal capability\n'
     mise run mesh:configure
 fi
 

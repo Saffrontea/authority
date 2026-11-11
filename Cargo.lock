@@ -236,7 +236,10 @@ name = "authority-node-agent"
 version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
+ "authority-credential-crypto-openssl",
+ "authority-issuer-core",
  "axum",
+ "openssl",
  "serde",
  "serde_json",
  "ssh-key",

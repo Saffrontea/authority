@@ -1,6 +1,13 @@
-use std::{fs, net::IpAddr, process::Stdio};
+use std::{
+    fs,
+    net::IpAddr,
+    process::Stdio,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use ::ssh_key::{Certificate, HashAlg};
+use authority_contracts_model::SignedIssuanceAuthorizationV1;
+use authority_issuer_core::verify_authorization;
 use axum::{
     Json, Router,
     extract::{
@@ -9,11 +16,12 @@ use axum::{
     },
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
-        header::{CONTENT_TYPE, ORIGIN},
+        header::{CONTENT_TYPE, ORIGIN, SEC_WEBSOCKET_PROTOCOL},
     },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use openssl::sha::sha256;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
@@ -24,7 +32,7 @@ use tokio::{
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::error;
 
-use crate::state::AppState;
+use crate::state::{AppState, TerminalLease};
 
 pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
     Router::new()
@@ -52,6 +60,29 @@ async fn open_ssh_terminal(
     if !state.browser_origin_allowed(origin) {
         return Err(ApiError::forbidden("origin_not_allowed"));
     }
+    let protocol = headers
+        .get(SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|value| value.starts_with("authority."))
+        })
+        .ok_or_else(|| ApiError::forbidden("missing_terminal_capability"))?;
+    let token = protocol
+        .strip_prefix("authority.")
+        .ok_or_else(|| ApiError::forbidden("invalid_terminal_capability"))?;
+    if token.len() != 43 || !token.bytes().all(is_base64url_character) {
+        return Err(ApiError::forbidden("invalid_terminal_capability"));
+    }
+    let token_hash = encode_base64url(&sha256(token.as_bytes()));
+    if !state
+        .terminal_authorized(&token_hash, unix_timestamp()?)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::forbidden("terminal_capability_denied"));
+    }
     let target = state
         .ssh_target()
         .ok_or_else(|| ApiError::unavailable("ssh_target_not_configured"))?;
@@ -60,6 +91,7 @@ async fn open_ssh_terminal(
         .try_acquire_owned()
         .map_err(|_| ApiError::unavailable("ssh_terminal_capacity_reached"))?;
     Ok(upgrade
+        .protocols([protocol.to_owned()])
         .on_upgrade(move |socket| run_ssh_terminal(socket, state, target, permit))
         .into_response())
 }
@@ -182,6 +214,7 @@ async fn get_ssh_key(State(state): State<AppState>) -> Result<Json<SshKeyRespons
 #[derive(Deserialize)]
 struct InstallCertificateRequest {
     certificate: String,
+    authorization: Option<SignedIssuanceAuthorizationV1>,
 }
 
 #[derive(Serialize)]
@@ -194,6 +227,28 @@ async fn install_ssh_certificate(
     State(state): State<AppState>,
     Json(request): Json<InstallCertificateRequest>,
 ) -> Result<Json<InstallCertificateResponse>, ApiError> {
+    let signed_authorization = request
+        .authorization
+        .as_ref()
+        .ok_or_else(|| ApiError::unauthorized("missing_node_authorization"))?;
+    verify_authorization(signed_authorization, state.verifier())
+        .map_err(|cause| ApiError::unauthorized_with_log("invalid_node_authorization", cause))?;
+    let authorization = &signed_authorization.authorization;
+    let now = unix_timestamp()?;
+    if authorization.audience != "node-agent"
+        || now < authorization.not_before
+        || now >= authorization.expires_at
+    {
+        return Err(ApiError::forbidden("node_authorization_not_active"));
+    }
+    let local_fingerprint = state
+        .private_key()
+        .public_key()
+        .fingerprint(HashAlg::Sha256)
+        .to_string();
+    if authorization.ssh_public_key_fingerprint != local_fingerprint {
+        return Err(ApiError::forbidden("node_authorization_key_mismatch"));
+    }
     let certificate = Certificate::from_openssh(&request.certificate)
         .map_err(|_| ApiError::bad_request("invalid_ssh_certificate"))?;
     if certificate.public_key() != state.private_key().public_key().key_data() {
@@ -203,15 +258,65 @@ async fn install_ssh_certificate(
     certificate
         .validate([&ca_fingerprint])
         .map_err(|cause| ApiError::unauthorized_with_log("untrusted_ssh_certificate", cause))?;
+    let authorized_after = u64::try_from(authorization.not_before)
+        .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;
+    let authorized_before = u64::try_from(authorization.expires_at)
+        .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;
+    if certificate.valid_principals() != authorization.principals
+        || certificate.valid_after() != authorized_after
+        || certificate.valid_before() != authorized_before
+    {
+        return Err(ApiError::forbidden("certificate_authorization_mismatch"));
+    }
     if let Some(parent) = state.certificate_path().parent() {
         fs::create_dir_all(parent).map_err(ApiError::internal)?;
     }
     fs::write(state.certificate_path(), request.certificate).map_err(ApiError::internal)?;
+    state
+        .install_terminal_lease(TerminalLease {
+            token_hash: authorization.nonce.clone(),
+            expires_at: authorization.expires_at,
+        })
+        .map_err(ApiError::internal)?;
 
     Ok(Json(InstallCertificateResponse {
         private_key_file: state.private_key_path().display().to_string(),
         certificate_file: state.certificate_path().display().to_string(),
     }))
+}
+
+fn unix_timestamp() -> Result<i64, ApiError> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(ApiError::internal)?
+        .as_secs();
+    i64::try_from(seconds).map_err(ApiError::internal)
+}
+
+fn encode_base64url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        output.push(char::from(ALPHABET[usize::from(chunk[0] >> 2)]));
+        output.push(char::from(
+            ALPHABET[usize::from(((chunk[0] & 3) << 4) | (second >> 4))],
+        ));
+        if chunk.len() > 1 {
+            output.push(char::from(
+                ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))],
+            ));
+        }
+        if chunk.len() > 2 {
+            output.push(char::from(ALPHABET[usize::from(third & 63)]));
+        }
+    }
+    output
+}
+
+fn is_base64url_character(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
 struct ApiError {
@@ -229,6 +334,13 @@ impl ApiError {
 
     fn unauthorized_with_log(code: &'static str, cause: impl std::fmt::Display) -> Self {
         error!(%cause, "SSH certificate verification failed");
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code,
+        }
+    }
+
+    fn unauthorized(code: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code,

@@ -6,8 +6,9 @@ mod state;
 use std::fs;
 
 use ::ssh_key::PublicKey;
+use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use config::Config;
-use state::AppState;
+use state::{AgentPaths, AppState};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -22,14 +23,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let trusted_ca =
         PublicKey::from_openssh(&fs::read_to_string(&config.trusted_ca_public_key_file)?)?;
     let browser_origins = config.browser_origins.clone();
+    let verifier = OpenSslEd25519Verifier::from_pem_file(
+        config.control_plane_key_id,
+        config.control_plane_public_key_file,
+    )?;
     let state = AppState::new(
         private_key,
         trusted_ca,
-        config.ssh_private_key_file,
-        config.ssh_certificate_file,
-        config.ssh_known_hosts_file,
+        AgentPaths {
+            private_key: config.ssh_private_key_file,
+            certificate: config.ssh_certificate_file,
+            known_hosts: config.ssh_known_hosts_file,
+        },
         config.ssh_target,
         browser_origins,
+        verifier,
     );
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 

@@ -14,6 +14,8 @@ pub struct Config {
     pub browser_origins: Vec<HeaderValue>,
     pub ssh_known_hosts_file: PathBuf,
     pub ssh_target: Option<IpAddr>,
+    pub control_plane_public_key_file: PathBuf,
+    pub control_plane_key_id: String,
 }
 
 impl Config {
@@ -36,6 +38,10 @@ impl Config {
                         .map_err(|error| format!("AUTHORITY_SSH_TARGET is invalid: {error}"))
                 })
                 .transpose()?,
+            control_plane_public_key_file: PathBuf::from(required(
+                "AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE",
+            )?),
+            control_plane_key_id: value("AUTHORITY_SIGNING_KEY_ID", "control-plane-key-1")?,
         })
     }
 }

@@ -35,9 +35,10 @@ once, then **Sign in with Passkey**. A successful run prints the local SSH key
 and certificate paths together with the issued OpenSSH certificate. The page
 also exposes a WebSocket-backed SSH terminal whose client process runs inside
 the loopback-only Node Agent; the private key never enters browser JavaScript.
-At certificate expiry the demo closes and reconnects the terminal so the
-target `sshd` denial is visible (OpenSSH does not terminate sessions that were
-already established before a certificate expired).
+Installing the certificate requires a control-plane-signed node authorization,
+and opening the terminal requires the matching browser-held random capability.
+At expiry the Node Agent denies terminal reconnection; the E2E also connects
+directly to prove that the target `sshd` rejects the expired certificate.
 
 ## Testing without Passkey hardware
 

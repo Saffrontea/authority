@@ -140,6 +140,8 @@ pub enum AdapterGrantKindV1 {
     SshCertificate,
     #[serde(rename = "wireguard.peer")]
     WireGuardPeer,
+    #[serde(rename = "ssh.session")]
+    SshSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

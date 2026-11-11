@@ -46,7 +46,7 @@
 
   <section id="terminal" hidden>
     <h2>Short-lived SSH terminal</h2>
-    <p id="terminal-status">A new SSH connection must present a currently valid certificate.</p>
+    <p id="terminal-status">A new SSH connection requires a valid certificate and browser-held capability.</p>
     <button id="terminal-connect" type="button">Connect</button>
     <pre id="terminal-output"></pre>
     <form id="terminal-form">
@@ -70,6 +70,7 @@
     const terminalOutput = document.querySelector('#terminal-output');
     const terminalStatus = document.querySelector('#terminal-status');
     let terminalSocket;
+    let terminalToken;
     let terminalExpiresAt;
     let terminalExpiryTimer;
     if (!bootstrap) document.querySelector('#setup').hidden = true;
@@ -227,7 +228,8 @@
       if (terminalSocket && terminalSocket.readyState < WebSocket.CLOSING) terminalSocket.close();
       const terminalUrl = new URL('/v1/ssh-terminal', nodeAgentOrigin);
       terminalUrl.protocol = terminalUrl.protocol === 'https:' ? 'wss:' : 'ws:';
-      terminalSocket = new WebSocket(terminalUrl);
+      if (!terminalToken) throw new Error('Terminal capability is unavailable.');
+      terminalSocket = new WebSocket(terminalUrl, [`authority.${terminalToken}`]);
       terminalSocket.binaryType = 'arraybuffer';
       terminalSocket.onopen = () => appendTerminal('[browser] terminal connected\n');
       terminalSocket.onmessage = event => appendTerminal(
@@ -245,14 +247,14 @@
         const remaining = Math.max(0, terminalExpiresAt - Math.floor(Date.now() / 1000));
         terminalStatus.textContent = remaining > 0
           ? `Certificate permits new SSH connections for ${remaining}s.`
-          : 'Certificate expired. Reconnect demonstrates local denial by sshd.';
+          : 'Certificate and terminal capability expired. Reconnect is denied locally.';
       };
       update();
       terminalExpiryTimer = setInterval(update, 250);
       connectTerminal();
       const delay = Math.max(0, expiresAt * 1000 - Date.now() + 300);
       setTimeout(() => {
-        appendTerminal('\n[browser] certificate expired; reconnecting to prove denial\n');
+        appendTerminal('\n[browser] certificate and terminal capability expired; reconnecting to prove denial\n');
         if (terminalSocket) terminalSocket.close();
         setTimeout(connectTerminal, 150);
       }, delay);
@@ -286,14 +288,17 @@
       }
       const wireguardPublicKey = access.wireguard_public_key;
       const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
+      const capability = await terminalCapability();
       const request = {
         device_id: access.device_id,
         target_node_id: access.target_node_id,
         ssh_public_key_fingerprint: sshKey.fingerprint,
         wireguard_public_key: wireguardPublicKey,
+        terminal_token_hash: capability.hash,
       };
       const bindings = [
         access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey,
+        capability.hash,
       ];
       return {
         body: request,
@@ -312,6 +317,13 @@
       const value = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(`${response.status} ${value.error ?? response.statusText}`);
       return value;
+    }
+
+    async function terminalCapability() {
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const token = encode(bytes);
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+      return { token, hash: encode(digest) };
     }
 
     async function busy(button, operation) {
@@ -376,35 +388,26 @@
       });
       sessionStorage.setItem('authority-session', session.session_token);
       const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
-      let authorization;
-      if (wireguardPublicKey) {
-        const accessRequest = {
-          device_id: access.device_id,
-          target_node_id: access.target_node_id,
-          ssh_public_key_fingerprint: sshKey.fingerprint,
-          wireguard_public_key: wireguardPublicKey,
-        };
-        authorization = await authorizedApi(
-          '/v1/access-authorizations', accessRequest, session.session_token, 'access.authorize',
-          [access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey],
-        );
-      } else {
-        const sshRequest = {
-          device_id: access.device_id,
-          target_node_id: access.target_node_id,
-          ssh_public_key_fingerprint: sshKey.fingerprint,
-        };
-        authorization = { ssh_authorization: await authorizedApi(
-          '/v1/issuance-authorizations', sshRequest, session.session_token, 'ssh.issue',
-          [access.device_id, access.target_node_id, sshKey.fingerprint],
-        ) };
-      }
+      const capability = await terminalCapability();
+      terminalToken = capability.token;
+      const accessRequest = {
+        device_id: access.device_id,
+        target_node_id: access.target_node_id,
+        ssh_public_key_fingerprint: sshKey.fingerprint,
+        wireguard_public_key: wireguardPublicKey,
+        terminal_token_hash: capability.hash,
+      };
+      const authorization = await authorizedApi(
+        '/v1/access-authorizations', accessRequest, session.session_token, 'access.authorize',
+        [access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey, capability.hash],
+      );
       const issued = await api(`${issuerOrigin}/v1/ssh-certificates`, {
         authorization: authorization.ssh_authorization,
         ssh_public_key: sshKey.public_key,
       });
       const installed = await api(`${nodeAgentOrigin}/v1/ssh-certificate`, {
         certificate: issued.certificate,
+        authorization: authorization.node_authorization,
       });
       result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}\ndecision=${authorization.decision_id}\n\n${issued.certificate}`;
       exposeTerminal(issued.expires_at);

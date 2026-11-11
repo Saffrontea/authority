@@ -59,7 +59,7 @@
         "additionalProperties": false,
         "required": ["kind", "audience", "expires_at"],
         "properties": {
-          "kind": { "enum": ["ssh.certificate", "wireguard.peer"] },
+          "kind": { "enum": ["ssh.certificate", "wireguard.peer", "ssh.session"] },
           "audience": { "type": "string", "minLength": 1, "maxLength": 128 },
           "expires_at": { "type": "integer", "minimum": 1 }
         }

@@ -10,7 +10,7 @@
     },
     "artifacts/policy-decision-evaluated-v1.schema.json": {
       "version": 1,
-      "sha256": "2d933feaee162ae3c031676a825f49eb9f10edba69919854bef0837fcedf23ce"
+      "sha256": "20f6b446a91b25acfd6c8cf235c5a7d8c2cced8d926bf8e3d0cd71773107bf5d"
     },
     "artifacts/issuance-authorization-v1.schema.json": {
       "version": 1,
