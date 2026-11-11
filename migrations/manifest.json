@@ -11,6 +11,9 @@
     },
     "0004_device_mesh_address.sql": {
       "sha256": "a37672e8a039ca435488dd7e6e6e52c2999157c57cf95ccc5d01ba42828b335a"
+    },
+    "0005_policy_decision_semantics.sql": {
+      "sha256": "ec878e612f1de335616e5b9df4ebb735a83e2232a80a06dde0d89ae9be68e0b5"
     }
   }
 }

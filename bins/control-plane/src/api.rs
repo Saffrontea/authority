@@ -768,6 +768,7 @@ async fn issue_authorization(
         return Err(ApiError::forbidden("policy_denied"));
     };
 
+    let policy_id = policy_reference(&decision);
     let authorization = IssuanceAuthorizationV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
@@ -777,7 +778,7 @@ async fn issue_authorization(
         target_node_id: request.target_node_id.to_string(),
         ssh_public_key_fingerprint: request.ssh_public_key_fingerprint,
         principals: vec![decision.ssh_principal],
-        policy_id: decision.policy_id.to_string(),
+        policy_id,
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
         not_before: issued_at,
@@ -867,7 +868,7 @@ async fn issue_access_authorization(
     let common_subject = session.user_id.to_string();
     let common_device = request.device_id.to_string();
     let common_target = request.target_node_id.to_string();
-    let common_policy = decision.policy_id.to_string();
+    let common_policy = policy_reference(&decision);
     let ssh_authorization = sign_authorization(
         IssuanceAuthorizationV1 {
             version: "1".to_owned(),
@@ -936,6 +937,10 @@ async fn record_access_decision(
     transaction.commit().await.map_err(ApiError::internal)
 }
 
+fn policy_reference(decision: &authority_policy_core::AccessDecision) -> String {
+    format!("{}@{}", decision.policy_id, decision.policy_revision)
+}
+
 async fn issue_network_grant(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -982,6 +987,7 @@ async fn issue_network_grant(
     if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
         return Err(ApiError::forbidden("wireguard_key_mismatch"));
     }
+    let policy_id = policy_reference(&decision);
     let grant = NetworkAccessGrantV1 {
         version: "1".to_owned(),
         issuer: format!("domain-authority:{}", state.domain_id()),
@@ -991,7 +997,7 @@ async fn issue_network_grant(
         target_node_id: request.target_node_id.to_string(),
         wireguard_public_key: request.wireguard_public_key,
         mesh_address: decision.device_mesh_address,
-        policy_id: decision.policy_id.to_string(),
+        policy_id,
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
         not_before: issued_at,

@@ -20,6 +20,11 @@ pub struct PolicyCandidate {
     pub required_device_id: Option<Uuid>,
     pub target_node_id: Uuid,
     pub enabled: bool,
+    pub effect: Effect,
+    pub priority: i32,
+    pub revision: i64,
+    pub capabilities: Vec<String>,
+    pub revoked_at: Option<i64>,
     pub valid_from: Option<i64>,
     pub valid_until: Option<i64>,
     pub ssh_principal: String,
@@ -34,6 +39,7 @@ pub struct PolicyCandidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
     pub policy_id: Uuid,
+    pub policy_revision: i64,
     pub domain_id: Uuid,
     pub subject_user_id: Uuid,
     pub device_id: Uuid,
@@ -42,6 +48,12 @@ pub struct AccessDecision {
     pub wireguard_public_key: Vec<u8>,
     pub device_mesh_address: String,
     pub evaluated_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    Allow,
+    Deny,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +66,10 @@ pub enum DenialReason {
     RequiredDeviceMismatch,
     #[error("policy, device, or target is disabled")]
     Disabled,
+    #[error("policy explicitly denies access")]
+    ExplicitDeny,
+    #[error("policy does not grant both required adapter capabilities")]
+    MissingCapability,
     #[error("policy is outside its validity window")]
     OutsideValidityWindow,
     #[error("policy has no valid SSH principal")]
@@ -88,7 +104,11 @@ pub fn evaluate(
     {
         return Err(DenialReason::RequiredDeviceMismatch);
     }
-    if !candidate.enabled || !candidate.device_active || !candidate.target_active {
+    if !candidate.enabled
+        || candidate.revoked_at.is_some()
+        || !candidate.device_active
+        || !candidate.target_active
+    {
         return Err(DenialReason::Disabled);
     }
     if candidate
@@ -103,11 +123,23 @@ pub fn evaluate(
     if candidate.ssh_principal.is_empty() {
         return Err(DenialReason::InvalidPrincipal);
     }
+    if !candidate.capabilities.iter().any(|value| value == "ssh")
+        || !candidate
+            .capabilities
+            .iter()
+            .any(|value| value == "wireguard")
+    {
+        return Err(DenialReason::MissingCapability);
+    }
+    if candidate.effect == Effect::Deny {
+        return Err(DenialReason::ExplicitDeny);
+    }
     let device_mesh_address = candidate
         .device_mesh_address
         .ok_or(DenialReason::MissingMeshAddress)?;
     Ok(AccessDecision {
         policy_id: candidate.policy_id,
+        policy_revision: candidate.revision,
         domain_id: request.domain_id,
         subject_user_id: request.subject_user_id,
         device_id: request.device_id,
@@ -148,6 +180,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_explicit_deny_revocation_and_incomplete_capabilities() {
+        let (request, mut candidate) = fixture();
+        candidate.effect = Effect::Deny;
+        assert_eq!(
+            evaluate(&request, candidate),
+            Err(DenialReason::ExplicitDeny)
+        );
+
+        let (request, mut candidate) = fixture();
+        candidate.revoked_at = Some(99);
+        assert_eq!(evaluate(&request, candidate), Err(DenialReason::Disabled));
+
+        let (request, mut candidate) = fixture();
+        candidate.capabilities = vec!["ssh".to_owned()];
+        assert_eq!(
+            evaluate(&request, candidate),
+            Err(DenialReason::MissingCapability)
+        );
+    }
+
     fn fixture() -> (AccessRequest, PolicyCandidate) {
         let domain_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
@@ -168,6 +221,11 @@ mod tests {
                 required_device_id: Some(device_id),
                 target_node_id,
                 enabled: true,
+                effect: Effect::Allow,
+                priority: 0,
+                revision: 1,
+                capabilities: vec!["ssh".to_owned(), "wireguard".to_owned()],
+                revoked_at: None,
                 valid_from: Some(50),
                 valid_until: Some(150),
                 ssh_principal: "deploy".to_owned(),
