@@ -78,7 +78,7 @@ fn issue_ssh_certificate_inner(
         return Err(ApiError::unauthorized("ssh_key_fingerprint_mismatch"));
     }
     if !state
-        .consume_nonce(authorization.nonce.clone())
+        .consume_nonce(&authorization.nonce, authorization.expires_at, now)
         .map_err(ApiError::internal)?
     {
         return Err(ApiError::conflict("authorization_replayed"));
@@ -187,6 +187,7 @@ mod tests {
     use authority_contracts_model::IssuanceAuthorizationV1;
     use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
     use authority_issuer_core::sign_authorization;
+    use authority_replay_ledger::ReplayLedger;
     use ssh_key::{Algorithm, Certificate, PrivateKey, rand_core::OsRng};
 
     use super::*;
@@ -234,7 +235,16 @@ mod tests {
                 .to_openssh()
                 .expect("encode subject public key"),
         };
-        let state = AppState::new(verifier, ca_key, 42);
+        let ledger_path = std::env::temp_dir().join(format!(
+            "authority-issuer-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let replay_ledger = ReplayLedger::open(ledger_path, now).expect("open replay ledger");
+        let state = AppState::new(verifier, ca_key, replay_ledger, 42);
 
         let first_request = request();
         let response =

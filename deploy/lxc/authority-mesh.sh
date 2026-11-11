@@ -326,6 +326,8 @@ ExecStart=/usr/local/bin/authority-network-agent
 Environment=AUTHORITY_NODE_ID=${node_id}
 Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
 Environment=AUTHORITY_WIREGUARD_INTERFACE=wg0
+Environment=AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE=/var/lib/authority/network-agent-replay-ledger
+StateDirectory=authority
 Restart=on-failure
 
 [Install]

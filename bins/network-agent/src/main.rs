@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     net::SocketAddr,
     path::PathBuf,
@@ -12,6 +12,7 @@ use std::{
 use authority_contracts_model::SignedNetworkAccessGrantV1;
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use authority_issuer_core::verify_network_grant_for_node;
+use authority_replay_ledger::ReplayLedger;
 use axum::{
     Json, Router,
     extract::State,
@@ -32,7 +33,7 @@ struct Inner {
     verifier: OpenSslEd25519Verifier,
     node_id: String,
     interface: String,
-    consumed_nonces: Mutex<HashSet<String>>,
+    replay_ledger: Mutex<ReplayLedger>,
     active_peers: Mutex<HashMap<String, i64>>,
 }
 
@@ -62,12 +63,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         value("AUTHORITY_CONTROL_PLANE_KEY_ID", "control-plane-key-1")?,
         PathBuf::from(required("AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE")?),
     )?;
+    let now = unix_timestamp()?;
+    let replay_ledger = ReplayLedger::open(
+        PathBuf::from(value(
+            "AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE",
+            "/var/lib/authority/network-agent-replay-ledger",
+        )?),
+        now,
+    )?;
     clear_all_peers(&interface)?;
     let state = AppState(Arc::new(Inner {
         verifier,
         node_id,
         interface,
-        consumed_nonces: Mutex::new(HashSet::new()),
+        replay_ledger: Mutex::new(replay_ledger),
         active_peers: Mutex::new(HashMap::new()),
     }));
     let router = Router::new()
@@ -96,10 +105,11 @@ async fn apply_grant(
     let nonce = envelope.grant.nonce.clone();
     if !state
         .0
-        .consumed_nonces
+        .replay_ledger
         .lock()
         .map_err(ApiError::internal)?
-        .insert(nonce)
+        .consume(&nonce, envelope.grant.expires_at, now)
+        .map_err(ApiError::internal)?
     {
         return Err(ApiError::conflict("network_grant_replayed"));
     }

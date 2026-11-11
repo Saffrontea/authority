@@ -9,6 +9,7 @@ rust-version.workspace = true
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true
+authority-replay-ledger.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true

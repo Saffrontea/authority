@@ -6,6 +6,7 @@ pub struct Config {
     pub control_plane_public_key_file: PathBuf,
     pub ssh_ca_key_file: PathBuf,
     pub ssh_ca_public_key_file: PathBuf,
+    pub replay_ledger_file: PathBuf,
 }
 
 impl Config {
@@ -20,6 +21,7 @@ impl Config {
             )?),
             ssh_ca_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_KEY_FILE")?),
             ssh_ca_public_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_PUBLIC_KEY_FILE")?),
+            replay_ledger_file: PathBuf::from(required("AUTHORITY_ISSUER_REPLAY_LEDGER_FILE")?),
         })
     }
 }

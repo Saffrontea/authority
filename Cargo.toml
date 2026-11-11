@@ -9,6 +9,7 @@ members = [
   "crates/credential-crypto-openssl",
   "crates/issuer-core",
   "crates/policy-core",
+  "crates/replay-ledger",
 ]
 resolver = "3"
 
@@ -23,6 +24,7 @@ authority-device-auth-core = { path = "crates/device-auth-core" }
 authority-credential-crypto-openssl = { path = "crates/credential-crypto-openssl" }
 authority-issuer-core = { path = "crates/issuer-core" }
 authority-policy-core = { path = "crates/policy-core" }
+authority-replay-ledger = { path = "crates/replay-ledger" }
 axum = "0.8.9"
 openssl = { version = "0.10.81", features = ["vendored"] }
 serde = { version = "1.0.229", features = ["derive"] }
