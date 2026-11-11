@@ -10,8 +10,9 @@ This workspace demonstrates the initial end-to-end trust flow:
    grant to its shared signed decision nonce;
 5. independently verify the scoped contracts in the Credential Issuer and
    target Network Agent, with durable replay ledgers;
-6. issue and install a five-minute OpenSSH user certificate, then apply and
-   expire the short-lived WireGuard peer.
+6. issue and install a short-lived OpenSSH user certificate, prove that the
+   target `sshd` rejects the bare key, accepts the CA-signed principal, and
+   rejects it after expiry; then apply and expire the WireGuard peer.
 
 PostgreSQL runs in the `authority-db` LXC container. Start the privileged
 database agent first if it is not already running:

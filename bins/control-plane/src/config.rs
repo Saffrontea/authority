@@ -16,6 +16,7 @@ pub struct Config {
     pub signing_key_file: PathBuf,
     pub signing_public_key_file: PathBuf,
     pub network_grant_ttl_seconds: i64,
+    pub ssh_authorization_ttl_seconds: i64,
 }
 
 impl Config {
@@ -48,6 +49,17 @@ impl Config {
         if !(1..=600).contains(&network_grant_ttl_seconds) {
             return Err("AUTHORITY_NETWORK_GRANT_TTL_SECONDS must be between 1 and 600".to_owned());
         }
+        let ssh_authorization_ttl_seconds =
+            value("AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS", "300")?
+                .parse::<i64>()
+                .map_err(|error| {
+                    format!("AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS is invalid: {error}")
+                })?;
+        if !(5..=600).contains(&ssh_authorization_ttl_seconds) {
+            return Err(
+                "AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS must be between 5 and 600".to_owned(),
+            );
+        }
         let database = PgConnectOptions::new()
             .host(&required("AUTHORITY_DB_HOST")?)
             .port(
@@ -72,6 +84,7 @@ impl Config {
             signing_key_file,
             signing_public_key_file,
             network_grant_ttl_seconds,
+            ssh_authorization_ttl_seconds,
         })
     }
 }

@@ -14,6 +14,7 @@ readonly TARGET_MESH_IP="${TARGET_MESH_ADDRESS%/*}"
 readonly WG_PORT=51820
 readonly NETWORK_AGENT_BINARY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/target/debug/authority-network-agent"
 readonly CONTROL_PLANE_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/control-plane-ed25519.pub.pem"
+readonly SSH_CA_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/ssh-ca.pub"
 
 log() {
   printf '[authority-mesh] %s\n' "$*"
@@ -303,12 +304,36 @@ install_network_agent() {
   [[ "$(container_state "${TARGET_NAME}")" == "RUNNING" ]] || die "${TARGET_NAME} is not running"
   [[ -x "${NETWORK_AGENT_BINARY}" ]] || die "network agent binary missing; run cargo build -p authority-network-agent"
   [[ -s "${CONTROL_PLANE_PUBLIC_KEY}" ]] || die "control-plane public key is missing"
+  [[ -s "${SSH_CA_PUBLIC_KEY}" ]] || die "SSH CA public key is missing"
   log "installing network-agent with container-held identity"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
     "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent"
   as_root install -m 0644 "${CONTROL_PLANE_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-control-plane.pub.pem"
+  as_root install -m 0644 "${SSH_CA_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-ssh-ca.pub"
   attach "${TARGET_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+if ! command -v sshd >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends openssh-server
+fi
+id deploy >/dev/null 2>&1 || useradd --create-home --shell /bin/sh deploy
+install -d -m 0755 /etc/ssh/auth_principals /etc/ssh/sshd_config.d
+install -m 0644 /etc/authority-ssh-ca.pub /etc/ssh/authority-user-ca.pub
+printf 'deploy\n' > /etc/ssh/auth_principals/deploy
+chmod 0644 /etc/ssh/auth_principals/deploy /etc/ssh/authority-user-ca.pub
+cat > /etc/ssh/sshd_config.d/authority.conf <<'EOF'
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+TrustedUserCAKeys /etc/ssh/authority-user-ca.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+EOF
+sshd -t
+systemctl enable ssh.service >/dev/null
+systemctl restart ssh.service
+
 cat > /etc/systemd/system/authority-network-agent.service <<EOF
 [Unit]
 Description=Authority WireGuard network grant agent
@@ -340,6 +365,7 @@ network_agent_status() {
   local target_underlay
   target_underlay="$(container_ip "${TARGET_NAME}")"
   attach "${TARGET_NAME}" systemctl --no-pager --full status authority-network-agent.service || true
+  attach "${TARGET_NAME}" systemctl --no-pager --full status ssh.service || true
   log "network-agent=http://${target_underlay}:3003"
 }
 

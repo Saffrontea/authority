@@ -41,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.bootstrap_token,
         signer,
         config.network_grant_ttl_seconds,
+        config.ssh_authorization_ttl_seconds,
     );
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 

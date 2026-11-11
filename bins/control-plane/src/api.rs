@@ -787,7 +787,7 @@ async fn issue_authorization(
         nonce: Uuid::new_v4().simple().to_string(),
         issued_at,
         not_before: issued_at,
-        expires_at: issued_at + 300,
+        expires_at: issued_at + state.ssh_authorization_ttl_seconds(),
         audience: "credential-issuer".to_owned(),
     };
     let envelope = sign_authorization(authorization, state.signer()).map_err(ApiError::internal)?;
@@ -907,7 +907,7 @@ fn build_access_bundle(
             nonce: decision_id.clone(),
             issued_at,
             not_before: issued_at,
-            expires_at: issued_at + 300,
+            expires_at: issued_at + state.ssh_authorization_ttl_seconds(),
             audience: "credential-issuer".to_owned(),
         },
         state.signer(),

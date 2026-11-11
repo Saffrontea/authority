@@ -25,6 +25,7 @@ struct Inner {
     sessions: Mutex<HashMap<[u8; 32], Session>>,
     signer: OpenSslEd25519Signer,
     network_grant_ttl_seconds: i64,
+    ssh_authorization_ttl_seconds: i64,
 }
 
 pub struct PendingRegistration {
@@ -59,6 +60,7 @@ impl AppState {
         bootstrap_token: String,
         signer: OpenSslEd25519Signer,
         network_grant_ttl_seconds: i64,
+        ssh_authorization_ttl_seconds: i64,
     ) -> Self {
         Self(Arc::new(Inner {
             pool,
@@ -70,6 +72,7 @@ impl AppState {
             sessions: Mutex::new(HashMap::new()),
             signer,
             network_grant_ttl_seconds,
+            ssh_authorization_ttl_seconds,
         }))
     }
 
@@ -131,6 +134,10 @@ impl AppState {
 
     pub fn network_grant_ttl_seconds(&self) -> i64 {
         self.0.network_grant_ttl_seconds
+    }
+
+    pub fn ssh_authorization_ttl_seconds(&self) -> i64 {
+        self.0.ssh_authorization_ttl_seconds
     }
 }
 

@@ -8,6 +8,7 @@ readonly ELEMENT_KEY=element-6066-11e4-a52e-4f735466cecf
 driver_pid=''
 session=''
 log_file=''
+plain_key=''
 
 cleanup() {
     if [[ -n "${session}" ]]; then
@@ -18,6 +19,7 @@ cleanup() {
         wait "${driver_pid}" 2>/dev/null || true
     fi
     [[ -z "${log_file}" || ! -f "${log_file}" ]] || rm -f "${log_file}"
+    [[ -z "${plain_key}" || ! -f "${plain_key}" ]] || rm -f "${plain_key}"
 }
 trap cleanup EXIT INT TERM
 
@@ -170,6 +172,31 @@ ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q
     die 'issued certificate does not contain the deploy principal'
 printf '%s\n%s\n' "${registered}" "${issued}"
 
+ssh_target="${network_agent_origin#http://}"
+ssh_target="${ssh_target%%:*}"
+plain_key="$(mktemp)"
+cp "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" "${plain_key}"
+chmod 0600 "${plain_key}"
+ssh_options=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+    -o IdentitiesOnly=yes
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+)
+if ssh "${ssh_options[@]}" -i "${plain_key}" "deploy@${ssh_target}" true; then
+    rm -f "${plain_key}"
+    die 'target accepted the SSH key without an Authority certificate'
+fi
+rm -f "${plain_key}"
+ssh_result="$(ssh "${ssh_options[@]}" \
+    -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \
+    -o "CertificateFile=${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" \
+    "deploy@${ssh_target}" 'printf AUTHORITY_SSH_OK')"
+[[ "${ssh_result}" == 'AUTHORITY_SSH_OK' ]] || die 'target did not accept the SSH certificate'
+printf 'OpenSSH target enforcement: key-only denied, signed certificate accepted\n'
+
 if [[ -n "${wireguard_public_key}" ]]; then
     prepared="$(webdriver POST "/session/${session}/execute/async" \
         '{"script":"const done = arguments[0]; window.authorityPrepareAccessAuthorization().then(prepared => done({prepared})).catch(error => done({error: error.message}));","args":[]}')"
@@ -226,6 +253,14 @@ if [[ -n "${wireguard_public_key}" ]]; then
         die 'WireGuard peer remained active after grant expiry'
     fi
     printf 'WireGuard grant expiry: peer removed and tunnel denied\n'
+    sleep 4
+    if ssh "${ssh_options[@]}" \
+        -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \
+        -o "CertificateFile=${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" \
+        "deploy@${ssh_target}" true; then
+        die 'target accepted an expired SSH certificate'
+    fi
+    printf 'OpenSSH certificate expiry: target denied expired certificate\n'
     mise run mesh:configure
 fi
 
