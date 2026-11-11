@@ -166,6 +166,8 @@ impl AccessDecision {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DenialReason {
+    #[error("no policy applies to the requested access")]
+    NoApplicablePolicy,
     #[error("device identity does not match the authenticated subject")]
     DeviceMismatch,
     #[error("device or target is disabled")]
@@ -174,6 +176,31 @@ pub enum DenialReason {
     ExplicitDeny(Capability),
     #[error("no applicable policy grants a required capability")]
     MissingCapability(Capability),
+}
+
+impl DenialReason {
+    /// Stable machine-readable reason stored in audit events.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::NoApplicablePolicy => "no_applicable_policy",
+            Self::DeviceMismatch => "device_mismatch",
+            Self::Disabled => "device_or_target_disabled",
+            Self::ExplicitDeny(_) => "explicit_deny",
+            Self::MissingCapability(_) => "missing_capability",
+        }
+    }
+
+    /// Capability involved in a capability-level denial, when applicable.
+    #[must_use]
+    pub const fn capability(&self) -> Option<Capability> {
+        match self {
+            Self::ExplicitDeny(capability) | Self::MissingCapability(capability) => {
+                Some(*capability)
+            }
+            Self::NoApplicablePolicy | Self::DeviceMismatch | Self::Disabled => None,
+        }
+    }
 }
 
 /// Evaluates an immutable snapshot using set operations only.
@@ -305,6 +332,9 @@ mod tests {
             evaluate(&request, &snapshot),
             Err(DenialReason::ExplicitDeny(Capability::SshIssue))
         );
+        let denial = evaluate(&request, &snapshot).expect_err("explicit deny");
+        assert_eq!(denial.code(), "explicit_deny");
+        assert_eq!(denial.capability(), Some(Capability::SshIssue));
     }
 
     fn fixture(intent: AccessIntent) -> (AccessRequest, PolicySnapshot) {

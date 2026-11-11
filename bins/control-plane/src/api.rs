@@ -199,12 +199,6 @@ async fn create_demo_access(
     let target_device_id = Uuid::new_v4();
     let target_node_id = request.target_node_id;
     let policy_id = Uuid::new_v4();
-    let address_seed = target_node_id.as_bytes();
-    let mesh_address = format!(
-        "10.42.{}.{}",
-        address_seed[0],
-        address_seed[1].clamp(1, 254)
-    );
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     // This endpoint is guarded by the bootstrap token. Reusing the physical
     // PoC client key deliberately reassigns that demo device to the newly
@@ -212,12 +206,11 @@ async fn create_demo_access(
     // the device key uniqueness constraint used by normal authorization.
     let device_id: Uuid = sqlx::query_scalar(
         "INSERT INTO device.devices \
-         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, mesh_address, status, enrolled_at) \
-         VALUES ($1, $2, $3, $4, $5, '10.77.0.1'::inet, 'active', now()) \
+         (id, domain_id, owner_kind, owner_user_id, owner_domain_id, device_public_key, wireguard_public_key, status, enrolled_at) \
+         VALUES ($1, $2, 'user', $3, NULL, $4, $5, 'active', now()) \
          ON CONFLICT (domain_id, wireguard_public_key) DO UPDATE \
-         SET owner_user_id = EXCLUDED.owner_user_id, \
+         SET owner_kind = 'user', owner_user_id = EXCLUDED.owner_user_id, owner_domain_id = NULL, \
              device_public_key = EXCLUDED.device_public_key, \
-             mesh_address = EXCLUDED.mesh_address, \
              status = 'active', enrolled_at = now() \
          RETURNING id",
     )
@@ -229,23 +222,32 @@ async fn create_demo_access(
     .fetch_one(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
+    let client_mesh_address = allocate_mesh_address(&mut transaction, "device", device_id).await?;
+    sqlx::query("UPDATE device.devices SET mesh_address = $2::inet WHERE id = $1")
+        .bind(device_id)
+        .bind(&client_mesh_address)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
 
     let target_device_id: Uuid = sqlx::query_scalar(
         "INSERT INTO device.devices \
-         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
-         VALUES ($1, $2, $3, $4, $5, 'active', now()) \
+         (id, domain_id, owner_kind, owner_user_id, owner_domain_id, device_public_key, wireguard_public_key, status, enrolled_at) \
+         VALUES ($1, $2, 'domain', NULL, $2, $3, $4, 'active', now()) \
          ON CONFLICT (domain_id, device_public_key) DO UPDATE \
-         SET owner_user_id = EXCLUDED.owner_user_id, status = 'active', enrolled_at = now() \
+         SET owner_kind = 'domain', owner_user_id = NULL, owner_domain_id = EXCLUDED.domain_id, \
+             status = 'active', enrolled_at = now() \
          RETURNING id",
     )
     .bind(target_device_id)
     .bind(state.domain_id())
-    .bind(request.user_id)
     .bind(target_device_public_key.as_slice())
     .bind(format!("poc-target-wireguard-{target_device_id}").into_bytes())
     .fetch_one(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
+    let target_mesh_address =
+        allocate_mesh_address(&mut transaction, "node", target_node_id).await?;
     sqlx::query(
         "INSERT INTO device.nodes \
          (id, device_id, hostname, mesh_address, ssh_principals, status) \
@@ -255,7 +257,7 @@ async fn create_demo_access(
     )
     .bind(target_node_id)
     .bind(target_device_id)
-    .bind(mesh_address)
+    .bind(target_mesh_address)
     .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
@@ -284,6 +286,49 @@ async fn create_demo_access(
             wireguard_public_key: client_wireguard_key,
         }),
     ))
+}
+
+async fn allocate_mesh_address(
+    transaction: &mut Transaction<'_, Postgres>,
+    owner_kind: &str,
+    owner_id: Uuid,
+) -> Result<String, ApiError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(617284901)")
+        .execute(&mut **transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    if let Some(address) = sqlx::query_scalar::<_, String>(
+        "SELECT host(address) FROM device.mesh_addresses \
+         WHERE owner_kind = $1 AND owner_id = $2",
+    )
+    .bind(owner_kind)
+    .bind(owner_id)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(ApiError::internal)?
+    {
+        return Ok(address);
+    }
+    sqlx::query_scalar::<_, String>(
+        "INSERT INTO device.mesh_addresses (address, owner_kind, owner_id) \
+         SELECT candidate.address, $1, $2 \
+         FROM ( \
+             SELECT ('10.77.0.' || value)::inet AS address \
+             FROM generate_series(1, 254) AS value \
+         ) AS candidate \
+         WHERE NOT EXISTS ( \
+             SELECT 1 FROM device.mesh_addresses allocated \
+             WHERE allocated.address = candidate.address \
+         ) \
+         ORDER BY candidate.address \
+         LIMIT 1 \
+         RETURNING host(address)",
+    )
+    .bind(owner_kind)
+    .bind(owner_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(ApiError::internal)
 }
 
 fn verify_node_enrollment(request: &CreateDemoAccessRequest) -> Result<[u8; 32], ApiError> {
@@ -797,19 +842,41 @@ async fn issue_access_authorization(
     )
     .await
     .map_err(ApiError::internal)?;
-    let Some(decision) = decision else {
+    let decision = match decision {
+        access_policy::AuthorizationOutcome::Allowed(decision) => decision,
+        access_policy::AuthorizationOutcome::Denied(reason) => {
+            record_access_decision(
+                &state,
+                session.user_id,
+                request.target_node_id,
+                DecisionAudit {
+                    decision: "deny",
+                    denial_reason: Some(reason.code()),
+                    denied_capability: reason
+                        .capability()
+                        .map(authority_policy_core::Capability::as_str),
+                    evaluated: None,
+                    authorization: None,
+                },
+            )
+            .await?;
+            return Err(ApiError::forbidden("policy_denied"));
+        }
+    };
+    if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
         record_access_decision(
             &state,
             session.user_id,
             request.target_node_id,
-            "deny",
-            None,
-            None,
+            DecisionAudit {
+                decision: "deny",
+                denial_reason: Some("wireguard_key_mismatch"),
+                denied_capability: None,
+                evaluated: Some(&decision),
+                authorization: None,
+            },
         )
         .await?;
-        return Err(ApiError::forbidden("policy_denied"));
-    };
-    if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
         return Err(ApiError::forbidden("wireguard_key_mismatch"));
     }
 
@@ -818,9 +885,13 @@ async fn issue_access_authorization(
         &state,
         session.user_id,
         request.target_node_id,
-        "allow",
-        Some(&decision),
-        Some(&response),
+        DecisionAudit {
+            decision: "allow",
+            denial_reason: None,
+            denied_capability: None,
+            evaluated: Some(&decision),
+            authorization: Some(&response),
+        },
     )
     .await?;
     Ok(Json(response))
@@ -922,17 +993,23 @@ fn build_access_bundle(
     })
 }
 
+struct DecisionAudit<'a> {
+    decision: &'a str,
+    denial_reason: Option<&'a str>,
+    denied_capability: Option<&'a str>,
+    evaluated: Option<&'a access_policy::AuthorizedAccess>,
+    authorization: Option<&'a AccessAuthorizationResponse>,
+}
+
 async fn record_access_decision(
     state: &AppState,
     user_id: Uuid,
     target_node_id: Uuid,
-    decision: &str,
-    evaluated: Option<&access_policy::AuthorizedAccess>,
-    authorization: Option<&AccessAuthorizationResponse>,
+    audit: DecisionAudit<'_>,
 ) -> Result<(), ApiError> {
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    let payload = match authorization.zip(evaluated) {
-        Some((bundle, evaluated)) => policy_decision_payload(
+    let payload = if let Some((bundle, evaluated)) = audit.authorization.zip(audit.evaluated) {
+        policy_decision_payload(
             evaluated,
             &bundle.decision_id,
             vec![
@@ -952,8 +1029,26 @@ async fn record_access_decision(
                     expires_at: bundle.node_authorization.authorization.expires_at,
                 },
             ],
-        )?,
-        None => json!({ "reason": "no_applicable_policy" }),
+        )?
+    } else {
+        let mut payload = json!({
+            "reason": audit.denial_reason.unwrap_or("policy_denied")
+        });
+        if let Some(capability) = audit.denied_capability {
+            payload["capability"] = json!(capability);
+        }
+        if let Some(evaluated) = audit.evaluated {
+            payload["policy"] = json!(policy_reference(&evaluated.decision));
+            payload["required_capabilities"] = json!(
+                evaluated
+                    .decision
+                    .required
+                    .iter()
+                    .map(|capability| capability.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+        payload
     };
     sqlx::query(
         "INSERT INTO audit.events \
@@ -963,13 +1058,16 @@ async fn record_access_decision(
     .bind(state.domain_id())
     .bind(user_id.to_string())
     .bind(target_node_id.to_string())
-    .bind(decision)
-    .bind((decision == "deny").then_some("no_applicable_policy"))
+    .bind(audit.decision)
+    .bind(
+        (audit.decision == "deny")
+            .then_some(audit.denial_reason.unwrap_or("policy_denied")),
+    )
     .bind(&payload)
     .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
-    if let Some(bundle) = authorization {
+    if let Some(bundle) = audit.authorization {
         insert_decision_outbox(&mut transaction, &bundle.decision_id, &payload).await?;
         let signed_bundle = AccessAuthorizationBundleV1 {
             version: bundle.version.clone(),

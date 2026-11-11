@@ -14,6 +14,9 @@
     },
     "0005_policy_decision_semantics.sql": {
       "sha256": "ec878e612f1de335616e5b9df4ebb735a83e2232a80a06dde0d89ae9be68e0b5"
+    },
+    "0006_mesh_allocation_and_device_ownership.sql": {
+      "sha256": "53a7693e49a817fd19508d9234b4fbf12eaf5121e6456deedfcf877f96b8921f"
     }
   }
 }

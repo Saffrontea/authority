@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use authority_policy_core::{
-    AccessDecision, AccessIntent, AccessRequest, Capability, Effect, IdentityFacts, PolicyRule,
-    PolicySnapshot, evaluate,
+    AccessDecision, AccessIntent, AccessRequest, Capability, DenialReason, Effect, IdentityFacts,
+    PolicyRule, PolicySnapshot, evaluate,
 };
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -12,6 +12,11 @@ pub struct AuthorizedAccess {
     pub ssh_principal: Option<String>,
     pub wireguard_public_key: Vec<u8>,
     pub device_mesh_address: String,
+}
+
+pub enum AuthorizationOutcome {
+    Allowed(AuthorizedAccess),
+    Denied(DenialReason),
 }
 
 struct StoredRule {
@@ -24,7 +29,7 @@ struct StoredRule {
 pub async fn authorize(
     pool: &PgPool,
     request: AccessRequest,
-) -> Result<Option<AuthorizedAccess>, sqlx::Error> {
+) -> Result<AuthorizationOutcome, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
                 policy.required_device_id, policy.target_node_id, policy.enabled, \
@@ -55,7 +60,9 @@ pub async fn authorize(
     .await?;
 
     let Some(first) = rows.first() else {
-        return Ok(None);
+        return Ok(AuthorizationOutcome::Denied(
+            DenialReason::NoApplicablePolicy,
+        ));
     };
     let identity = IdentityFacts {
         device_domain_id: first.try_get("device_domain_id")?,
@@ -73,8 +80,9 @@ pub async fn authorize(
         identity,
         rules: stored.iter().map(|item| item.rule.clone()).collect(),
     };
-    let Ok(decision) = evaluate(&request, &snapshot) else {
-        return Ok(None);
+    let decision = match evaluate(&request, &snapshot) {
+        Ok(decision) => decision,
+        Err(reason) => return Ok(AuthorizationOutcome::Denied(reason)),
     };
     let ssh_principal = decision
         .sources
@@ -87,7 +95,7 @@ pub async fn authorize(
                 })
                 .map(|item| item.ssh_principal.clone())
         });
-    Ok(Some(AuthorizedAccess {
+    Ok(AuthorizationOutcome::Allowed(AuthorizedAccess {
         decision,
         ssh_principal,
         wireguard_public_key,

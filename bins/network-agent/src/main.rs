@@ -183,11 +183,12 @@ async fn apply_grant(
         .map_err(|cause| ApiError::unauthorized("invalid_network_grant", cause))?;
     let peer = envelope.grant.wireguard_public_key.clone();
     let allowed_ip = format!("{}/32", envelope.grant.mesh_address);
-    {
-        let peers = state.0.active_peers.lock().map_err(ApiError::internal)?;
-        if peers.len() >= MAX_ACTIVE_PEERS && !peers.contains_key(&peer) {
-            return Err(ApiError::unavailable("peer_capacity_reached"));
-        }
+    // Keep the peer registry locked from the capacity decision through the
+    // successful kernel update and insertion. Otherwise concurrent grants can
+    // both observe a free slot and exceed the configured bound.
+    let mut peers = state.0.active_peers.lock().map_err(ApiError::internal)?;
+    if peers.len() >= MAX_ACTIVE_PEERS && !peers.contains_key(&peer) {
+        return Err(ApiError::unavailable("peer_capacity_reached"));
     }
     let nonce = envelope.grant.nonce.clone();
     if !state
@@ -211,12 +212,8 @@ async fn apply_grant(
     .map_err(ApiError::internal)?;
 
     let expires_at = envelope.grant.expires_at;
-    state
-        .0
-        .active_peers
-        .lock()
-        .map_err(ApiError::internal)?
-        .insert(peer.clone(), expires_at);
+    peers.insert(peer.clone(), expires_at);
+    drop(peers);
     let interface = state.0.interface.clone();
     let expiry_state = state.clone();
     let delay = u64::try_from(expires_at.saturating_sub(now)).unwrap_or(0);
