@@ -858,7 +858,14 @@ async fn issue_access_authorization(
     .await
     .map_err(ApiError::internal)?;
     let Some(decision) = decision else {
-        record_access_decision(&state, session.user_id, request.target_node_id, "deny").await?;
+        record_access_decision(
+            &state,
+            session.user_id,
+            request.target_node_id,
+            "deny",
+            None,
+        )
+        .await?;
         return Err(ApiError::forbidden("policy_denied"));
     };
     if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
@@ -914,12 +921,20 @@ async fn issue_access_authorization(
         state.signer(),
     )
     .map_err(ApiError::internal)?;
-    record_access_decision(&state, session.user_id, request.target_node_id, "allow").await?;
-    Ok(Json(AccessAuthorizationResponse {
+    let response = AccessAuthorizationResponse {
         decision_id,
         ssh_authorization,
         network_grant,
-    }))
+    };
+    record_access_decision(
+        &state,
+        session.user_id,
+        request.target_node_id,
+        "allow",
+        Some(&response),
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 async fn record_access_decision(
@@ -927,18 +942,48 @@ async fn record_access_decision(
     user_id: Uuid,
     target_node_id: Uuid,
     decision: &str,
+    authorization: Option<&AccessAuthorizationResponse>,
 ) -> Result<(), ApiError> {
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    record_audit(
-        &mut transaction,
-        state.domain_id(),
-        user_id,
-        "access.authorize",
-        "node",
-        target_node_id,
-        decision,
+    let payload = authorization.map_or_else(
+        || json!({ "reason": "no_applicable_policy" }),
+        |bundle| {
+            json!({
+                "decision_id": bundle.decision_id,
+                "policy": bundle.ssh_authorization.authorization.policy_id,
+                "ssh_expires_at": bundle.ssh_authorization.authorization.expires_at,
+                "network_expires_at": bundle.network_grant.grant.expires_at,
+            })
+        },
+    );
+    sqlx::query(
+        "INSERT INTO audit.events \
+         (domain_id, actor_type, actor_id, action, target_type, target_id, decision, reason, payload) \
+         VALUES ($1, 'user', $2, 'access.authorize', 'node', $3, $4, $5, $6)",
     )
-    .await?;
+    .bind(state.domain_id())
+    .bind(user_id.to_string())
+    .bind(target_node_id.to_string())
+    .bind(decision)
+    .bind((decision == "deny").then_some("no_applicable_policy"))
+    .bind(payload)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    if let Some(bundle) = authorization {
+        sqlx::query(
+            "INSERT INTO outbox.events \
+             (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
+             VALUES ($1, 'policy', 'access_decision', $2, \
+                     'access.authorization.issued', 1, $3, now())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&bundle.decision_id)
+        .bind(serde_json::to_value(bundle).map_err(ApiError::internal)?)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    }
     transaction.commit().await.map_err(ApiError::internal)
 }
 
