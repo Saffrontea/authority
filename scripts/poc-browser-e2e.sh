@@ -90,6 +90,19 @@ wait_for_result() {
     die "timed out waiting for ${description}"
 }
 
+wait_for_terminal() {
+    local pattern="$1" description="$2" value attempt
+    for attempt in {1..100}; do
+        value="$(element_text '#terminal-output')"
+        if [[ "${value}" == *"${pattern}"* ]]; then
+            printf '%s\n' "${value}"
+            return 0
+        fi
+        sleep 0.1
+    done
+    die "timed out waiting for ${description}: ${value}"
+}
+
 json_post() {
     local url="$1" body="$2" authorization="${3:-}" response_file status
     response_file="$(mktemp)"
@@ -172,6 +185,13 @@ ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q
     die 'issued certificate does not contain the deploy principal'
 printf '%s\n%s\n' "${registered}" "${issued}"
 
+terminal_command="$(webdriver POST "/session/${session}/execute/async" \
+    '{"script":"const done = arguments[0]; window.authorityTerminalCommand(\"printf WEB_TERMINAL_OK\").then(() => done({ok:true})).catch(error => done({error:error.message}));","args":[]}')"
+terminal_error="$(jq -r '.error // empty' <<<"${terminal_command}")"
+[[ -z "${terminal_error}" ]] || die "web SSH terminal command failed: ${terminal_error}"
+wait_for_terminal 'WEB_TERMINAL_OK' 'web SSH terminal command' >/dev/null
+printf 'Web SSH terminal: signed certificate opened an interactive session\n'
+
 ssh_target="${network_agent_origin#http://}"
 ssh_target="${ssh_target%%:*}"
 plain_key="$(mktemp)"
@@ -181,8 +201,8 @@ ssh_options=(
     -o BatchMode=yes
     -o ConnectTimeout=5
     -o IdentitiesOnly=yes
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=yes
+    -o "UserKnownHostsFile=${PROJECT_DIR}/.secrets/poc-ssh/known_hosts"
     -o LogLevel=ERROR
 )
 if ssh "${ssh_options[@]}" -i "${plain_key}" "deploy@${ssh_target}" true; then
@@ -260,6 +280,7 @@ if [[ -n "${wireguard_public_key}" ]]; then
         "deploy@${ssh_target}" true; then
         die 'target accepted an expired SSH certificate'
     fi
+    wait_for_terminal 'Permission denied' 'expired web SSH terminal reconnect denial' >/dev/null
     printf 'OpenSSH certificate expiry: target denied expired certificate\n'
     mise run mesh:configure
 fi

@@ -29,7 +29,12 @@ mise run poc:run
 
 Open the bootstrap URL printed by the runner. Use **Create user and Passkey**
 once, then **Sign in with Passkey**. A successful run prints the local SSH key
-and certificate paths together with the issued OpenSSH certificate.
+and certificate paths together with the issued OpenSSH certificate. The page
+also exposes a WebSocket-backed SSH terminal whose client process runs inside
+the loopback-only Node Agent; the private key never enters browser JavaScript.
+At certificate expiry the demo closes and reconnects the terminal so the
+target `sshd` denial is visible (OpenSSH does not terminate sessions that were
+already established before a certificate expired).
 
 ## Testing without Passkey hardware
 

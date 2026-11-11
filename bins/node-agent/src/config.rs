@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use axum::http::HeaderValue;
 
@@ -8,6 +12,8 @@ pub struct Config {
     pub ssh_certificate_file: PathBuf,
     pub trusted_ca_public_key_file: PathBuf,
     pub browser_origins: Vec<HeaderValue>,
+    pub ssh_known_hosts_file: PathBuf,
+    pub ssh_target: Option<IpAddr>,
 }
 
 impl Config {
@@ -22,7 +28,24 @@ impl Config {
                 "AUTHORITY_SSH_CA_PUBLIC_KEY_FILE",
             )?),
             browser_origins: origins("AUTHORITY_BROWSER_ORIGINS", "http://localhost:3000")?,
+            ssh_known_hosts_file: PathBuf::from(required("AUTHORITY_SSH_KNOWN_HOSTS_FILE")?),
+            ssh_target: optional("AUTHORITY_SSH_TARGET")?
+                .map(|target| {
+                    target
+                        .parse::<IpAddr>()
+                        .map_err(|error| format!("AUTHORITY_SSH_TARGET is invalid: {error}"))
+                })
+                .transpose()?,
         })
+    }
+}
+
+fn optional(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) if value.is_empty() => Err(format!("{name} must not be empty")),
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("cannot read {name}: {error}")),
     }
 }
 

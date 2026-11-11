@@ -16,6 +16,9 @@
     button { margin-top: 8px; padding: 10px 16px; border: 0; border-radius: 8px; background: #b9e46f; color: #18200d; font-weight: 700; cursor: pointer; }
     button:disabled { opacity: .55; cursor: wait; }
     pre { min-height: 48px; overflow-wrap: anywhere; white-space: pre-wrap; color: #b9e46f; }
+    #terminal-output { min-height: 180px; max-height: 360px; overflow: auto; background: #0b0d0a; padding: 12px; }
+    #terminal-form { display: flex; gap: 8px; }
+    #terminal-input { flex: 1; }
   </style>
 </head>
 <body>
@@ -41,6 +44,17 @@
     <pre id="result">Ready.</pre>
   </section>
 
+  <section id="terminal" hidden>
+    <h2>Short-lived SSH terminal</h2>
+    <p id="terminal-status">A new SSH connection must present a currently valid certificate.</p>
+    <button id="terminal-connect" type="button">Connect</button>
+    <pre id="terminal-output"></pre>
+    <form id="terminal-form">
+      <input id="terminal-input" autocomplete="off" aria-label="Terminal input" placeholder="Enter a command">
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
   <script>
     const result = document.querySelector('#result');
     const pageParameters = new URLSearchParams(location.search);
@@ -54,6 +68,12 @@
     let bootstrap = sessionStorage.getItem('authority-bootstrap');
     const networkAgentOrigin = pageParameters.get('network_agent_origin');
     const wireguardPublicKey = pageParameters.get('wireguard_public_key');
+    const terminalSection = document.querySelector('#terminal');
+    const terminalOutput = document.querySelector('#terminal-output');
+    const terminalStatus = document.querySelector('#terminal-status');
+    let terminalSocket;
+    let terminalExpiresAt;
+    let terminalExpiryTimer;
     if (!bootstrap) document.querySelector('#setup').hidden = true;
 
     const decode = value => {
@@ -200,6 +220,66 @@
       return api(path, body, await deviceProofHeaders(sessionToken, action, bindings));
     }
 
+    function appendTerminal(value) {
+      terminalOutput.textContent += value;
+      terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    }
+
+    function connectTerminal() {
+      if (terminalSocket && terminalSocket.readyState < WebSocket.CLOSING) terminalSocket.close();
+      const terminalUrl = new URL('/v1/ssh-terminal', nodeAgentOrigin);
+      terminalUrl.protocol = terminalUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+      terminalSocket = new WebSocket(terminalUrl);
+      terminalSocket.binaryType = 'arraybuffer';
+      terminalSocket.onopen = () => appendTerminal('[browser] terminal connected\n');
+      terminalSocket.onmessage = event => appendTerminal(
+        typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data),
+      );
+      terminalSocket.onerror = () => appendTerminal('[browser] terminal transport error\n');
+      terminalSocket.onclose = () => appendTerminal('[browser] terminal disconnected\n');
+    }
+
+    function exposeTerminal(expiresAt) {
+      terminalSection.hidden = false;
+      terminalExpiresAt = expiresAt;
+      clearInterval(terminalExpiryTimer);
+      const update = () => {
+        const remaining = Math.max(0, terminalExpiresAt - Math.floor(Date.now() / 1000));
+        terminalStatus.textContent = remaining > 0
+          ? `Certificate permits new SSH connections for ${remaining}s.`
+          : 'Certificate expired. Reconnect demonstrates local denial by sshd.';
+      };
+      update();
+      terminalExpiryTimer = setInterval(update, 250);
+      connectTerminal();
+      const delay = Math.max(0, expiresAt * 1000 - Date.now() + 300);
+      setTimeout(() => {
+        appendTerminal('\n[browser] certificate expired; reconnecting to prove denial\n');
+        if (terminalSocket) terminalSocket.close();
+        setTimeout(connectTerminal, 150);
+      }, delay);
+    }
+
+    document.querySelector('#terminal-connect').addEventListener('click', connectTerminal);
+    window.authorityTerminalCommand = async command => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (terminalSocket?.readyState === WebSocket.OPEN) {
+          terminalSocket.send(`${command}\n`);
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      throw new Error('SSH terminal did not connect.');
+    };
+    document.querySelector('#terminal-form').addEventListener('submit', event => {
+      event.preventDefault();
+      const input = document.querySelector('#terminal-input');
+      if (terminalSocket?.readyState === WebSocket.OPEN && input.value) {
+        terminalSocket.send(`${input.value}\n`);
+        input.value = '';
+      }
+    });
+
     window.authorityPrepareAccessAuthorization = async function () {
       const sessionToken = sessionStorage.getItem('authority-session');
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
@@ -333,6 +413,7 @@
         networkResult = `\ndecision=${authorization.decision_id}\nWireGuard peer applied.\npeer=${applied.peer_public_key}\nallowed=${applied.allowed_ip}\nnetwork expires=${new Date(applied.expires_at * 1000).toISOString()}`;
       }
       result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}${networkResult}\n\n${issued.certificate}`;
+      exposeTerminal(issued.expires_at);
     }));
   </script>
 </body>

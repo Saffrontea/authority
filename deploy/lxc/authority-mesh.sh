@@ -15,6 +15,7 @@ readonly WG_PORT=51820
 readonly NETWORK_AGENT_BINARY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/target/debug/authority-network-agent"
 readonly CONTROL_PLANE_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/control-plane-ed25519.pub.pem"
 readonly SSH_CA_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/ssh-ca.pub"
+readonly SSH_KNOWN_HOSTS_FILE="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/poc-ssh/known_hosts"
 
 log() {
   printf '[authority-mesh] %s\n' "$*"
@@ -300,7 +301,7 @@ verify_mesh() {
 }
 
 install_network_agent() {
-  local target_underlay
+  local target_underlay target_host_key
   [[ "$(container_state "${TARGET_NAME}")" == "RUNNING" ]] || die "${TARGET_NAME} is not running"
   [[ -x "${NETWORK_AGENT_BINARY}" ]] || die "network agent binary missing; run cargo build -p authority-network-agent"
   [[ -s "${CONTROL_PLANE_PUBLIC_KEY}" ]] || die "control-plane public key is missing"
@@ -358,6 +359,10 @@ systemctl enable authority-network-agent.service >/dev/null
 systemctl restart authority-network-agent.service
 CONTAINER_SCRIPT
   target_underlay="$(container_ip "${TARGET_NAME}")"
+  target_host_key="$(attach "${TARGET_NAME}" cat /etc/ssh/ssh_host_ed25519_key.pub)"
+  as_root install -d -m 0700 "$(dirname "${SSH_KNOWN_HOSTS_FILE}")"
+  printf '%s %s\n' "${target_underlay}" "${target_host_key}" >"${SSH_KNOWN_HOSTS_FILE}"
+  chmod 0644 "${SSH_KNOWN_HOSTS_FILE}"
   log "network-agent=http://${target_underlay}:3003"
 }
 

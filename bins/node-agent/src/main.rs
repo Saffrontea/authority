@@ -21,11 +21,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| format!("SSH key error: {error}"))?;
     let trusted_ca =
         PublicKey::from_openssh(&fs::read_to_string(&config.trusted_ca_public_key_file)?)?;
+    let browser_origins = config.browser_origins.clone();
     let state = AppState::new(
         private_key,
         trusted_ca,
         config.ssh_private_key_file,
         config.ssh_certificate_file,
+        config.ssh_known_hosts_file,
+        config.ssh_target,
+        browser_origins,
     );
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 
