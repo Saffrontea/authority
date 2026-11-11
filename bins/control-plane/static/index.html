@@ -53,6 +53,7 @@
     }
     const bootstrap = sessionStorage.getItem('authority-bootstrap');
     const networkAgentOrigin = pageParameters.get('network_agent_origin');
+    const wireguardPublicKey = pageParameters.get('wireguard_public_key');
     if (!bootstrap) document.querySelector('#setup').hidden = true;
 
     const decode = value => {
@@ -145,7 +146,6 @@
         challenge_id: start.challenge_id,
         credential: credentialJson(credential),
       });
-      const wireguardPublicKey = pageParameters.get('wireguard_public_key');
       const access = await api('/v1/bootstrap/demo-access', {
         user_id: user.user_id,
         wireguard_public_key: wireguardPublicKey,

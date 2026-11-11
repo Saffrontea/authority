@@ -141,7 +141,7 @@ async fn create_demo_access(
         return Err(ApiError::not_found("user_not_found"));
     }
 
-    let device_id = Uuid::new_v4();
+    let proposed_device_id = Uuid::new_v4();
     let target_device_id = Uuid::new_v4();
     let target_node_id = Uuid::new_v4();
     let policy_id = Uuid::new_v4();
@@ -152,29 +152,43 @@ async fn create_demo_access(
         address_seed[1].clamp(1, 254)
     );
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    for (id, label) in [(device_id, "client"), (target_device_id, "target")] {
-        let wireguard_public_key = if label == "client" {
-            request
-                .wireguard_public_key
-                .clone()
-                .unwrap_or_else(|| format!("poc-{label}-wireguard-{id}"))
-        } else {
-            format!("poc-{label}-wireguard-{id}")
-        };
-        sqlx::query(
-            "INSERT INTO device.devices \
-             (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
-             VALUES ($1, $2, $3, $4, $5, 'active', now())",
-        )
-        .bind(id)
-        .bind(state.domain_id())
-        .bind(request.user_id)
-        .bind(format!("poc-{label}-device-{id}").into_bytes())
-        .bind(wireguard_public_key.into_bytes())
-        .execute(&mut *transaction)
-        .await
-        .map_err(ApiError::internal)?;
-    }
+    let client_wireguard_key = request
+        .wireguard_public_key
+        .unwrap_or_else(|| format!("poc-client-wireguard-{proposed_device_id}"));
+    // This endpoint is guarded by the bootstrap token. Reusing the physical
+    // PoC client key deliberately reassigns that demo device to the newly
+    // bootstrapped user, making repeated E2E runs idempotent without weakening
+    // the device key uniqueness constraint used by normal authorization.
+    let device_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO device.devices \
+         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
+         VALUES ($1, $2, $3, $4, $5, 'active', now()) \
+         ON CONFLICT (domain_id, wireguard_public_key) DO UPDATE \
+         SET owner_user_id = EXCLUDED.owner_user_id, status = 'active', enrolled_at = now() \
+         RETURNING id",
+    )
+    .bind(proposed_device_id)
+    .bind(state.domain_id())
+    .bind(request.user_id)
+    .bind(format!("poc-client-device-{proposed_device_id}").into_bytes())
+    .bind(client_wireguard_key.into_bytes())
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+
+    sqlx::query(
+        "INSERT INTO device.devices \
+         (id, domain_id, owner_user_id, device_public_key, wireguard_public_key, status, enrolled_at) \
+         VALUES ($1, $2, $3, $4, $5, 'active', now())",
+    )
+    .bind(target_device_id)
+    .bind(state.domain_id())
+    .bind(request.user_id)
+    .bind(format!("poc-target-device-{target_device_id}").into_bytes())
+    .bind(format!("poc-target-wireguard-{target_device_id}").into_bytes())
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
     sqlx::query(
         "INSERT INTO device.nodes \
          (id, device_id, hostname, mesh_address, ssh_principals, status) \

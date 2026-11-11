@@ -5,11 +5,14 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 control_pid=''
 issuer_pid=''
 node_pid=''
+cleaned_up=0
 control_origin=${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}
 issuer_origin=${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}
 node_origin=${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}
 
 cleanup() {
+    (( cleaned_up == 0 )) || return 0
+    cleaned_up=1
     for pid in "${node_pid}" "${issuer_pid}" "${control_pid}"; do
         if [[ -n "${pid}" ]]; then
             kill "${pid}" 2>/dev/null || true
@@ -17,7 +20,15 @@ cleanup() {
     done
     wait 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM
+
+on_signal() {
+    trap - INT TERM
+    cleanup
+    exit 130
+}
+
+trap cleanup EXIT
+trap on_signal INT TERM
 
 "${SCRIPT_DIR}/run-control-plane.sh" &
 control_pid=$!

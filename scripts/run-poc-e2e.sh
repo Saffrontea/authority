@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 poc_pid=''
+cleaned_up=0
 
 mesh_status="$(mise run mesh:status)"
 AUTHORITY_POC_WG_PUBLIC_KEY="$(printf '%s\n' "${mesh_status}" | awk '/public-key:/ { print $2; exit }')"
@@ -25,14 +26,33 @@ export AUTHORITY_BIND AUTHORITY_RP_ORIGIN AUTHORITY_ISSUER_BIND AUTHORITY_NODE_A
 export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NODE_ORIGIN
 
 cleanup() {
-    if [[ -n "${poc_pid}" ]]; then
-        kill "${poc_pid}" 2>/dev/null || true
-        wait "${poc_pid}" 2>/dev/null || true
-    fi
-}
-trap cleanup EXIT INT TERM
+    (( cleaned_up == 0 )) || return 0
+    cleaned_up=1
+    [[ -n "${poc_pid}" ]] || return 0
 
-"${SCRIPT_DIR}/run-poc.sh" &
+    # run-poc owns a separate session/process group. Stop cargo wrappers and
+    # the service binaries together instead of only killing the outer shell.
+    kill -TERM -- "-${poc_pid}" 2>/dev/null || true
+    for _ in {1..50}; do
+        kill -0 "${poc_pid}" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "${poc_pid}" 2>/dev/null; then
+        kill -KILL -- "-${poc_pid}" 2>/dev/null || true
+    fi
+    wait "${poc_pid}" 2>/dev/null || true
+}
+
+on_signal() {
+    trap - INT TERM
+    cleanup
+    exit 130
+}
+
+trap cleanup EXIT
+trap on_signal INT TERM
+
+setsid "${SCRIPT_DIR}/run-poc.sh" &
 poc_pid=$!
 
 for _ in {1..600}; do
@@ -58,4 +78,4 @@ if [[ "${grant_probe_status}" != "401" ]]; then
     exit 1
 fi
 
-python3 "${SCRIPT_DIR}/poc-browser-e2e.py"
+"${SCRIPT_DIR}/poc-browser-e2e.sh"
