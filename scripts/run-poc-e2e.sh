@@ -67,6 +67,12 @@ for _ in {1..600}; do
     sleep 0.1
 done
 
+"${SCRIPT_DIR}/assert-cors.sh" \
+    "${AUTHORITY_POC_ISSUER_ORIGIN}/v1/ssh-certificates" "${AUTHORITY_RP_ORIGIN}" POST
+"${SCRIPT_DIR}/assert-cors.sh" \
+    "${AUTHORITY_POC_NODE_ORIGIN}/v1/ssh-certificate" "${AUTHORITY_RP_ORIGIN}" POST
+echo "[poc] issuer and node-agent CORS allowlists verified" >&2
+
 # A pre-existing service can satisfy /health while the newly started binary is
 # still compiling or has failed to bind. This route must exist in the current
 # build; an empty unauthenticated request reaches it and returns 401.

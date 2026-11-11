@@ -122,6 +122,8 @@ if [[ -n "${wireguard_public_key}" ]]; then
     done
     curl --silent --fail "${network_agent_origin}/v1/identity" >/dev/null ||
         die 'target network-agent identity endpoint did not become ready'
+    "${SCRIPT_DIR}/assert-cors.sh" \
+        "${network_agent_origin}/v1/network-grants" "${control_origin}" POST
     printf '[poc:e2e] target network-agent identity ready\n'
 fi
 
