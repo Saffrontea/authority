@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/access-authorization-bundle-v1.schema.json",
+  "title": "AccessAuthorizationBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "decision_id", "ssh_authorization", "network_grant"],
+  "properties": {
+    "version": { "const": "1" },
+    "decision_id": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "ssh_authorization": { "$ref": "signed-issuance-authorization-v1.schema.json" },
+    "network_grant": { "$ref": "signed-network-access-grant-v1.schema.json" }
+  }
+}

@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{
-    IssuanceAuthorizationV1, NetworkAccessGrantV1, SignedIssuanceAuthorizationV1,
-    SignedNetworkAccessGrantV1,
+    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
+    SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{
@@ -822,18 +822,11 @@ struct IssueAccessAuthorizationRequest {
     wireguard_public_key: String,
 }
 
-#[derive(Serialize)]
-struct AccessAuthorizationResponse {
-    decision_id: String,
-    ssh_authorization: SignedIssuanceAuthorizationV1,
-    network_grant: SignedNetworkAccessGrantV1,
-}
-
 async fn issue_access_authorization(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<IssueAccessAuthorizationRequest>,
-) -> Result<Json<AccessAuthorizationResponse>, ApiError> {
+) -> Result<Json<AccessAuthorizationBundleV1>, ApiError> {
     let bindings = vec![
         request.device_id.to_string(),
         request.target_node_id.to_string(),
@@ -872,6 +865,25 @@ async fn issue_access_authorization(
         return Err(ApiError::forbidden("wireguard_key_mismatch"));
     }
 
+    let response = build_access_bundle(&state, &session, &request, &decision, issued_at)?;
+    record_access_decision(
+        &state,
+        session.user_id,
+        request.target_node_id,
+        "allow",
+        Some(&response),
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+fn build_access_bundle(
+    state: &AppState,
+    session: &AuthenticatedSession,
+    request: &IssueAccessAuthorizationRequest,
+    decision: &authority_policy_core::AccessDecision,
+    issued_at: i64,
+) -> Result<AccessAuthorizationBundleV1, ApiError> {
     // A shared nonce is the cryptographic decision identifier: both signed
     // adapter contracts bind it, the policy, subject, device, target, and time.
     let decision_id = Uuid::new_v4().simple().to_string();
@@ -880,7 +892,7 @@ async fn issue_access_authorization(
     let common_subject = session.user_id.to_string();
     let common_device = request.device_id.to_string();
     let common_target = request.target_node_id.to_string();
-    let common_policy = policy_reference(&decision);
+    let common_policy = policy_reference(decision);
     let ssh_authorization = sign_authorization(
         IssuanceAuthorizationV1 {
             version: "1".to_owned(),
@@ -889,8 +901,8 @@ async fn issue_access_authorization(
             subject_user_id: common_subject.clone(),
             device_id: common_device.clone(),
             target_node_id: common_target.clone(),
-            ssh_public_key_fingerprint: request.ssh_public_key_fingerprint,
-            principals: vec![decision.ssh_principal],
+            ssh_public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
+            principals: vec![decision.ssh_principal.clone()],
             policy_id: common_policy.clone(),
             nonce: decision_id.clone(),
             issued_at,
@@ -909,8 +921,8 @@ async fn issue_access_authorization(
             subject_user_id: common_subject,
             device_id: common_device,
             target_node_id: common_target,
-            wireguard_public_key: request.wireguard_public_key,
-            mesh_address: decision.device_mesh_address,
+            wireguard_public_key: request.wireguard_public_key.clone(),
+            mesh_address: decision.device_mesh_address.clone(),
             policy_id: common_policy,
             nonce: decision_id.clone(),
             issued_at,
@@ -921,20 +933,14 @@ async fn issue_access_authorization(
         state.signer(),
     )
     .map_err(ApiError::internal)?;
-    let response = AccessAuthorizationResponse {
+    let bundle = AccessAuthorizationBundleV1 {
+        version: "1".to_owned(),
         decision_id,
         ssh_authorization,
         network_grant,
     };
-    record_access_decision(
-        &state,
-        session.user_id,
-        request.target_node_id,
-        "allow",
-        Some(&response),
-    )
-    .await?;
-    Ok(Json(response))
+    bundle.validate().map_err(ApiError::internal)?;
+    Ok(bundle)
 }
 
 async fn record_access_decision(
@@ -942,7 +948,7 @@ async fn record_access_decision(
     user_id: Uuid,
     target_node_id: Uuid,
     decision: &str,
-    authorization: Option<&AccessAuthorizationResponse>,
+    authorization: Option<&AccessAuthorizationBundleV1>,
 ) -> Result<(), ApiError> {
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     let payload = authorization.map_or_else(

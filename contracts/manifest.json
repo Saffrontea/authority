@@ -1,5 +1,9 @@
 {
   "artifacts": {
+    "artifacts/access-authorization-bundle-v1.schema.json": {
+      "version": 1,
+      "sha256": "383b7e026536d12fea290e4eaa7aeb18cd93f963c090910f105eb7a5a0938566"
+    },
     "artifacts/network-access-grant-v1.schema.json": {
       "version": 1,
       "sha256": "7059469f04f89f6e77baedf6a2f431fda316f634292b25e840f08d73932ea520"

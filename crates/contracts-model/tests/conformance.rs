@@ -1,8 +1,8 @@
 use std::{fs, path::Path};
 
 use authority_contracts_model::{
-    IssuanceAuthorizationV1, NetworkAccessGrantV1, SignedIssuanceAuthorizationV1,
-    SignedNetworkAccessGrantV1,
+    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
+    SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 
 #[test]
@@ -107,6 +107,28 @@ fn signed_network_grant_vectors_conform() {
         assert!(
             rejected,
             "invalid signed network grant accepted: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn access_authorization_bundle_vectors_conform() {
+    for path in contract_vectors("access-authorization-bundle-v1", "valid") {
+        let bytes = fs::read(&path).expect("read access authorization bundle");
+        let bundle: AccessAuthorizationBundleV1 =
+            serde_json::from_slice(&bytes).expect("deserialize access authorization bundle");
+        bundle
+            .validate()
+            .expect("validate access authorization bundle");
+    }
+    for path in contract_vectors("access-authorization-bundle-v1", "invalid") {
+        let bytes = fs::read(&path).expect("read invalid access authorization bundle");
+        let rejected = serde_json::from_slice::<AccessAuthorizationBundleV1>(&bytes)
+            .map_or(true, |bundle| bundle.validate().is_err());
+        assert!(
+            rejected,
+            "invalid access authorization bundle accepted: {}",
             path.display()
         );
     }

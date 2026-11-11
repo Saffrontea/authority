@@ -72,6 +72,16 @@ pub struct SignedNetworkAccessGrantV1 {
     pub signature: String,
 }
 
+/// One policy decision projected into two independently consumable contracts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessAuthorizationBundleV1 {
+    pub version: String,
+    pub decision_id: String,
+    pub ssh_authorization: SignedIssuanceAuthorizationV1,
+    pub network_grant: SignedNetworkAccessGrantV1,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContractError {
     #[error("unsupported contract version")]
@@ -96,6 +106,8 @@ pub enum ContractError {
     InvalidWireGuardPublicKey,
     #[error("mesh_address must be an IPv4 address")]
     InvalidMeshAddress,
+    #[error("access authorization bundle field does not match: {0}")]
+    BundleMismatch(&'static str),
 }
 
 impl IssuanceAuthorizationV1 {
@@ -301,6 +313,66 @@ impl SignedNetworkAccessGrantV1 {
     pub fn validate(&self) -> Result<(), ContractError> {
         self.grant.validate()?;
         validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+}
+
+impl AccessAuthorizationBundleV1 {
+    /// Validates both consumer contracts and their shared decision bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] when an inner contract is invalid or when the
+    /// two signed projections do not describe the same policy decision.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.version != VERSION {
+            return Err(ContractError::UnsupportedVersion);
+        }
+        self.ssh_authorization.validate()?;
+        self.network_grant.validate()?;
+        let ssh = &self.ssh_authorization.authorization;
+        let network = &self.network_grant.grant;
+        if self.decision_id != ssh.nonce || self.decision_id != network.nonce {
+            return Err(ContractError::BundleMismatch("decision_id"));
+        }
+        for (field, left, right) in [
+            ("issuer", ssh.issuer.as_str(), network.issuer.as_str()),
+            (
+                "domain_id",
+                ssh.domain_id.as_str(),
+                network.domain_id.as_str(),
+            ),
+            (
+                "subject_user_id",
+                ssh.subject_user_id.as_str(),
+                network.subject_user_id.as_str(),
+            ),
+            (
+                "device_id",
+                ssh.device_id.as_str(),
+                network.device_id.as_str(),
+            ),
+            (
+                "target_node_id",
+                ssh.target_node_id.as_str(),
+                network.target_node_id.as_str(),
+            ),
+            (
+                "policy_id",
+                ssh.policy_id.as_str(),
+                network.policy_id.as_str(),
+            ),
+        ] {
+            if left != right {
+                return Err(ContractError::BundleMismatch(field));
+            }
+        }
+        if ssh.issued_at != network.issued_at {
+            return Err(ContractError::BundleMismatch("issued_at"));
+        }
+        if ssh.not_before != network.not_before {
+            return Err(ContractError::BundleMismatch("not_before"));
+        }
+        Ok(())
     }
 }
 
