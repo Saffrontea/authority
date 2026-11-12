@@ -14,6 +14,7 @@ pub struct Config {
     pub browser_origins: Vec<HeaderValue>,
     pub ssh_known_hosts_file: PathBuf,
     pub ssh_target: Option<IpAddr>,
+    pub ssh_target_port: u16,
     pub control_plane_public_key_file: PathBuf,
     pub control_plane_key_id: String,
 }
@@ -39,6 +40,9 @@ impl Config {
                         .map_err(|error| format!("AUTHORITY_SSH_TARGET is invalid: {error}"))
                 })
                 .transpose()?,
+            ssh_target_port: value("AUTHORITY_SSH_TARGET_PORT", "22")?
+                .parse::<u16>()
+                .map_err(|error| format!("AUTHORITY_SSH_TARGET_PORT is invalid: {error}"))?,
             control_plane_public_key_file: PathBuf::from(required(
                 "AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE",
             )?),

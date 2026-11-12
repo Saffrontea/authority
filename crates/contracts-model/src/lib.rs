@@ -11,6 +11,7 @@ const VERSION: &str = "1";
 const MAX_TTL_SECONDS: i64 = 600;
 const DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-ISSUANCE-AUTHORIZATION-V1\0";
 const NETWORK_GRANT_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-NETWORK-ACCESS-GRANT-V1\0";
+const REVOCATION_NOTICE_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V1\0";
 const SIGNATURE_ALGORITHM: &str = "Ed25519";
 
 /// Control-plane authorization consumed by the isolated credential issuer.
@@ -67,6 +68,31 @@ pub struct NetworkAccessGrantV1 {
 #[serde(deny_unknown_fields)]
 pub struct SignedNetworkAccessGrantV1 {
     pub grant: NetworkAccessGrantV1,
+    pub algorithm: String,
+    pub key_id: String,
+    pub signature: String,
+}
+
+/// Signed, target-scoped invalidation of every adapter grant from one decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRevocationNoticeV1 {
+    pub version: String,
+    pub issuer: String,
+    pub domain_id: String,
+    pub target_node_id: String,
+    pub decision_id: String,
+    pub reason: String,
+    pub sequence: i64,
+    pub revoked_at: i64,
+    pub expires_at: i64,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedDecisionRevocationNoticeV1 {
+    pub notice: DecisionRevocationNoticeV1,
     pub algorithm: String,
     pub key_id: String,
     pub signature: String,
@@ -180,6 +206,8 @@ pub enum ContractError {
     InvalidMeshAddress,
     #[error("access authorization bundle field does not match: {0}")]
     BundleMismatch(&'static str),
+    #[error("revocation sequence must be positive")]
+    InvalidSequence,
 }
 
 impl IssuanceAuthorizationV1 {
@@ -384,6 +412,76 @@ impl SignedNetworkAccessGrantV1 {
     /// Returns [`ContractError`] when the grant or envelope is invalid.
     pub fn validate(&self) -> Result<(), ContractError> {
         self.grant.validate()?;
+        validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+}
+
+impl DecisionRevocationNoticeV1 {
+    /// Validates a durable revocation record before signing or applying it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] when identifiers, sequence, or lifetime are invalid.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.version != VERSION {
+            return Err(ContractError::UnsupportedVersion);
+        }
+        for (name, value) in [
+            ("issuer", self.issuer.as_str()),
+            ("domain_id", self.domain_id.as_str()),
+            ("target_node_id", self.target_node_id.as_str()),
+            ("decision_id", self.decision_id.as_str()),
+            ("reason", self.reason.as_str()),
+            ("audience", self.audience.as_str()),
+        ] {
+            if !valid_identifier(value) {
+                return Err(ContractError::InvalidIdentifier(name));
+            }
+        }
+        if self.sequence <= 0 {
+            return Err(ContractError::InvalidSequence);
+        }
+        if self.revoked_at >= self.expires_at {
+            return Err(ContractError::InvalidTimeRange);
+        }
+        Ok(())
+    }
+
+    /// Returns the stable, domain-separated bytes covered by the signature.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::validate`].
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, ContractError> {
+        self.validate()?;
+        let mut output = Vec::with_capacity(384);
+        output.extend_from_slice(REVOCATION_NOTICE_DOMAIN_SEPARATOR);
+        for value in [
+            self.version.as_str(),
+            self.issuer.as_str(),
+            self.domain_id.as_str(),
+            self.target_node_id.as_str(),
+            self.decision_id.as_str(),
+            self.reason.as_str(),
+        ] {
+            push_string(&mut output, value);
+        }
+        output.extend_from_slice(&self.sequence.to_be_bytes());
+        output.extend_from_slice(&self.revoked_at.to_be_bytes());
+        output.extend_from_slice(&self.expires_at.to_be_bytes());
+        push_string(&mut output, &self.audience);
+        Ok(output)
+    }
+}
+
+impl SignedDecisionRevocationNoticeV1 {
+    /// Validates envelope shape without performing cryptographic verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for an invalid notice or signature envelope.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.notice.validate()?;
         validate_envelope(&self.algorithm, &self.key_id, &self.signature)
     }
 }

@@ -16,7 +16,7 @@ if [[ -z "${AUTHORITY_SSH_TARGET:-}" || -z "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN
     if [[ -z "${AUTHORITY_SSH_TARGET:-}" ]]; then
         AUTHORITY_SSH_TARGET="$(
             printf '%s\n' "${mesh_status}" |
-                awk '/^authority-target: RUNNING underlay=/ {
+                awk '/^authority-client: RUNNING underlay=/ {
                     sub(/^.*underlay=/, "")
                     if ($0 != "none") print
                     exit
@@ -40,9 +40,17 @@ if [[ -z "${AUTHORITY_POC_WG_PUBLIC_KEY:-}" ]]; then
     echo "poc:run: authority-client WireGuard key not found; run mise run mesh:setup" >&2
     exit 1
 fi
-AUTHORITY_POC_NETWORK_AGENT_ORIGIN=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-http://${AUTHORITY_SSH_TARGET}:3003}
-export AUTHORITY_SSH_TARGET AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_POC_WG_PUBLIC_KEY AUTHORITY_TARGET_IDENTITY_FILE
-echo "[poc] target=${AUTHORITY_SSH_TARGET} network-agent=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}" >&2
+if [[ -z "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-}" ]]; then
+    target_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-target: RUNNING underlay=/ { sub(/^.*underlay=/, ""); print; exit }')"
+    [[ -n "${target_underlay}" ]] || {
+        echo "poc:run: authority-target LXC not found; run mise run mesh:setup" >&2
+        exit 1
+    }
+    AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
+fi
+AUTHORITY_SSH_TARGET_PORT=${AUTHORITY_SSH_TARGET_PORT:-2222}
+export AUTHORITY_SSH_TARGET AUTHORITY_SSH_TARGET_PORT AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_POC_WG_PUBLIC_KEY AUTHORITY_TARGET_IDENTITY_FILE
+echo "[poc] ssh-mesh-proxy=${AUTHORITY_SSH_TARGET}:${AUTHORITY_SSH_TARGET_PORT} network-agent=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}" >&2
 
 cleanup() {
     (( cleaned_up == 0 )) || return 0
@@ -67,7 +75,7 @@ trap on_signal INT TERM
 "${SCRIPT_DIR}/run-control-plane.sh" &
 control_pid=$!
 
-for _ in {1..300}; do
+for _ in {1..600}; do
     if curl --fail --silent --show-error "${control_origin}/health" >/dev/null 2>&1; then
         break
     fi
@@ -79,7 +87,7 @@ curl --fail --silent --show-error "${control_origin}/health" >/dev/null
 "${SCRIPT_DIR}/run-credential-issuer.sh" &
 issuer_pid=$!
 
-for _ in {1..300}; do
+for _ in {1..600}; do
     if curl --fail --silent --show-error "${issuer_origin}/health" >/dev/null 2>&1; then
         break
     fi
@@ -109,7 +117,7 @@ echo "[poc] target node identity is ready" >&2
 "${SCRIPT_DIR}/run-node-agent.sh" &
 node_pid=$!
 
-for _ in {1..300}; do
+for _ in {1..600}; do
     if curl --fail --silent --show-error "${node_origin}/health" >/dev/null 2>&1; then
         break
     fi

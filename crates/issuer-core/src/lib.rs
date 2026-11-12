@@ -1,8 +1,8 @@
 //! Cryptographic ports and application logic for issuance authorization.
 
 use authority_contracts_model::{
-    ContractError, IssuanceAuthorizationV1, NetworkAccessGrantV1, SignedIssuanceAuthorizationV1,
-    SignedNetworkAccessGrantV1,
+    ContractError, DecisionRevocationNoticeV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
+    SignedDecisionRevocationNoticeV1, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 use thiserror::Error;
 
@@ -48,6 +48,12 @@ pub enum AuthorizationEnvelopeError {
     TargetNodeMismatch,
     #[error("network grant is not active at the supplied time")]
     GrantNotActive,
+    #[error("revocation notice audience is not network-agent")]
+    InvalidRevocationAudience,
+    #[error("revocation notice targets a different node")]
+    RevocationTargetNodeMismatch,
+    #[error("revocation notice is expired at the supplied time")]
+    RevocationNoticeExpired,
 }
 
 /// Signs a validated authorization using an injected cryptographic adapter.
@@ -156,6 +162,57 @@ pub fn verify_network_grant_for_node(
     Ok(())
 }
 
+/// Signs a target-scoped decision revocation notice.
+///
+/// # Errors
+///
+/// Returns an error for invalid contract fields or a signing adapter failure.
+pub fn sign_revocation_notice(
+    notice: DecisionRevocationNoticeV1,
+    signer: &impl AuthorizationSigner,
+) -> Result<SignedDecisionRevocationNoticeV1, AuthorizationEnvelopeError> {
+    let preimage = notice.signing_preimage()?;
+    let signature = signer.sign(&preimage)?;
+    let envelope = SignedDecisionRevocationNoticeV1 {
+        notice,
+        algorithm: "Ed25519".to_owned(),
+        key_id: signer.key_id().to_owned(),
+        signature: encode_base64url(&signature),
+    };
+    envelope.validate()?;
+    Ok(envelope)
+}
+
+/// Verifies signature, audience, target binding, and notice lifetime.
+///
+/// # Errors
+///
+/// Returns an error for malformed, tampered, misdirected, or expired notices.
+pub fn verify_revocation_notice_for_node(
+    envelope: &SignedDecisionRevocationNoticeV1,
+    verifier: &impl AuthorizationVerifier,
+    expected_target_node_id: &str,
+    now: i64,
+) -> Result<(), AuthorizationEnvelopeError> {
+    envelope.validate()?;
+    let signature = decode_base64url(&envelope.signature)
+        .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
+    let preimage = envelope.notice.signing_preimage()?;
+    if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
+        return Err(AuthorizationEnvelopeError::VerificationFailed);
+    }
+    if envelope.notice.audience != "network-agent" {
+        return Err(AuthorizationEnvelopeError::InvalidRevocationAudience);
+    }
+    if envelope.notice.target_node_id != expected_target_node_id {
+        return Err(AuthorizationEnvelopeError::RevocationTargetNodeMismatch);
+    }
+    if now >= envelope.notice.expires_at {
+        return Err(AuthorizationEnvelopeError::RevocationNoticeExpired);
+    }
+    Ok(())
+}
+
 fn encode_base64url(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -214,6 +271,42 @@ fn decode_character(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signed_revocation_notice_round_trips_and_rejects_tampering() {
+        let crypto = FakeCrypto::default();
+        let notice = authority_contracts_model::DecisionRevocationNoticeV1 {
+            version: "1".to_owned(),
+            issuer: "domain-authority:test".to_owned(),
+            domain_id: "019a6e6d-4b01-7c31-bb4c-f83220bec001".to_owned(),
+            target_node_id: "019a6e6d-4b01-7c31-bb4c-f83220bec002".to_owned(),
+            decision_id: "0123456789abcdef0123456789abcdef".to_owned(),
+            reason: "policy_revoked".to_owned(),
+            sequence: 7,
+            revoked_at: 1_700_000_000,
+            expires_at: 1_700_000_300,
+            audience: "network-agent".to_owned(),
+        };
+        let mut envelope = sign_revocation_notice(notice, &crypto).expect("sign notice");
+        verify_revocation_notice_for_node(
+            &envelope,
+            &crypto,
+            "019a6e6d-4b01-7c31-bb4c-f83220bec002",
+            1_700_000_001,
+        )
+        .expect("verify notice");
+
+        envelope.notice.decision_id = "fedcba9876543210fedcba9876543210".to_owned();
+        assert!(
+            verify_revocation_notice_for_node(
+                &envelope,
+                &crypto,
+                "019a6e6d-4b01-7c31-bb4c-f83220bec002",
+                1_700_000_001,
+            )
+            .is_err()
+        );
+    }
 
     struct FakeCrypto {
         key_id: String,

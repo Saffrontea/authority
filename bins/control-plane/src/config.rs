@@ -17,6 +17,7 @@ pub struct Config {
     pub signing_public_key_file: PathBuf,
     pub target_identity_file: PathBuf,
     pub client_wireguard_public_key: String,
+    pub network_agent_origin: String,
     pub network_grant_ttl_seconds: i64,
     pub ssh_authorization_ttl_seconds: i64,
 }
@@ -47,6 +48,7 @@ impl Config {
         let signing_public_key_file = PathBuf::from(required("AUTHORITY_SIGNING_PUBLIC_KEY_FILE")?);
         let target_identity_file = PathBuf::from(required("AUTHORITY_TARGET_IDENTITY_FILE")?);
         let client_wireguard_public_key = required("AUTHORITY_CLIENT_WIREGUARD_PUBLIC_KEY")?;
+        let network_agent_origin = required("AUTHORITY_NETWORK_AGENT_ORIGIN")?;
         let network_grant_ttl_seconds = value("AUTHORITY_NETWORK_GRANT_TTL_SECONDS", "300")?
             .parse::<i64>()
             .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
@@ -62,6 +64,12 @@ impl Config {
         if !(5..=600).contains(&ssh_authorization_ttl_seconds) {
             return Err(
                 "AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS must be between 5 and 600".to_owned(),
+            );
+        }
+        if network_grant_ttl_seconds < ssh_authorization_ttl_seconds {
+            return Err(
+                "AUTHORITY_NETWORK_GRANT_TTL_SECONDS must cover AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS"
+                    .to_owned(),
             );
         }
         let database = PgConnectOptions::new()
@@ -89,6 +97,7 @@ impl Config {
             signing_public_key_file,
             target_identity_file,
             client_wireguard_public_key,
+            network_agent_origin,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
         })

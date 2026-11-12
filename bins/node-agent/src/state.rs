@@ -19,6 +19,7 @@ struct Inner {
     certificate_path: PathBuf,
     known_hosts_path: PathBuf,
     ssh_target: Option<IpAddr>,
+    ssh_target_port: u16,
     browser_origins: Vec<HeaderValue>,
     terminal_slots: Arc<Semaphore>,
     verifier: OpenSslEd25519Verifier,
@@ -42,6 +43,7 @@ impl AppState {
         trusted_cas: Vec<PublicKey>,
         paths: AgentPaths,
         ssh_target: Option<IpAddr>,
+        ssh_target_port: u16,
         browser_origins: Vec<HeaderValue>,
         verifier: OpenSslEd25519Verifier,
     ) -> Self {
@@ -52,6 +54,7 @@ impl AppState {
             certificate_path: paths.certificate,
             known_hosts_path: paths.known_hosts,
             ssh_target,
+            ssh_target_port,
             browser_origins,
             terminal_slots: Arc::new(Semaphore::new(4)),
             verifier,
@@ -79,8 +82,10 @@ impl AppState {
         &self.0.known_hosts_path
     }
 
-    pub fn ssh_target(&self) -> Option<IpAddr> {
-        self.0.ssh_target
+    pub fn ssh_target(&self) -> Option<(IpAddr, u16)> {
+        self.0
+            .ssh_target
+            .map(|target| (target, self.0.ssh_target_port))
     }
 
     pub fn browser_origin_allowed(&self, origin: &HeaderValue) -> bool {

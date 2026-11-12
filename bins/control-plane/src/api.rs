@@ -1,21 +1,21 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{
-    AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, IssuanceAuthorizationV1,
-    NetworkAccessGrantV1, PolicyCapabilityV1, PolicyDecisionEvaluatedV1, PolicyIntentV1,
-    PolicyOutcomeV1, PolicyRouteV1, PolicySourceV1, SignedIssuanceAuthorizationV1,
-    SignedNetworkAccessGrantV1,
+    AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, DecisionRevocationNoticeV1,
+    IssuanceAuthorizationV1, NetworkAccessGrantV1, PolicyCapabilityV1, PolicyDecisionEvaluatedV1,
+    PolicyIntentV1, PolicyOutcomeV1, PolicyRouteV1, PolicySourceV1,
+    SignedDecisionRevocationNoticeV1, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{
     authentication_preimage, decode_public_key, decode_signature, encode_base64url,
     enrollment_preimage, node_enrollment_preimage, session_request_preimage,
 };
-use authority_issuer_core::{sign_authorization, sign_network_grant};
+use authority_issuer_core::{sign_authorization, sign_network_grant, sign_revocation_notice};
 use authority_policy_core::{AccessIntent, Route};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -68,6 +68,11 @@ pub fn router(state: AppState) -> Router {
             "/v1/access-authorizations",
             post(issue_access_authorization),
         )
+        .route(
+            "/v1/access-authorizations/{decision_id}/revocations",
+            post(revoke_access_authorization),
+        )
+        .route("/v1/revocations", get(pull_revocations))
         .with_state(state)
 }
 
@@ -86,6 +91,7 @@ struct TargetIdentityResponse {
 struct BootstrapConfigResponse {
     target_identity: TargetIdentityResponse,
     wireguard_public_key: String,
+    network_agent_origin: String,
 }
 
 async fn bootstrap_config(
@@ -98,6 +104,7 @@ async fn bootstrap_config(
     Ok(Json(BootstrapConfigResponse {
         target_identity,
         wireguard_public_key: state.client_wireguard_public_key().to_owned(),
+        network_agent_origin: state.network_agent_origin().to_owned(),
     }))
 }
 
@@ -895,6 +902,218 @@ async fn issue_access_authorization(
     )
     .await?;
     Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+struct RevokeAccessAuthorizationRequest {
+    reason: String,
+}
+
+async fn revoke_access_authorization(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RevokeAccessAuthorizationRequest>,
+) -> Result<Json<SignedDecisionRevocationNoticeV1>, ApiError> {
+    if !valid_contract_identifier(&decision_id) || !valid_contract_identifier(&request.reason) {
+        return Err(ApiError::bad_request("invalid_revocation_request"));
+    }
+    let session = authenticated_session(
+        &state,
+        &headers,
+        "access.revoke",
+        &[decision_id.clone(), request.reason.clone()],
+    )?;
+    let row = sqlx::query(
+        "SELECT payload FROM outbox.events \
+         WHERE owner_module = 'policy' AND aggregate_type = 'access_decision' \
+           AND aggregate_id = $1 AND event_type = 'access.authorization.issued' \
+         ORDER BY occurred_at DESC LIMIT 1",
+    )
+    .bind(&decision_id)
+    .fetch_optional(state.pool())
+    .await
+    .map_err(ApiError::internal)?
+    .ok_or_else(|| ApiError::not_found("authorization_not_found"))?;
+    let payload: Value = row.try_get("payload").map_err(ApiError::internal)?;
+    let bundle: AccessAuthorizationBundleV1 =
+        serde_json::from_value(payload).map_err(ApiError::internal)?;
+    if bundle.ssh_authorization.authorization.subject_user_id != session.user_id.to_string() {
+        return Err(ApiError::not_found("authorization_not_found"));
+    }
+    let target_node_id = bundle.network_grant.grant.target_node_id.clone();
+    let now = unix_timestamp()?;
+    let expires_at = bundle
+        .ssh_authorization
+        .authorization
+        .expires_at
+        .max(bundle.network_grant.grant.expires_at);
+    if now >= expires_at {
+        return Err(ApiError::conflict("authorization_already_expired"));
+    }
+
+    if let Some(existing) = load_revocation(&state, &decision_id).await? {
+        return Ok(Json(existing));
+    }
+    let sequence: i64 = sqlx::query_scalar("SELECT nextval('policy.revocation_notice_sequence')")
+        .fetch_one(state.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    let envelope = sign_revocation_notice(
+        DecisionRevocationNoticeV1 {
+            version: "1".to_owned(),
+            issuer: format!("domain-authority:{}", state.domain_id()),
+            domain_id: state.domain_id().to_string(),
+            target_node_id: target_node_id.clone(),
+            decision_id: decision_id.clone(),
+            reason: request.reason.clone(),
+            sequence,
+            revoked_at: now,
+            expires_at,
+            audience: "network-agent".to_owned(),
+        },
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    persist_revocation(&state, session.user_id, envelope)
+        .await
+        .map(Json)
+}
+
+async fn persist_revocation(
+    state: &AppState,
+    actor_user_id: Uuid,
+    envelope: SignedDecisionRevocationNoticeV1,
+) -> Result<SignedDecisionRevocationNoticeV1, ApiError> {
+    let notice = &envelope.notice;
+    let target_uuid = notice
+        .target_node_id
+        .parse::<Uuid>()
+        .map_err(ApiError::internal)?;
+    let envelope_json = serde_json::to_value(&envelope).map_err(ApiError::internal)?;
+    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
+    let inserted = sqlx::query(
+        "INSERT INTO policy.revocation_notices \
+         (sequence, domain_id, decision_id, target_node_id, reason, revoked_at, expires_at, envelope) \
+         VALUES ($1, $2, $3, $4, $5, to_timestamp($6), to_timestamp($7), $8) \
+         ON CONFLICT (domain_id, decision_id) DO NOTHING",
+    )
+    .bind(notice.sequence)
+    .bind(state.domain_id())
+    .bind(&notice.decision_id)
+    .bind(target_uuid)
+    .bind(&notice.reason)
+    .bind(notice.revoked_at)
+    .bind(notice.expires_at)
+    .bind(&envelope_json)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    if inserted.rows_affected() == 0 {
+        transaction.rollback().await.map_err(ApiError::internal)?;
+        return load_revocation(state, &notice.decision_id)
+            .await?
+            .ok_or_else(|| ApiError::internal("conflicting revocation disappeared"));
+    }
+    sqlx::query(
+        "INSERT INTO audit.events \
+         (domain_id, actor_type, actor_id, action, target_type, target_id, decision, reason, payload) \
+         VALUES ($1, 'user', $2, 'access.revoke', 'access_decision', $3, 'allow', $4, $5)",
+    )
+    .bind(state.domain_id())
+    .bind(actor_user_id.to_string())
+    .bind(&notice.decision_id)
+    .bind(&notice.reason)
+    .bind(&envelope_json)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    sqlx::query(
+        "INSERT INTO outbox.events \
+         (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
+         VALUES ($1, 'policy', 'access_decision', $2, 'access.authorization.revoked', 1, $3, now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&notice.decision_id)
+    .bind(&envelope_json)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
+    Ok(envelope)
+}
+
+async fn load_revocation(
+    state: &AppState,
+    decision_id: &str,
+) -> Result<Option<SignedDecisionRevocationNoticeV1>, ApiError> {
+    let value: Option<Value> = sqlx::query_scalar(
+        "SELECT envelope FROM policy.revocation_notices \
+         WHERE domain_id = $1 AND decision_id = $2",
+    )
+    .bind(state.domain_id())
+    .bind(decision_id)
+    .fetch_optional(state.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    value
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ApiError::internal)
+}
+
+#[derive(Deserialize)]
+struct PullRevocationsQuery {
+    target_node_id: Uuid,
+    #[serde(default)]
+    after: i64,
+}
+
+#[derive(Serialize)]
+struct PullRevocationsResponse {
+    notices: Vec<SignedDecisionRevocationNoticeV1>,
+    next_cursor: i64,
+}
+
+async fn pull_revocations(
+    State(state): State<AppState>,
+    Query(query): Query<PullRevocationsQuery>,
+) -> Result<Json<PullRevocationsResponse>, ApiError> {
+    if query.after < 0 {
+        return Err(ApiError::bad_request("invalid_revocation_cursor"));
+    }
+    let rows = sqlx::query(
+        "SELECT sequence, envelope FROM policy.revocation_notices \
+         WHERE domain_id = $1 AND target_node_id = $2 AND sequence > $3 \
+           AND expires_at > now() ORDER BY sequence LIMIT 100",
+    )
+    .bind(state.domain_id())
+    .bind(query.target_node_id)
+    .bind(query.after)
+    .fetch_all(state.pool())
+    .await
+    .map_err(ApiError::internal)?;
+    let mut next_cursor = query.after;
+    let notices = rows
+        .into_iter()
+        .map(|row| {
+            next_cursor = row.try_get("sequence").map_err(ApiError::internal)?;
+            let value: Value = row.try_get("envelope").map_err(ApiError::internal)?;
+            serde_json::from_value(value).map_err(ApiError::internal)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(PullRevocationsResponse {
+        notices,
+        next_cursor,
+    }))
+}
+
+fn valid_contract_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'@')
+        })
 }
 
 fn build_access_bundle(

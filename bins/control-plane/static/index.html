@@ -51,6 +51,7 @@
     <h2>Short-lived SSH terminal</h2>
     <p id="terminal-status">A new SSH connection requires a valid certificate and browser-held capability.</p>
     <button id="terminal-connect" type="button">Connect</button>
+    <button id="terminal-revoke" type="button" disabled>Revoke current access</button>
     <pre id="terminal-output"></pre>
     <form id="terminal-form">
       <input id="terminal-input" autocomplete="off" aria-label="Terminal input" placeholder="Enter a command">
@@ -78,6 +79,7 @@
     let terminalToken;
     let terminalExpiresAt;
     let terminalExpiryTimer;
+    let currentDecisionId;
 
     function storedBootstrapIdentity() {
       try {
@@ -289,6 +291,7 @@
     }
 
     document.querySelector('#terminal-connect').addEventListener('click', connectTerminal);
+    window.authorityReconnectTerminal = connectTerminal;
     window.authorityTerminalCommand = async command => {
       for (let attempt = 0; attempt < 50; attempt += 1) {
         if (terminalSocket?.readyState === WebSocket.OPEN) {
@@ -340,6 +343,15 @@
       return authorization.network_grant;
     };
 
+    window.authorityPrepareRevocation = async function (decisionId, reason = 'user_requested') {
+      const sessionToken = sessionStorage.getItem('authority-session');
+      if (!sessionToken || !decisionId) throw new Error('Revocation prerequisites are missing.');
+      return {
+        body: { reason },
+        headers: await deviceProofHeaders(sessionToken, 'access.revoke', [decisionId, reason]),
+      };
+    };
+
     async function getJson(path, headers = {}) {
       const response = await fetch(path, { headers });
       const value = await response.json().catch(() => ({}));
@@ -389,6 +401,7 @@
         target_device_public_key: targetIdentity.public_key,
         target_device_proof: targetIdentity.proof,
       }, headers);
+      access.network_agent_origin = bootstrapConfig.network_agent_origin;
       sessionStorage.removeItem('authority-bootstrap');
       bootstrap = null;
       sessionStorage.setItem('authority-demo-access', JSON.stringify(access));
@@ -438,6 +451,7 @@
         '/v1/access-authorizations', accessRequest, session.session_token, 'access.authorize',
         [access.device_id, access.target_node_id, sshKey.fingerprint, wireguardPublicKey, capability.hash],
       );
+      await api(`${access.network_agent_origin}/v1/network-grants`, authorization.network_grant);
       const issued = await api(`${issuerOrigin}/v1/ssh-certificates`, {
         authorization: authorization.ssh_authorization,
         ssh_public_key: sshKey.public_key,
@@ -447,7 +461,24 @@
         authorization: authorization.node_authorization,
       });
       result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}\nca=${issued.ca_fingerprint}\ndecision=${authorization.decision_id}\n\n${issued.certificate}`;
+      currentDecisionId = authorization.decision_id;
+      document.querySelector('#terminal-revoke').disabled = false;
       exposeTerminal(issued.expires_at);
+    }));
+
+    document.querySelector('#terminal-revoke').addEventListener('click', event => busy(event.currentTarget, async () => {
+      const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
+      if (!access?.network_agent_origin || !currentDecisionId) throw new Error('No active access decision.');
+      const prepared = await window.authorityPrepareRevocation(currentDecisionId);
+      const notice = await api(
+        `/v1/access-authorizations/${currentDecisionId}/revocations`,
+        prepared.body,
+        prepared.headers,
+      );
+      const applied = await api(`${access.network_agent_origin}/v1/revocations`, notice);
+      if (terminalSocket) terminalSocket.close();
+      result.textContent = `Access revoked.\ndecision=${applied.decision_id}\nsequence=${applied.sequence}\npeer_removed=${applied.peer_removed}`;
+      terminalStatus.textContent = 'Revoked. Reconnect is denied by the WireGuard data plane.';
     }));
   </script>
 </body>

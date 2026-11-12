@@ -99,12 +99,14 @@ async fn open_ssh_terminal(
 async fn run_ssh_terminal(
     mut socket: WebSocket,
     state: AppState,
-    target: IpAddr,
+    target: (IpAddr, u16),
     _permit: OwnedSemaphorePermit,
 ) {
     let certificate_option = format!("CertificateFile={}", state.certificate_path().display());
     let known_hosts_option = format!("UserKnownHostsFile={}", state.known_hosts_path().display());
+    let (target, port) = target;
     let destination = format!("deploy@{target}");
+    let port = port.to_string();
     let child = Command::new("/usr/bin/ssh")
         .args([
             "-tt",
@@ -120,6 +122,8 @@ async fn run_ssh_terminal(
             known_hosts_option.as_str(),
             "-o",
             "LogLevel=ERROR",
+            "-p",
+            port.as_str(),
             "-i",
         ])
         .arg(state.private_key_path())
@@ -148,7 +152,7 @@ async fn run_ssh_terminal(
     tokio::spawn(pump_output(stderr, output_tx));
     let _ = socket
         .send(Message::Text(
-            format!("[authority] connecting to {destination}\r\n").into(),
+            format!("[authority] connecting to {destination} through WireGuard\r\n").into(),
         ))
         .await;
 

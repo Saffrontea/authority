@@ -1,16 +1,20 @@
 use axum::{
+    extract::State,
     http::{HeaderMap, HeaderValue, header},
     response::{Html, IntoResponse, Response},
 };
 
-const CSP_SCRIPT_HASH: &str = "I1VXNPArUdSCsuGUNaaMGkVh8zkVwcgd05/uLlQy47g=";
+use crate::state::AppState;
 
-pub async fn index() -> Response {
+const CSP_SCRIPT_HASH: &str = "IRZ8uSjINtLNfKoG6r/8YBI1hh1RHso02cuXgs16sv4=";
+
+pub async fn index(State(state): State<AppState>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_str(&format!(
-            "default-src 'none'; script-src 'sha256-{CSP_SCRIPT_HASH}'; style-src 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+            "default-src 'none'; script-src 'sha256-{CSP_SCRIPT_HASH}'; style-src 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* {} ws://localhost:* ws://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+            state.network_agent_origin(),
         ))
         .expect("static CSP header is valid"),
     );

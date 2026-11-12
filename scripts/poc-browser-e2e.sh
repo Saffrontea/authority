@@ -241,8 +241,9 @@ terminal_error="$(jq -r '.error // empty' <<<"${terminal_command}")"
 wait_for_terminal 'WEB_TERMINAL_OK' 'web SSH terminal command' >/dev/null
 printf 'Web SSH terminal: signed certificate opened an interactive session\n'
 
-ssh_target="${network_agent_origin#http://}"
-ssh_target="${ssh_target%%:*}"
+ssh_target="${AUTHORITY_SSH_TARGET:-}"
+ssh_target_port="${AUTHORITY_SSH_TARGET_PORT:-2222}"
+[[ -n "${ssh_target}" ]] || die 'SSH mesh proxy target is not configured'
 plain_key="$(mktemp)"
 cp "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" "${plain_key}"
 chmod 0600 "${plain_key}"
@@ -253,6 +254,7 @@ ssh_options=(
     -o StrictHostKeyChecking=yes
     -o "UserKnownHostsFile=${PROJECT_DIR}/.secrets/poc-ssh/known_hosts"
     -o LogLevel=ERROR
+    -p "${ssh_target_port}"
 )
 if ssh "${ssh_options[@]}" -i "${plain_key}" "deploy@${ssh_target}" true; then
     rm -f "${plain_key}"
@@ -338,13 +340,66 @@ if [[ -n "${wireguard_public_key}" ]]; then
         "$(jq -r '.peer_public_key' <<<"${applied}")" \
         "$(jq -r '.allowed_ip' <<<"${applied}")" \
         "$(jq -r '.expires_at' <<<"${applied}")"
-    ttl="${AUTHORITY_NETWORK_GRANT_TTL_SECONDS:-5}"
-    printf '[poc:e2e] waiting %ss for grant expiry\n' "$((ttl + 2))"
-    sleep "$((ttl + 2))"
+
+    prepared_revocation="$(webdriver POST "/session/${session}/execute/async" \
+        "$(jq -nc --arg decision "${decision_id}" '{script:"const decision = arguments[0], done = arguments[1]; window.authorityPrepareRevocation(decision).then(prepared => done({prepared})).catch(error => done({error:error.message}));",args:[$decision]}')")"
+    revocation_error="$(jq -r '.error // empty' <<<"${prepared_revocation}")"
+    [[ -z "${revocation_error}" ]] || die "revocation proof failed: ${revocation_error}"
+    revocation_body="$(jq -c '.prepared.body' <<<"${prepared_revocation}")"
+    revocation_authorization="$(jq -r '.prepared.headers.authorization' <<<"${prepared_revocation}")"
+    revocation_timestamp="$(jq -r '.prepared.headers["x-authority-timestamp"]' <<<"${prepared_revocation}")"
+    revocation_nonce="$(jq -r '.prepared.headers["x-authority-nonce"]' <<<"${prepared_revocation}")"
+    revocation_signature="$(jq -r '.prepared.headers["x-authority-device-signature"]' <<<"${prepared_revocation}")"
+    revocation="$(curl --silent --fail --show-error --request POST \
+        --header 'content-type: application/json' \
+        --header "authorization: ${revocation_authorization}" \
+        --header "x-authority-timestamp: ${revocation_timestamp}" \
+        --header "x-authority-nonce: ${revocation_nonce}" \
+        --header "x-authority-device-signature: ${revocation_signature}" \
+        --data "${revocation_body}" \
+        "${control_origin}/v1/access-authorizations/${decision_id}/revocations")"
+    [[ "$(jq -r '.notice.decision_id' <<<"${revocation}")" == "${decision_id}" ]] ||
+        die 'revocation notice did not bind the decision'
+
+    pushed="$(json_post "${network_agent_origin}/v1/revocations" "${revocation}")"
+    [[ "$(jq -r '.peer_removed' <<<"${pushed}")" == 'true' ]] ||
+        die 'pushed revocation did not remove the active peer'
     if mise run mesh:verify >/dev/null 2>&1; then
-        die 'WireGuard peer remained active after grant expiry'
+        die 'WireGuard peer remained active after pushed revocation'
     fi
-    printf 'WireGuard grant expiry: peer removed and tunnel denied\n'
+    if timeout 6 ssh "${ssh_options[@]}" \
+        -o ConnectTimeout=3 \
+        -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \
+        -o "CertificateFile=${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" \
+        "deploy@${ssh_target}" 'printf REVOKED_SSH_UNEXPECTED'; then
+        die 'SSH over WireGuard reconnected after pushed revocation'
+    fi
+    printf 'SSH over WireGuard: reconnect denied immediately after push revocation\n'
+
+    target_node_id="$(jq -r '.network_grant.grant.target_node_id' <<<"${decision}")"
+    pulled_page="$(curl --silent --fail --show-error \
+        "${control_origin}/v1/revocations?target_node_id=${target_node_id}&after=0")"
+    pulled="$(jq -c --arg decision "${decision_id}" \
+        '.notices[] | select(.notice.decision_id == $decision)' <<<"${pulled_page}")"
+    [[ -n "${pulled}" ]] || die 'pull feed omitted the persisted revocation notice'
+    reconciled="$(json_post "${network_agent_origin}/v1/revocations" "${pulled}")"
+    [[ "$(jq -r '.peer_removed' <<<"${reconciled}")" == 'false' ]] ||
+        die 'pull reconciliation was not idempotent'
+
+    revoked_grant_response="$(mktemp)"
+    revoked_grant_status="$(curl --silent --output "${revoked_grant_response}" --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' --data "${grant}" \
+        "${network_agent_origin}/v1/network-grants")"
+    revoked_grant_error="$(jq -r '.error // empty' <"${revoked_grant_response}")"
+    rm -f "${revoked_grant_response}"
+    [[ "${revoked_grant_status}" == '409' && "${revoked_grant_error}" == 'network_grant_revoked' ]] ||
+        die "revoked grant was accepted: HTTP ${revoked_grant_status} ${revoked_grant_error}"
+    printf 'Revocation distribution: push removed peer, pull reconciled idempotently, late grant denied\n'
+
+    ttl="${AUTHORITY_NETWORK_GRANT_TTL_SECONDS:-5}"
+    printf '[poc:e2e] waiting %ss for grant and notice expiry\n' "$((ttl + 2))"
+    sleep "$((ttl + 2))"
+    printf 'WireGuard grant expiry: revoked peer remained denied\n'
     sleep 4
     if ssh "${ssh_options[@]}" \
         -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \

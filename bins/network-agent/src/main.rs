@@ -11,10 +11,12 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use authority_contracts_model::SignedNetworkAccessGrantV1;
+use authority_contracts_model::{SignedDecisionRevocationNoticeV1, SignedNetworkAccessGrantV1};
 use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
 use authority_device_auth_core::{encode_base64url, node_enrollment_preimage};
-use authority_issuer_core::{AuthorizationSigner, verify_network_grant_for_node};
+use authority_issuer_core::{
+    AuthorizationSigner, verify_network_grant_for_node, verify_revocation_notice_for_node,
+};
 use authority_replay_ledger::ReplayLedger;
 use axum::{
     Json, Router,
@@ -38,8 +40,47 @@ struct Inner {
     node_id: String,
     interface: String,
     replay_ledger: Mutex<ReplayLedger>,
-    active_peers: Mutex<HashMap<String, i64>>,
+    policy_state: Mutex<PolicyState>,
     identity: NodeIdentity,
+}
+
+#[derive(Default)]
+struct PolicyState {
+    active_peers: HashMap<String, ActivePeer>,
+    revoked_decisions: HashMap<String, i64>,
+}
+
+struct ActivePeer {
+    decision_id: String,
+    expires_at: i64,
+}
+
+impl PolicyState {
+    fn purge_expired_revocations(&mut self, now: i64) {
+        self.revoked_decisions
+            .retain(|_, expires_at| *expires_at > now);
+    }
+
+    fn is_revoked(&mut self, decision_id: &str, now: i64) -> bool {
+        self.purge_expired_revocations(now);
+        self.revoked_decisions.contains_key(decision_id)
+    }
+
+    fn record_revocation(
+        &mut self,
+        decision_id: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Option<String> {
+        self.purge_expired_revocations(now);
+        self.revoked_decisions
+            .entry(decision_id.to_owned())
+            .and_modify(|current| *current = (*current).max(expires_at))
+            .or_insert(expires_at);
+        self.active_peers
+            .iter()
+            .find_map(|(peer, active)| (active.decision_id == decision_id).then(|| peer.clone()))
+    }
 }
 
 struct NodeIdentity {
@@ -54,7 +95,39 @@ struct ApplyResponse {
     expires_at: i64,
 }
 
+#[derive(Serialize)]
+struct RevokeResponse {
+    decision_id: String,
+    sequence: i64,
+    peer_removed: bool,
+}
+
 const MAX_ACTIVE_PEERS: usize = 1024;
+
+#[cfg(test)]
+mod revocation_tests {
+    use super::*;
+
+    #[test]
+    fn revocation_is_idempotent_and_blocks_a_late_grant() {
+        let mut state = PolicyState::default();
+        state.active_peers.insert(
+            "peer".to_owned(),
+            ActivePeer {
+                decision_id: "decision".to_owned(),
+                expires_at: 200,
+            },
+        );
+        assert_eq!(
+            state.record_revocation("decision", 200, 100),
+            Some("peer".to_owned())
+        );
+        state.active_peers.remove("peer");
+        assert_eq!(state.record_revocation("decision", 200, 100), None);
+        assert!(state.is_revoked("decision", 101));
+        assert!(!state.is_revoked("decision", 200));
+    }
+}
 
 #[derive(Serialize)]
 struct IdentityResponse {
@@ -109,13 +182,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node_id,
         interface,
         replay_ledger: Mutex::new(replay_ledger),
-        active_peers: Mutex::new(HashMap::new()),
+        policy_state: Mutex::new(PolicyState::default()),
         identity: NodeIdentity { public_key, proof },
     }));
     let router = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/v1/identity", get(identity))
         .route("/v1/network-grants", post(apply_grant))
+        .route("/v1/revocations", post(apply_revocation))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -186,8 +260,11 @@ async fn apply_grant(
     // Keep the peer registry locked from the capacity decision through the
     // successful kernel update and insertion. Otherwise concurrent grants can
     // both observe a free slot and exceed the configured bound.
-    let mut peers = state.0.active_peers.lock().map_err(ApiError::internal)?;
-    if peers.len() >= MAX_ACTIVE_PEERS && !peers.contains_key(&peer) {
+    let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
+    if policy.is_revoked(&envelope.grant.nonce, now) {
+        return Err(ApiError::conflict("network_grant_revoked"));
+    }
+    if policy.active_peers.len() >= MAX_ACTIVE_PEERS && !policy.active_peers.contains_key(&peer) {
         return Err(ApiError::unavailable("peer_capacity_reached"));
     }
     let nonce = envelope.grant.nonce.clone();
@@ -212,8 +289,14 @@ async fn apply_grant(
     .map_err(ApiError::internal)?;
 
     let expires_at = envelope.grant.expires_at;
-    peers.insert(peer.clone(), expires_at);
-    drop(peers);
+    policy.active_peers.insert(
+        peer.clone(),
+        ActivePeer {
+            decision_id: envelope.grant.nonce.clone(),
+            expires_at,
+        },
+    );
+    drop(policy);
     let interface = state.0.interface.clone();
     let expiry_state = state.clone();
     let delay = u64::try_from(expires_at.saturating_sub(now)).unwrap_or(0);
@@ -221,11 +304,15 @@ async fn apply_grant(
         tokio::time::sleep(Duration::from_secs(delay)).await;
         let should_remove = expiry_state
             .0
-            .active_peers
+            .policy_state
             .lock()
-            .map_or(true, |mut peers| {
-                if peers.get(&peer) == Some(&expires_at) {
-                    peers.remove(&peer);
+            .map_or(true, |mut policy| {
+                if policy
+                    .active_peers
+                    .get(&peer)
+                    .is_some_and(|active| active.expires_at == expires_at)
+                {
+                    policy.active_peers.remove(&peer);
                     true
                 } else {
                     false
@@ -245,6 +332,33 @@ async fn apply_grant(
         peer_public_key: envelope.grant.wireguard_public_key,
         allowed_ip,
         expires_at,
+    }))
+}
+
+async fn apply_revocation(
+    State(state): State<AppState>,
+    Json(envelope): Json<SignedDecisionRevocationNoticeV1>,
+) -> Result<Json<RevokeResponse>, ApiError> {
+    let now = unix_timestamp().map_err(ApiError::internal)?;
+    verify_revocation_notice_for_node(&envelope, &state.0.verifier, &state.0.node_id, now)
+        .map_err(|cause| ApiError::unauthorized("invalid_revocation_notice", cause))?;
+    let decision_id = envelope.notice.decision_id.clone();
+    let sequence = envelope.notice.sequence;
+    let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
+    let peer = policy.record_revocation(&decision_id, envelope.notice.expires_at, now);
+    let peer_removed = if let Some(peer) = peer {
+        run_wg(&["set", &state.0.interface, "peer", &peer, "remove"])
+            .map_err(ApiError::internal)?;
+        policy.active_peers.remove(&peer);
+        info!(%peer, %decision_id, sequence, "revoked WireGuard peer");
+        true
+    } else {
+        false
+    };
+    Ok(Json(RevokeResponse {
+        decision_id,
+        sequence,
+        peer_removed,
     }))
 }
 

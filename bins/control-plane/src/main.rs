@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         EnrollmentConfig {
             target_identity_file: config.target_identity_file,
             client_wireguard_public_key: config.client_wireguard_public_key,
+            network_agent_origin: config.network_agent_origin,
         },
         (
             config.network_grant_ttl_seconds,

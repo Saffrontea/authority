@@ -33,6 +33,7 @@ struct Inner {
 pub struct EnrollmentConfig {
     pub target_identity_file: PathBuf,
     pub client_wireguard_public_key: String,
+    pub network_agent_origin: String,
 }
 
 pub struct PendingRegistration {
@@ -103,6 +104,10 @@ impl AppState {
 
     pub fn client_wireguard_public_key(&self) -> &str {
         &self.0.enrollment.client_wireguard_public_key
+    }
+
+    pub fn network_agent_origin(&self) -> &str {
+        &self.0.enrollment.network_agent_origin
     }
 
     pub fn verify_bootstrap_token(&self, supplied: &str) -> Result<bool, String> {

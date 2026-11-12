@@ -1,0 +1,17 @@
+{
+  "notice": {
+    "version": "1",
+    "issuer": "domain-authority:example",
+    "domain_id": "domain_example",
+    "target_node_id": "node_01",
+    "decision_id": "0123456789abcdef0123456789abcdef",
+    "reason": "policy_revoked",
+    "sequence": 0,
+    "revoked_at": 1794326400,
+    "expires_at": 1794326700,
+    "audience": "network-agent"
+  },
+  "algorithm": "Ed25519",
+  "key_id": "control-plane-key-1",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

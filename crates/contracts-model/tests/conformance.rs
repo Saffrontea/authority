@@ -2,7 +2,8 @@ use std::{fs, path::Path};
 
 use authority_contracts_model::{
     AccessAuthorizationBundleV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
-    PolicyDecisionEvaluatedV1, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    PolicyDecisionEvaluatedV1, SignedDecisionRevocationNoticeV1, SignedIssuanceAuthorizationV1,
+    SignedNetworkAccessGrantV1,
 };
 
 #[test]
@@ -149,6 +150,28 @@ fn policy_decision_vectors_conform() {
         assert!(
             rejected,
             "invalid policy decision trace accepted: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn signed_revocation_notice_vectors_conform() {
+    for path in contract_vectors("signed-decision-revocation-notice-v1", "valid") {
+        let bytes = fs::read(&path).expect("read signed revocation notice");
+        let notice: SignedDecisionRevocationNoticeV1 =
+            serde_json::from_slice(&bytes).expect("deserialize signed revocation notice");
+        notice
+            .validate()
+            .expect("validate signed revocation notice");
+    }
+    for path in contract_vectors("signed-decision-revocation-notice-v1", "invalid") {
+        let bytes = fs::read(&path).expect("read invalid signed revocation notice");
+        let rejected = serde_json::from_slice::<SignedDecisionRevocationNoticeV1>(&bytes)
+            .map_or(true, |notice| notice.validate().is_err());
+        assert!(
+            rejected,
+            "invalid revocation notice accepted: {}",
             path.display()
         );
     }

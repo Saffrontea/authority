@@ -1,5 +1,9 @@
 {
   "artifacts": {
+    "artifacts/signed-decision-revocation-notice-v1.schema.json": {
+      "version": 1,
+      "sha256": "f39744e2a95e57b4a378b88dd31fe043d36a97b8ac78acc7f7e6229df8f00ada"
+    },
     "artifacts/access-authorization-bundle-v1.schema.json": {
       "version": 1,
       "sha256": "383b7e026536d12fea290e4eaa7aeb18cd93f963c090910f105eb7a5a0938566"

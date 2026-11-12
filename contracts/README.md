@@ -25,3 +25,8 @@ evaluation. It contains the independently signed SSH and WireGuard projections
 and requires both to share the decision nonce, issuer, domain, subject, device,
 target, policy revision, and evaluation time. Consumers still accept only their
 scoped signed projection, so neither consumer gains authority over the other.
+
+`SignedDecisionRevocationNoticeV1` has its own domain separator and binds the
+decision, target node, reason, monotonic sequence, audience, and retention
+window. Push delivery and Pull reconciliation carry the identical envelope;
+consumers must therefore apply it idempotently.

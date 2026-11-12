@@ -302,7 +302,8 @@ verify_mesh() {
 }
 
 install_network_agent() {
-  local target_underlay target_host_key
+  local client_underlay target_underlay target_host_key
+  [[ "$(container_state "${CLIENT_NAME}")" == "RUNNING" ]] || die "${CLIENT_NAME} is not running"
   [[ "$(container_state "${TARGET_NAME}")" == "RUNNING" ]] || die "${TARGET_NAME} is not running"
   [[ -x "${NETWORK_AGENT_BINARY}" ]] || die "network agent binary missing; run cargo build -p authority-network-agent"
   [[ -s "${CONTROL_PLANE_PUBLIC_KEY}" ]] || die "control-plane public key is missing"
@@ -311,6 +312,37 @@ install_network_agent() {
     trusted_ca_file="${SSH_CA_PUBLIC_KEY}"
   fi
   [[ -s "${trusted_ca_file}" ]] || die "SSH CA trust bundle is missing"
+  attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+proxy_binary=/usr/lib/systemd/systemd-socket-proxyd
+test -x "${proxy_binary}"
+systemctl stop authority-ssh-mesh-proxy.service authority-ssh-mesh-proxy.socket >/dev/null 2>&1 || true
+systemctl stop 'authority-ssh-mesh-proxy@*.service' >/dev/null 2>&1 || true
+cat > /etc/systemd/system/authority-ssh-mesh-proxy.socket <<'EOF'
+[Unit]
+Description=Authority SSH entry point into the WireGuard mesh
+After=network-online.target wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+
+[Socket]
+ListenStream=2222
+Accept=no
+
+[Install]
+WantedBy=sockets.target
+EOF
+cat > /etc/systemd/system/authority-ssh-mesh-proxy.service <<EOF
+[Unit]
+Description=Authority SSH over WireGuard proxy
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+
+[Service]
+ExecStart=${proxy_binary} 10.77.0.2:22
+EOF
+systemctl daemon-reload
+systemctl enable authority-ssh-mesh-proxy.socket >/dev/null
+systemctl restart authority-ssh-mesh-proxy.socket
+CONTAINER_SCRIPT
   log "installing network-agent with container-held identity"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
@@ -363,17 +395,23 @@ systemctl daemon-reload
 systemctl enable authority-network-agent.service >/dev/null
 systemctl restart authority-network-agent.service
 CONTAINER_SCRIPT
+  client_underlay="$(container_ip "${CLIENT_NAME}")"
   target_underlay="$(container_ip "${TARGET_NAME}")"
   target_host_key="$(attach "${TARGET_NAME}" cat /etc/ssh/ssh_host_ed25519_key.pub)"
   as_root install -d -m 0700 "$(dirname "${SSH_KNOWN_HOSTS_FILE}")"
-  printf '%s %s\n' "${target_underlay}" "${target_host_key}" >"${SSH_KNOWN_HOSTS_FILE}"
+  {
+    printf '%s %s\n' "${target_underlay}" "${target_host_key}"
+    printf '[%s]:2222 %s\n' "${client_underlay}" "${target_host_key}"
+  } >"${SSH_KNOWN_HOSTS_FILE}"
   chmod 0644 "${SSH_KNOWN_HOSTS_FILE}"
-  log "network-agent=http://${target_underlay}:3003"
+  log "network-agent=http://${target_underlay}:3003 ssh-mesh-proxy=${client_underlay}:2222"
 }
 
 network_agent_status() {
   local target_underlay
   target_underlay="$(container_ip "${TARGET_NAME}")"
+  attach "${CLIENT_NAME}" systemctl --no-pager --full status authority-ssh-mesh-proxy.socket || true
+  attach "${CLIENT_NAME}" journalctl --no-pager -n 20 -u authority-ssh-mesh-proxy.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status authority-network-agent.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status ssh.service || true
   log "network-agent=http://${target_underlay}:3003"

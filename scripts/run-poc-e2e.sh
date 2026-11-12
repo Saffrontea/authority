@@ -8,18 +8,20 @@ cleaned_up=0
 mesh_status="$(mise run mesh:status)"
 AUTHORITY_POC_WG_PUBLIC_KEY="$(printf '%s\n' "${mesh_status}" | awk '/public-key:/ { print $2; exit }')"
 target_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-target:/ { sub(/^.*underlay=/, ""); print; exit }')"
-[[ -n "${AUTHORITY_POC_WG_PUBLIC_KEY}" && -n "${target_underlay}" ]] || {
+client_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-client:/ { sub(/^.*underlay=/, ""); print; exit }')"
+[[ -n "${AUTHORITY_POC_WG_PUBLIC_KEY}" && -n "${target_underlay}" && -n "${client_underlay}" ]] || {
     echo "poc:e2e: WireGuard mesh is not ready; run mise run mesh:setup" >&2
     exit 1
 }
 AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
-AUTHORITY_NETWORK_GRANT_TTL_SECONDS=5
-AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS=10
+AUTHORITY_NETWORK_GRANT_TTL_SECONDS=15
+AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS=15
 AUTHORITY_BIND=127.0.0.1:3100
 AUTHORITY_RP_ORIGIN=http://localhost:3100
 AUTHORITY_ISSUER_BIND=127.0.0.1:3101
 AUTHORITY_NODE_AGENT_BIND=127.0.0.1:3102
-AUTHORITY_SSH_TARGET="${target_underlay}"
+AUTHORITY_SSH_TARGET="${client_underlay}"
+AUTHORITY_SSH_TARGET_PORT=2222
 AUTHORITY_BROWSER_ORIGINS=http://localhost:3100
 AUTHORITY_POC_CONTROL_ORIGIN=http://localhost:3100
 AUTHORITY_POC_ISSUER_ORIGIN=http://localhost:3101
@@ -27,7 +29,7 @@ AUTHORITY_POC_NODE_ORIGIN=http://localhost:3102
 export AUTHORITY_POC_WG_PUBLIC_KEY AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_NETWORK_GRANT_TTL_SECONDS
 export AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS
 export AUTHORITY_BIND AUTHORITY_RP_ORIGIN AUTHORITY_ISSUER_BIND AUTHORITY_NODE_AGENT_BIND
-export AUTHORITY_SSH_TARGET
+export AUTHORITY_SSH_TARGET AUTHORITY_SSH_TARGET_PORT
 export AUTHORITY_BROWSER_ORIGINS
 export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NODE_ORIGIN
 

@@ -17,6 +17,9 @@
     },
     "0006_mesh_allocation_and_device_ownership.sql": {
       "sha256": "53a7693e49a817fd19508d9234b4fbf12eaf5121e6456deedfcf877f96b8921f"
+    },
+    "0007_decision_revocation_notices.sql": {
+      "sha256": "b2a17b5c8a951d4c7d7e082fa562948ec514a68c91bf1cdc912bd1950657f25b"
     }
   }
 }

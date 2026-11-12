@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             known_hosts: config.ssh_known_hosts_file,
         },
         config.ssh_target,
+        config.ssh_target_port,
         browser_origins,
         verifier,
     );

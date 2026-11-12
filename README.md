@@ -12,7 +12,7 @@ This workspace demonstrates the initial end-to-end trust flow:
    target Network Agent, with durable replay ledgers;
 6. issue and install a short-lived OpenSSH user certificate, prove that the
    target `sshd` rejects the bare key, accepts the CA-signed principal, and
-   rejects it after expiry; then apply and expire the WireGuard peer.
+   rejects it after expiry; then apply and revoke the WireGuard peer.
 
 PostgreSQL runs in the `authority-db` LXC container. Start the privileged
 database agent first if it is not already running:
@@ -39,6 +39,23 @@ Installing the certificate requires a control-plane-signed node authorization,
 and opening the terminal requires the matching browser-held random capability.
 At expiry the Node Agent denies terminal reconnection; the E2E also connects
 directly to prove that the target `sshd` rejects the expired certificate.
+The terminal reaches `sshd` through the `authority-client` WireGuard data
+plane, so removing the target peer also denies terminal reconnection.
+
+### Revocation distribution
+
+Revocation is a signed, target-scoped decision notice. The Control Plane
+commits each notice to `policy.revocation_notices` before distribution and
+assigns a monotonic sequence. The target Network Agent verifies the signature,
+audience, node binding, and lifetime before removing an active peer. A notice
+received before its Grant blocks that Grant from being installed later.
+
+Immediate delivery uses `POST /v1/revocations` (Push). Reconciliation reads
+`GET /v1/revocations?target_node_id=...&after=...` (Pull) and submits the same
+signed envelope to the agent. Applying it twice is intentionally idempotent.
+The PoC UI exposes **Revoke current access**, and `mise run poc:e2e` proves
+Push removal, Pull reconciliation, late-Grant rejection, and SSH-over-WireGuard
+denial while the SSH certificate itself is still valid.
 
 ## Testing without Passkey hardware
 
