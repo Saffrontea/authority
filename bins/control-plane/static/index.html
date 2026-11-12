@@ -28,9 +28,12 @@
 
   <section id="setup">
     <h2>Bootstrap identity</h2>
-    <label>Username <input id="new-username" autocomplete="username" value="demo"></label>
-    <label>Display name <input id="display-name" autocomplete="name" value="Saffron"></label>
-    <button id="register">Create user and Passkey</button>
+    <pre id="bootstrap-status"></pre>
+    <div id="bootstrap-form">
+      <label>Username <input id="new-username" autocomplete="username" value="demo"></label>
+      <label>Display name <input id="display-name" autocomplete="name" value="Saffron"></label>
+      <button id="register">Create user and Passkey</button>
+    </div>
   </section>
 
   <section>
@@ -66,6 +69,8 @@
       history.replaceState(null, '', location.pathname + location.search);
     }
     let bootstrap = sessionStorage.getItem('authority-bootstrap');
+    const bootstrapStatus = document.querySelector('#bootstrap-status');
+    const bootstrapForm = document.querySelector('#bootstrap-form');
     const terminalSection = document.querySelector('#terminal');
     const terminalOutput = document.querySelector('#terminal-output');
     const terminalStatus = document.querySelector('#terminal-status');
@@ -73,7 +78,30 @@
     let terminalToken;
     let terminalExpiresAt;
     let terminalExpiryTimer;
-    if (!bootstrap) document.querySelector('#setup').hidden = true;
+
+    function storedBootstrapIdentity() {
+      try {
+        return JSON.parse(sessionStorage.getItem('authority-bootstrap-identity') ?? 'null');
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function renderBootstrapIdentity() {
+      const identity = storedBootstrapIdentity();
+      if (identity) {
+        bootstrapStatus.textContent = `Bootstrap completed.\nuser=${identity.user_id}\nusername=${identity.username}\ndevice=${identity.device_id}\ntarget=${identity.target_node_id}`;
+        bootstrapForm.hidden = true;
+      } else if (bootstrap) {
+        bootstrapStatus.textContent = 'Bootstrap capability available. Create the initial user, Passkey, device, and access policy.';
+        bootstrapForm.hidden = false;
+      } else {
+        bootstrapStatus.textContent = 'Not bootstrapped in this browser. Open the bootstrap URL printed by poc:run to initialize an identity.';
+        bootstrapForm.hidden = true;
+      }
+    }
+
+    renderBootstrapIdentity();
 
     const decode = value => {
       const base64 = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
@@ -364,6 +392,15 @@
       sessionStorage.removeItem('authority-bootstrap');
       bootstrap = null;
       sessionStorage.setItem('authority-demo-access', JSON.stringify(access));
+      sessionStorage.setItem('authority-bootstrap-identity', JSON.stringify({
+        user_id: user.user_id,
+        username,
+        display_name: user.display_name,
+        credential_id: finish.credential_id,
+        device_id: access.device_id,
+        target_node_id: access.target_node_id,
+      }));
+      renderBootstrapIdentity();
       document.querySelector('#username').value = username;
       result.textContent = `Passkey registered.\nuser=${user.user_id}\ncredential=${finish.credential_id}\ntarget=${access.target_node_id}`;
     }));

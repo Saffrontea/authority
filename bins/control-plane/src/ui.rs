@@ -3,7 +3,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 
-const CSP_SCRIPT_HASH: &str = "UmmI8lzKRgHP0DX019ICSfab3orBIRrfniC9Ebs/egE=";
+const CSP_SCRIPT_HASH: &str = "NS8ldf9B3olgiQH7UOtljzxBIu+QnfvoNz9mkXTN1SY=";
 
 pub async fn index() -> Response {
     let mut headers = HeaderMap::new();
