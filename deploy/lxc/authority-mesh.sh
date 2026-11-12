@@ -15,6 +15,7 @@ readonly WG_PORT=51820
 readonly NETWORK_AGENT_BINARY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/target/debug/authority-network-agent"
 readonly CONTROL_PLANE_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/control-plane-ed25519.pub.pem"
 readonly SSH_CA_PUBLIC_KEY="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/ssh-ca.pub"
+readonly SSH_TRUSTED_CA_FILE="${AUTHORITY_SSH_TRUSTED_CA_FILE:-${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/ssh-trusted-user-cas.pub}"
 readonly SSH_KNOWN_HOSTS_FILE="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}/.secrets/poc-ssh/known_hosts"
 
 log() {
@@ -305,13 +306,17 @@ install_network_agent() {
   [[ "$(container_state "${TARGET_NAME}")" == "RUNNING" ]] || die "${TARGET_NAME} is not running"
   [[ -x "${NETWORK_AGENT_BINARY}" ]] || die "network agent binary missing; run cargo build -p authority-network-agent"
   [[ -s "${CONTROL_PLANE_PUBLIC_KEY}" ]] || die "control-plane public key is missing"
-  [[ -s "${SSH_CA_PUBLIC_KEY}" ]] || die "SSH CA public key is missing"
+  local trusted_ca_file="${SSH_TRUSTED_CA_FILE}"
+  if [[ ! -s "${trusted_ca_file}" ]]; then
+    trusted_ca_file="${SSH_CA_PUBLIC_KEY}"
+  fi
+  [[ -s "${trusted_ca_file}" ]] || die "SSH CA trust bundle is missing"
   log "installing network-agent with container-held identity"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
     "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent"
   as_root install -m 0644 "${CONTROL_PLANE_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-control-plane.pub.pem"
-  as_root install -m 0644 "${SSH_CA_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-ssh-ca.pub"
+  as_root install -m 0644 "${trusted_ca_file}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-ssh-ca.pub"
   attach "${TARGET_NAME}" sh -seu <<'CONTAINER_SCRIPT'
 if ! command -v sshd >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive

@@ -446,7 +446,7 @@
         certificate: issued.certificate,
         authorization: authorization.node_authorization,
       });
-      result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}\ndecision=${authorization.decision_id}\n\n${issued.certificate}`;
+      result.textContent = `Authenticated, authorized, and issued.\nprivate key: ${installed.private_key_file}\ncertificate: ${installed.certificate_file}\nexpires: ${new Date(issued.expires_at * 1000).toISOString()}\nca=${issued.ca_fingerprint}\ndecision=${authorization.decision_id}\n\n${issued.certificate}`;
       exposeTerminal(issued.expires_at);
     }));
   </script>

@@ -9,7 +9,7 @@ use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use authority_replay_ledger::ReplayLedger;
 use config::Config;
 use state::AppState;
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -31,12 +31,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let initial_serial = now << 20;
     let state = AppState::new(verifier, ca_key, replay_ledger, initial_serial);
+    spawn_ca_reload(state.clone(), config.ssh_ca_key_file.clone())?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 
     info!(address = %config.bind, "credential issuer listening");
     axum::serve(listener, api::router(state, config.browser_origins))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+fn spawn_ca_reload(state: AppState, key_file: std::path::PathBuf) -> Result<(), std::io::Error> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut hangup = signal(SignalKind::hangup())?;
+    tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            match ssh_ca::load(&key_file).and_then(|key| state.rotate_ca(key)) {
+                Ok(()) => info!(path = %key_file.display(), "reloaded active SSH CA"),
+                Err(cause) => error!(%cause, path = %key_file.display(), "failed to reload SSH CA"),
+            }
+        }
+    });
     Ok(())
 }
 

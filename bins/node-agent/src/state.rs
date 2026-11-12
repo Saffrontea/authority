@@ -14,7 +14,7 @@ pub struct AppState(Arc<Inner>);
 
 struct Inner {
     private_key: PrivateKey,
-    trusted_ca: PublicKey,
+    trusted_cas: Vec<PublicKey>,
     private_key_path: PathBuf,
     certificate_path: PathBuf,
     known_hosts_path: PathBuf,
@@ -39,7 +39,7 @@ pub struct AgentPaths {
 impl AppState {
     pub fn new(
         private_key: PrivateKey,
-        trusted_ca: PublicKey,
+        trusted_cas: Vec<PublicKey>,
         paths: AgentPaths,
         ssh_target: Option<IpAddr>,
         browser_origins: Vec<HeaderValue>,
@@ -47,7 +47,7 @@ impl AppState {
     ) -> Self {
         Self(Arc::new(Inner {
             private_key,
-            trusted_ca,
+            trusted_cas,
             private_key_path: paths.private_key,
             certificate_path: paths.certificate,
             known_hosts_path: paths.known_hosts,
@@ -63,8 +63,8 @@ impl AppState {
         &self.0.private_key
     }
 
-    pub fn trusted_ca(&self) -> &PublicKey {
-        &self.0.trusted_ca
+    pub fn trusted_cas(&self) -> &[PublicKey] {
+        &self.0.trusted_cas
     }
 
     pub fn private_key_path(&self) -> &PathBuf {

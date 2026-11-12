@@ -254,9 +254,13 @@ async fn install_ssh_certificate(
     if certificate.public_key() != state.private_key().public_key().key_data() {
         return Err(ApiError::bad_request("certificate_key_mismatch"));
     }
-    let ca_fingerprint = state.trusted_ca().fingerprint(HashAlg::Sha256);
+    let ca_fingerprints = state
+        .trusted_cas()
+        .iter()
+        .map(|key| key.fingerprint(HashAlg::Sha256))
+        .collect::<Vec<_>>();
     certificate
-        .validate([&ca_fingerprint])
+        .validate(ca_fingerprints.iter())
         .map_err(|cause| ApiError::unauthorized_with_log("untrusted_ssh_certificate", cause))?;
     let authorized_after = u64::try_from(authorization.not_before)
         .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;

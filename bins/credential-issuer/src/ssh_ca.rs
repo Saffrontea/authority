@@ -35,6 +35,10 @@ pub fn load_or_generate(private_path: &Path, public_path: &Path) -> Result<Priva
     Ok(key)
 }
 
+pub fn load(private_path: &Path) -> Result<PrivateKey, String> {
+    PrivateKey::from_openssh(&fs::read_to_string(private_path).map_err(display)?).map_err(display)
+}
+
 fn display(error: impl std::fmt::Display) -> String {
     error.to_string()
 }

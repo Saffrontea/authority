@@ -86,6 +86,30 @@ browser. A production-style LAN hostname requires HTTPS and matching
 All private keys and bootstrap secrets are generated under `.secrets/`, which
 is ignored by Git. Stop the PoC with `Ctrl-C`.
 
+### SSH CA rotation
+
+The PoC uses an explicit overlap window so an SSH CA can be changed without a
+flag day. The previous private key is retained for recovery and is never
+deleted automatically.
+
+```sh
+mise run ca:prepare
+mise run ca:deploy-trust  # target trusts old + new
+mise run ca:activate
+# Restart poc:run so issuer and node-agent load the new active key/bundle.
+# A directly-run issuer can instead reload the active private key with SIGHUP.
+# Wait at least the maximum SSH certificate TTL before retiring the old CA.
+mise run ca:finalize
+mise run ca:deploy-trust  # target now trusts only the new CA
+mise run ca:status
+```
+
+`ca:prepare` generates `.secrets/ssh-ca.next` and writes the old/new public
+keys to `.secrets/ssh-trusted-user-cas.pub`. `ca:activate` moves the old key to
+`.secrets/ssh-ca.previous` and makes the staged key active. Finalization only
+changes the trust bundle; it deliberately keeps the previous private key for
+an explicit, separately audited archival or destruction procedure.
+
 Run the checks with:
 
 ```sh

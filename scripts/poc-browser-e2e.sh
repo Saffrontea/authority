@@ -206,6 +206,8 @@ fi
 click '#login'
 printf '[poc:e2e] waiting for Passkey authentication and SSH issuance\n'
 issued="$(wait_for_result 'Authenticated, authorized, and issued.' 'Passkey authentication and SSH issuance')"
+issuer_ca="$(awk -F= '/^ca=/ { print $2 }' <<<"${issued}")"
+[[ "${issuer_ca}" == SHA256:* ]] || die 'issued certificate did not report its CA fingerprint'
 ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q deploy ||
     die 'issued certificate does not contain the deploy principal'
 printf '%s\n%s\n' "${registered}" "${issued}"

@@ -222,6 +222,30 @@ run = "./scripts/run-credential-issuer.sh"
 description = "Run the local SSH key and certificate agent"
 run = "./scripts/run-node-agent.sh"
 
+[tasks."ca:status"]
+description = "Show the active, staged, previous, and trusted SSH CAs"
+run = "./scripts/ssh-ca-rotation.sh status"
+
+[tasks."ca:prepare"]
+description = "Generate the next SSH CA and create an overlap trust bundle"
+run = "./scripts/ssh-ca-rotation.sh prepare"
+
+[tasks."ca:activate"]
+description = "Activate the staged SSH CA while retaining overlap trust"
+run = "./scripts/ssh-ca-rotation.sh activate"
+
+[tasks."ca:finalize"]
+description = "Remove the previous SSH CA from the trust bundle"
+run = "./scripts/ssh-ca-rotation.sh finalize"
+
+[tasks."ca:deploy-trust"]
+description = "Deploy the current SSH CA trust bundle to the target sshd"
+run = "cargo build --offline -p authority-network-agent && ./scripts/authority-agent.sh run _mesh:agent-install && ./scripts/ssh-ca-rotation.sh mark-deployed"
+
+[tasks."ca:test"]
+description = "Exercise SSH CA rotation phases in an isolated temporary directory"
+run = "./scripts/test-ssh-ca-rotation.sh"
+
 [tasks."poc:run"]
 description = "Run the complete Passkey-to-SSH-certificate proof of concept"
 depends = ["db:migrate"]
@@ -234,5 +258,5 @@ run = "./scripts/run-poc-e2e.sh"
 
 [tasks.test]
 description = "Run contract checks and all Rust tests"
-depends = ["contracts:check", "migrations:check"]
+depends = ["contracts:check", "migrations:check", "ca:test"]
 run = "cargo test --workspace"

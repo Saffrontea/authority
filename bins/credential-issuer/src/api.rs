@@ -45,6 +45,7 @@ struct IssueSshCertificateRequest {
 struct IssueSshCertificateResponse {
     certificate: String,
     ca_public_key: String,
+    ca_fingerprint: String,
     serial: u64,
     expires_at: i64,
 }
@@ -112,12 +113,13 @@ fn issue_ssh_certificate_inner(
     builder
         .extension("permit-pty", "")
         .map_err(ApiError::internal)?;
-    let certificate = builder.sign(state.ca_key()).map_err(ApiError::internal)?;
+    let ca_key = state.ca_key().map_err(ApiError::internal)?;
+    let certificate = builder.sign(&*ca_key).map_err(ApiError::internal)?;
 
     Ok(IssueSshCertificateResponse {
         certificate: certificate.to_openssh().map_err(ApiError::internal)?,
-        ca_public_key: state
-            .ca_key()
+        ca_fingerprint: ca_key.fingerprint(HashAlg::Sha256).to_string(),
+        ca_public_key: ca_key
             .public_key()
             .to_openssh()
             .map_err(ApiError::internal)?,
@@ -264,5 +266,99 @@ mod tests {
         let replay =
             issue_ssh_certificate_inner(&state, &replay_request).expect_err("reject replay");
         assert_eq!(replay.code, "authorization_replayed");
+    }
+
+    #[test]
+    fn ca_rotation_issues_with_the_new_key_and_supports_an_overlap_window() {
+        let control_signer = OpenSslEd25519Signer::generate("control-plane-key-1")
+            .expect("generate control-plane key");
+        let verifier = OpenSslEd25519Verifier::from_pem(
+            "control-plane-key-1",
+            &control_signer
+                .public_key_to_pem()
+                .expect("encode control-plane public key"),
+        )
+        .expect("load control-plane public key");
+        let old_ca = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("old CA");
+        let new_ca = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("new CA");
+        let old_fingerprint = old_ca.fingerprint(HashAlg::Sha256);
+        let new_fingerprint = new_ca.fingerprint(HashAlg::Sha256);
+        let subject_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("subject key");
+        let now = unix_timestamp().expect("current timestamp");
+        let ledger_path = std::env::temp_dir().join(format!(
+            "authority-issuer-rotation-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let replay_ledger = ReplayLedger::open(ledger_path, now).expect("open replay ledger");
+        let state = AppState::new(verifier, old_ca, replay_ledger, 100);
+        let request = |nonce: &str| IssueSshCertificateRequest {
+            authorization: sign_authorization(
+                IssuanceAuthorizationV1 {
+                    version: "1".to_owned(),
+                    issuer: "domain-authority:example".to_owned(),
+                    domain_id: "domain_example".to_owned(),
+                    subject_user_id: "user_01".to_owned(),
+                    device_id: "device_01".to_owned(),
+                    target_node_id: "node_01".to_owned(),
+                    ssh_public_key_fingerprint: subject_key
+                        .public_key()
+                        .fingerprint(HashAlg::Sha256)
+                        .to_string(),
+                    principals: vec!["deploy".to_owned()],
+                    policy_id: "policy_01".to_owned(),
+                    nonce: nonce.to_owned(),
+                    issued_at: now,
+                    not_before: now,
+                    expires_at: now + 300,
+                    audience: "credential-issuer".to_owned(),
+                },
+                &control_signer,
+            )
+            .expect("sign authorization"),
+            ssh_public_key: subject_key
+                .public_key()
+                .to_openssh()
+                .expect("encode subject key"),
+        };
+
+        let old_response =
+            issue_ssh_certificate_inner(&state, &request("b2xkLWNhLXJvdGF0aW9uLW5vbmNlLTAx"))
+                .expect("issue from old CA");
+        state.rotate_ca(new_ca).expect("activate new CA");
+        let new_response =
+            issue_ssh_certificate_inner(&state, &request("bmV3LWNhLXJvdGF0aW9uLW5vbmNlLTAy"))
+                .expect("issue from new CA");
+        let old_certificate =
+            Certificate::from_openssh(&old_response.certificate).expect("old certificate");
+        let new_certificate =
+            Certificate::from_openssh(&new_response.certificate).expect("new certificate");
+        assert_eq!(old_response.ca_fingerprint, old_fingerprint.to_string());
+        assert_eq!(new_response.ca_fingerprint, new_fingerprint.to_string());
+
+        old_certificate
+            .validate_at(
+                u64::try_from(now).expect("timestamp"),
+                [&old_fingerprint, &new_fingerprint],
+            )
+            .expect("overlap trusts old certificate");
+        new_certificate
+            .validate_at(
+                u64::try_from(now).expect("timestamp"),
+                [&old_fingerprint, &new_fingerprint],
+            )
+            .expect("overlap trusts new certificate");
+        assert!(
+            old_certificate
+                .validate_at(u64::try_from(now).expect("timestamp"), [&new_fingerprint])
+                .is_err(),
+            "retiring the old CA must reject certificates signed by it"
+        );
+        new_certificate
+            .validate_at(u64::try_from(now).expect("timestamp"), [&new_fingerprint])
+            .expect("new certificate survives retirement of old CA");
     }
 }

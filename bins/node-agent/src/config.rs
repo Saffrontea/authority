@@ -10,7 +10,7 @@ pub struct Config {
     pub bind: SocketAddr,
     pub ssh_private_key_file: PathBuf,
     pub ssh_certificate_file: PathBuf,
-    pub trusted_ca_public_key_file: PathBuf,
+    pub trusted_ca_public_keys_file: PathBuf,
     pub browser_origins: Vec<HeaderValue>,
     pub ssh_known_hosts_file: PathBuf,
     pub ssh_target: Option<IpAddr>,
@@ -26,9 +26,10 @@ impl Config {
                 .map_err(|error| format!("AUTHORITY_NODE_AGENT_BIND is invalid: {error}"))?,
             ssh_private_key_file: PathBuf::from(required("AUTHORITY_NODE_SSH_KEY_FILE")?),
             ssh_certificate_file: PathBuf::from(required("AUTHORITY_NODE_SSH_CERT_FILE")?),
-            trusted_ca_public_key_file: PathBuf::from(required(
-                "AUTHORITY_SSH_CA_PUBLIC_KEY_FILE",
-            )?),
+            trusted_ca_public_keys_file: PathBuf::from(
+                optional("AUTHORITY_SSH_TRUSTED_CA_FILE")?
+                    .map_or_else(|| required("AUTHORITY_SSH_CA_PUBLIC_KEY_FILE"), Ok)?,
+            ),
             browser_origins: origins("AUTHORITY_BROWSER_ORIGINS", "http://localhost:3000")?,
             ssh_known_hosts_file: PathBuf::from(required("AUTHORITY_SSH_KNOWN_HOSTS_FILE")?),
             ssh_target: optional("AUTHORITY_SSH_TARGET")?
