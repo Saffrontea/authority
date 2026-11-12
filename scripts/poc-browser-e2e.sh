@@ -73,6 +73,12 @@ element_text() {
     webdriver GET "/session/${session}/element/${element}/text" | jq -r '.'
 }
 
+element_displayed() {
+    local element
+    element="$(find_element "$1")"
+    webdriver GET "/session/${session}/element/${element}/displayed" | jq -r '.'
+}
+
 wait_for_result() {
     local prefix="$1" description="$2" value attempt
     for attempt in {1..150}; do
@@ -159,11 +165,35 @@ webdriver POST "/session/${session}/webauthn/authenticator" \
 query="issuer_origin=$(jq -rn --arg value "${issuer_origin}" '$value|@uri')&node_agent_origin=$(jq -rn --arg value "${node_origin}" '$value|@uri')"
 page_url="${control_origin}/?${query}#bootstrap=${token}"
 webdriver POST "/session/${session}/url" "$(jq -nc --arg url "${page_url}" '{url:$url}')" >/dev/null
+bootstrap_status="$(element_text '#bootstrap-status')"
+[[ "${bootstrap_status}" == 'Bootstrap capability available.'* ]] ||
+    die "bootstrap capability was not visible: ${bootstrap_status}"
+[[ "$(element_displayed '#bootstrap-form')" == 'true' ]] ||
+    die 'bootstrap form was hidden despite a valid bootstrap URL'
 set_value '#new-username' poc-e2e
 set_value '#display-name' 'Automated PoC'
 click '#register'
 printf '[poc:e2e] waiting for Passkey registration\n'
 registered="$(wait_for_result 'Passkey registered.' 'Passkey registration')"
+registered_user_id="$(awk -F= '/^user=/ { print $2 }' <<<"${registered}")"
+bootstrap_status="$(element_text '#bootstrap-status')"
+[[ "${bootstrap_status}" == *"user=${registered_user_id}"* ]] ||
+    die "completed bootstrap identity was not visible: ${bootstrap_status}"
+[[ "$(element_displayed '#bootstrap-form')" == 'false' ]] ||
+    die 'consumed bootstrap form remained visible'
+
+# A reload without the fragment must retain the non-secret identity summary,
+# while never restoring the consumed bootstrap capability.
+page_without_bootstrap="${control_origin}/?${query}"
+webdriver POST "/session/${session}/url" \
+    "$(jq -nc --arg url "${page_without_bootstrap}" '{url:$url}')" >/dev/null
+bootstrap_status="$(element_text '#bootstrap-status')"
+[[ "${bootstrap_status}" == 'Bootstrap completed.'* ]] ||
+    die "bootstrap identity disappeared after reload: ${bootstrap_status}"
+[[ "$(element_displayed '#bootstrap-form')" == 'false' ]] ||
+    die 'bootstrap form reappeared after token consumption'
+set_value '#username' poc-e2e
+printf 'Bootstrap identity UI: capability, completion, and reload states verified\n'
 
 if [[ -n "${wireguard_public_key}" ]]; then
     target_id="$(awk -F= '/^target=/ { print $2 }' <<<"${registered}")"
@@ -251,6 +281,29 @@ if [[ -n "${wireguard_public_key}" ]]; then
         --header "authorization: ${authorization}" --data "${grant_body}" \
         "${control_origin}/v1/access-authorizations")"
     [[ "${token_only_status}" == "401" ]] || die "token-only request returned HTTP ${token_only_status}"
+
+    mismatched="$(webdriver POST "/session/${session}/execute/async" \
+        '{"script":"const done = arguments[0]; window.authorityPrepareAccessAuthorization({wireguard_public_key:\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"}).then(prepared => done({prepared})).catch(error => done({error: error.message}));","args":[]}')"
+    mismatch_error="$(jq -r '.error // empty' <<<"${mismatched}")"
+    [[ -z "${mismatch_error}" ]] || die "mismatched WireGuard proof setup failed: ${mismatch_error}"
+    mismatch_body="$(jq -c '.prepared.body' <<<"${mismatched}")"
+    mismatch_authorization="$(jq -r '.prepared.headers.authorization' <<<"${mismatched}")"
+    mismatch_timestamp="$(jq -r '.prepared.headers["x-authority-timestamp"]' <<<"${mismatched}")"
+    mismatch_nonce="$(jq -r '.prepared.headers["x-authority-nonce"]' <<<"${mismatched}")"
+    mismatch_signature="$(jq -r '.prepared.headers["x-authority-device-signature"]' <<<"${mismatched}")"
+    mismatch_response="$(mktemp)"
+    mismatch_status="$(curl --silent --output "${mismatch_response}" --write-out '%{http_code}' \
+        --request POST --header 'content-type: application/json' \
+        --header "authorization: ${mismatch_authorization}" \
+        --header "x-authority-timestamp: ${mismatch_timestamp}" \
+        --header "x-authority-nonce: ${mismatch_nonce}" \
+        --header "x-authority-device-signature: ${mismatch_signature}" \
+        --data "${mismatch_body}" "${control_origin}/v1/access-authorizations")"
+    mismatch_reason="$(jq -r '.error // empty' <"${mismatch_response}")"
+    rm -f "${mismatch_response}"
+    [[ "${mismatch_status}" == "403" && "${mismatch_reason}" == "wireguard_key_mismatch" ]] ||
+        die "mismatched WireGuard identity returned HTTP ${mismatch_status}: ${mismatch_reason}"
+    printf 'Access deny boundary: signed WireGuard key mismatch rejected with a stable reason\n'
 
     grant_status="$(curl --silent --output "${grant_response}" --write-out '%{http_code}' \
         --request POST --header 'content-type: application/json' \

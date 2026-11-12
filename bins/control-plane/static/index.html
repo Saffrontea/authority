@@ -308,13 +308,13 @@
       }
     });
 
-    window.authorityPrepareAccessAuthorization = async function () {
+    window.authorityPrepareAccessAuthorization = async function (overrides = {}) {
       const sessionToken = sessionStorage.getItem('authority-session');
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
       if (!sessionToken || !access || !access.wireguard_public_key) {
         throw new Error('Access authorization prerequisites are missing.');
       }
-      const wireguardPublicKey = access.wireguard_public_key;
+      const wireguardPublicKey = overrides.wireguard_public_key ?? access.wireguard_public_key;
       const sshKey = await getJson(`${nodeAgentOrigin}/v1/ssh-key`);
       const capability = await terminalCapability();
       const request = {
