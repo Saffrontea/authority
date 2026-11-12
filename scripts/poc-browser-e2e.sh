@@ -43,7 +43,7 @@ webdriver() {
     fi
     value_error="$(jq -r '.value.error? // empty' <<<"${response}")"
     [[ -z "${value_error}" ]] || die "WebDriver ${method} ${path}: ${response}"
-    jq -c '.value // .' <<<"${response}"
+    jq -c 'if has("value") then .value else . end' <<<"${response}"
 }
 
 find_element() {
