@@ -284,3 +284,19 @@ run = "./scripts/authority-agent.sh run _mesh:client-reconnect"
 [tasks."_mesh:client-reconnect"]
 description = "Internal: reconnect the WireGuard client without changing target grants"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh client-reconnect"
+
+[tasks."verification:pbt"]
+description = "Check planning, containment, projection and durable-state properties"
+run = "cargo test -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger"
+
+[tasks."verification:tla"]
+description = "Model-check revocation distribution safety and conditional liveness (requires Java 11+)"
+run = "python3 ./scripts/check-tla.py"
+
+[tasks."verification:tla:mutations"]
+description = "Model-check revocation and require counterexamples for unsafe mutations"
+run = "python3 ./scripts/check-tla.py --mutations"
+
+[tasks."verification:check"]
+description = "Run property tests and the revocation model with mutation checks"
+depends = ["verification:pbt", "verification:tla:mutations"]

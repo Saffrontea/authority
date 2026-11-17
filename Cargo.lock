@@ -288,6 +288,10 @@ dependencies = [
 [[package]]
 name = "authority-replay-ledger"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+ "tempfile",
+]
 
 [[package]]
 name = "autocfg"

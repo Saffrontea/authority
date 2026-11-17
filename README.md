@@ -230,3 +230,7 @@ flow can be exercised headlessly with a WebDriver virtual authenticator:
 ```sh
 mise run poc:e2e
 ```
+
+Formal verification obligations, property tests and the revocation model are
+tracked in [Verification](docs/verification.md). Run `mise run verification:pbt`
+and `mise run verification:tla:mutations` (Java 11+).

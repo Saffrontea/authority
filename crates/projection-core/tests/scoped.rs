@@ -259,3 +259,43 @@ fn automatic_projection_emits_only_the_selected_route_material() {
     assert!(result.ssh_issuance.is_none());
     assert!(result.mtls_issuance.is_none());
 }
+
+proptest::proptest! {
+    #[test]
+    fn authorized_tcp_projection_refines_selected_scope(
+        select_both in proptest::prelude::any::<bool>(),
+        ttl in 1_i64..=300,
+        changed_field in 0_usize..7,
+    ) {
+        use proptest::prelude::*;
+        let ports = if select_both { BTreeSet::from([8080, 8081]) } else { BTreeSet::from([8080]) };
+        let requested = RequestedAccess {
+            tcp: Some(RequestedTcp { ports: ports.clone(), ttl_seconds: ttl }),
+            ..RequestedAccess::default()
+        };
+        let (plan, common) = authorize(AccessIntent::tcp(Route::Direct), &requested);
+        let result = project_authorized(&common, &plan).unwrap();
+        let grant = result.tcp_grant.unwrap();
+        prop_assert_eq!(grant.destination_ports, ports.into_iter().collect::<Vec<_>>());
+        prop_assert_eq!(grant.issued_at, common.issued_at);
+        prop_assert_eq!(grant.expires_at, common.issued_at + ttl);
+        prop_assert_eq!(&grant.domain_id, &common.domain_id);
+        prop_assert_eq!(&grant.subject_user_id, &common.subject_user_id);
+        prop_assert_eq!(&grant.device_id, &common.device_id);
+        prop_assert_eq!(&grant.target_node_id, &common.target_node_id);
+        prop_assert_eq!(&grant.policy_id, &common.policy_id);
+        prop_assert!(result.network_grant.is_none() && result.ssh_issuance.is_none()
+            && result.ssh_node_install.is_none() && result.mtls_issuance.is_none());
+        let mut rebound = common;
+        match changed_field {
+            0 => rebound.domain_id = Uuid::from_u128(99).to_string(),
+            1 => rebound.subject_user_id = Uuid::from_u128(99).to_string(),
+            2 => rebound.device_id = Uuid::from_u128(99).to_string(),
+            3 => rebound.target_node_id = Uuid::from_u128(99).to_string(),
+            4 => rebound.policy_id = "other-policy@1".into(),
+            5 => rebound.issuer = "other-issuer".into(),
+            _ => rebound.issued_at += 1,
+        }
+        prop_assert!(matches!(project_authorized(&rebound, &plan), Err(ProjectionError::ScopeMismatch)));
+    }
+}

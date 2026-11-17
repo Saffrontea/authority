@@ -497,3 +497,49 @@ fn available_routes_never_override_policy_and_mismatched_exact_constraints_are_r
         ScopeError::InvalidRequest
     );
 }
+
+proptest! {
+    #[test]
+    fn validity_matches_integer_interval_spec_at_machine_boundaries(
+        (outer_start, outer_end, inner_start, inner_end) in
+            (any::<i64>(), any::<i64>(), any::<i64>(), any::<i64>()),
+    ) {
+        let outer = Validity { not_before: outer_start, expires_at: outer_end };
+        let inner = Validity { not_before: inner_start, expires_at: inner_end };
+        // Mathematical integers avoid making the oracle share machine overflow.
+        let (a, b, c, d) = (i128::from(outer_start), i128::from(outer_end),
+            i128::from(inner_start), i128::from(inner_end));
+        let expected = c >= 0 && a < b && c < d && a <= c && d <= b;
+        prop_assert_eq!(outer.contains(inner), expected);
+        if outer.contains(inner) {
+            prop_assert!(d - c <= b - a);
+        }
+    }
+
+    #[test]
+    fn containment_is_transitive_for_valid_narrowings(
+        start in 0_i64..=i64::MAX - 1800,
+        widths in prop::array::uniform3(1_i64..=600),
+        ports in prop::collection::btree_set(1_u16..=u16::MAX, 1..=64),
+        selection in any::<u64>(),
+    ) {
+        let binding = AccessBinding { domain_id: Uuid::from_u128(1), subject_user_id: Uuid::from_u128(2),
+            device_id: Uuid::from_u128(3), target_node_id: Uuid::from_u128(4) };
+        let narrow = ports.iter().enumerate().filter(|(index, _)| selection & (1_u64 << index) != 0)
+            .map(|(_, port)| *port).chain(ports.iter().next().copied()).collect::<BTreeSet<_>>();
+        let make = |expires_at, ports| ScopedAbility {
+            binding, validity: Validity { not_before: start, expires_at },
+            scope: AbilityScope::TcpConnection { source: "10.0.0.1".parse().unwrap(),
+                destination: "10.0.0.2".parse().unwrap(), ports },
+        };
+        let a = make(start + widths.iter().sum::<i64>(), ports.clone());
+        let b = make(start + widths[0] + widths[1], narrow.clone());
+        let c = make(start + widths[0], BTreeSet::from([*narrow.first().unwrap()]));
+        prop_assert!(a.contains(&b));
+        prop_assert!(b.contains(&c));
+        prop_assert!(a.contains(&c));
+        let mut rebound = c;
+        rebound.binding.target_node_id = Uuid::from_u128(99);
+        prop_assert!(!a.contains(&rebound));
+    }
+}
