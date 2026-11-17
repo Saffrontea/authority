@@ -144,3 +144,45 @@ pub fn solve<A: Ord + Clone, M: Ord + Clone>(
     }
     Err(PlanningError::NoSolution)
 }
+
+#[cfg(test)]
+mod closure_properties {
+    use super::{Derivation, closure};
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn bits(mask: u8) -> BTreeSet<u8> {
+        (0..6).filter(|bit| mask & (1 << bit) != 0).collect()
+    }
+
+    proptest! {
+        #[test]
+        fn concrete_closure_matches_synchronous_horn_fixed_point(
+            seed in 0_u8..64,
+            specs in prop::collection::vec((0_u8..64, 0_u8..64), 0..10),
+        ) {
+            let mut expected = seed;
+            // At most six new labels can enter this independent bitset oracle.
+            // All rules inspect the PREVIOUS round; production is sequential.
+            for _ in 0..6 {
+                let previous = expected;
+                for &(requires, provides) in &specs {
+                    if requires & previous == requires { expected |= provides; }
+                }
+            }
+            let mut rules = specs.iter().map(|(requires, provides)| Derivation {
+                requires: bits(*requires), provides: bits(*provides),
+            }).collect::<Vec<_>>();
+            let mut actual = bits(seed);
+            closure(&mut actual, &rules);
+            prop_assert_eq!(&actual, &bits(expected));
+            let mut idempotent = actual.clone();
+            closure(&mut idempotent, &rules);
+            prop_assert_eq!(&idempotent, &actual);
+            rules.reverse();
+            let mut reordered = bits(seed);
+            closure(&mut reordered, &rules);
+            prop_assert_eq!(reordered, actual);
+        }
+    }
+}

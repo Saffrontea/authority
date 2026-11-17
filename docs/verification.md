@@ -4,16 +4,17 @@ This work tracks the full verification target; a passing model is not a proof of
 all production code. Verus now proves the abstract solver and directly checks the
 production TTL containment and checked-lifetime predicates. Source-derived value
 models also cover all scope variants, binding checks and projection material. The
-concrete BFS, private plan-factory invariant and standard-library/encoding
-representation internals are not yet universally proved. The source-derived
-projection pipeline is now proved conditional on its stated input invariant.
+BFS queue/visited/budget implementation and standard-library/encoding representation
+internals are not yet universally proved. The checked private constructor now
+establishes the input invariant needed by the source-derived projection pipeline;
+the concrete closure iteration also refines the least fixed point and terminates.
 Each row identifies both current evidence and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
-| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Verus least-closure, selected-set equivalence, execution/layer correspondence and shortest-search theorems; independent PBT oracle against real `solve` | Concrete closure-loop termination, BFS queue/visited/budget refinement and deterministic tie-breaking proof |
+| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Verus concrete closure termination/least-fixed-point refinement, selected-set equivalence, execution/layer correspondence and shortest-search theorems; native PBT | BFS queue/visited/budget refinement and deterministic tie-breaking proof |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
-| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Source-derived constructor, selection-fold, collection and final scope-origin proofs; checked arithmetic kernels; generated native mechanism and factory PBT | Universal discharge of the private plan-factory invariant; wire/consumer and representation correspondence |
+| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters, plus safety and liveness mutations | Expiry, receiver restart and kernel failure/recovery model; trace correspondence with actual HTTP/DB/adapters |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; durable ledger, all-scope authority and contract-time PBT | Generated end-to-end action traces compared with the formal transition model |
 
@@ -57,18 +58,22 @@ kernels, and source-derived scope/projection value models. Reported counts are 2
 for the solver, four for direct TTL containment, seven for scopes, eight for
 checked lifetimes, nine for material projection (which rechecks the seven scope
 obligations), and 33 for the conditional complete projection pipeline (which
-rechecks shared scope/material/lifetime obligations). Counts include generated
-obligations and are not a count of independent end-to-end guarantees.
+rechecks shared scope/material/lifetime obligations), 35 for checked construction
+and its composition with projection (including the 33 pipeline obligations), and
+26 for concrete closure (including the 20 abstract solver obligations). Counts
+include generated obligations and are not independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for nineteen
+`mise run verification:verus:mutations` also requires proof failures for twenty-five
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a
 projection domain, substituting a TCP source, and substituting an SSH key. Pipeline
 mutations additionally corrupt final TCP ports/endpoints, the WireGuard audience,
 terminal nonce and mTLS identity; omit the SSH install contract; emit an unselected
-WireGuard grant; or replace the approved TCP lifetime while collecting inputs. These
-mutations must produce verifier errors, rather than merely parse failures. The
+WireGuard grant; or replace the approved TCP lifetime while collecting inputs.
+Factory mutations drop binding/start checks or permit negative issuance times;
+closure mutations ignore prerequisites, omit mandatory effects or stop before a
+fixed point. These mutations must produce verifier errors, rather than merely parse failures. The
 combined gate includes these checks. Own proof files may not introduce `assume`,
 `admit`, or unchecked external bodies/specifications.
 
@@ -173,16 +178,32 @@ the complete common-binding/selection predicates. BTreeSet enumeration is a fini
 sequence with the same members; the proof works for any such order. The production
 accessors must remain their exact identity-field reads or extraction fails.
 
-The final theorem explicitly requires `plan_bindings_valid`: the plan's issuance
+The isolated consumer theorem requires `plan_bindings_valid`: the plan's issuance
 time is nonnegative, and every realized ability carries the plan's binding and
-start time. This is the intended invariant of the private `AuthorizedPlan`
-factory, **not yet a universally discharged theorem of that factory**. Native
-factory PBT checks it through successful `evaluate_scoped` and `project_authorized`
-for independent SSH/mTLS/network lifetimes. `selected_agrees` is independently
-checked against native `project_plan` with generated mechanism sequences, missing
-input masks, invalid/overflowing lifetimes, output presence, metadata and adapter
-fields. This provides implementation correspondence evidence, not a proof of the
-source adapter/compiler transformation or every producer of the invariant.
+start time. `formal/verus/factory.rs` now discharges that precondition using the
+actual `AuthorizedPlan::new` body. The private checked constructor rejects any
+candidate violating those facts and otherwise preserves the complete realization,
+policy reference and evidence. It does not require a correct solver to establish
+this particular binding/time invariant. Its composition theorem constructs a plan
+and projects it without a `plan_bindings_valid` precondition.
+
+`evaluate_scoped` must use this constructor and return its checked result directly.
+The source adapter checks the private field layout, field-derived Clone, allowed
+methods, identity accessors, evidence-only selection mutation, direct construction
+sites and the post-construction return boundary. This is a checked-constructor
+invariant proof under the documented value/source-adapter abstraction, not a new
+proof of policy precedence, evidence consistency, all solver properties or the
+Rust compiler. Native constructor PBT generates mismatched domain/user/device/node
+bindings, shifted starts and extreme issuance times, checking both acceptance and
+preservation of all supplied plan/evidence data. The constructor adds one bounded
+scan of the realized ability set; valid existing authorizations are unchanged.
+
+Native factory PBT also checks the invariant through successful `evaluate_scoped`
+and `project_authorized` for independent SSH/mTLS/network lifetimes.
+`selected_agrees` is independently checked against native `project_plan` with
+generated mechanism sequences, missing input masks, invalid/overflowing lifetimes,
+output presence, metadata and adapter fields. This is correspondence evidence;
+the source adapter/compiler transformation itself is still a trusted boundary.
 
 Contract/request declaration fields are checked against explicit supported layouts;
 adding authority fields requires extending the specifications. Source adapter tests
@@ -208,11 +229,38 @@ scoped-ability labels and a finite catalog with unique positional IDs. It proves
 
 These are universal Verus theorems about that model, not bounded PBT results. They
 are **not yet a proof of production's concrete BFS**: translating arbitrary Rust
-IDs to positional IDs, the iterative closure implementation, queue/frontier order,
-visited-set admission, search-budget accounting and lexicographic tie-breaking
+IDs to positional IDs, queue/frontier order, visited-set admission, search-budget
+accounting and lexicographic tie-breaking
 still require implementation refinement. The PBT reference currently checks the
 concrete implementation against an independent execution model with those runtime
 behaviors; it is evidence of correspondence, not a universal refinement proof.
+
+## Concrete closure implementation
+
+`formal/verus/closure.rs` copies the production `Derivation` shape, complete rule
+application body and stopping condition from `planning-core::closure`. Finite
+BTreeSets are lifted to mathematical finite sets. Each round scans rules in the
+same sequential order; the outer loop is proved by well-founded recursion on the
+number of possible effects not yet present. A ghost-only universe is constructed
+from the seed and all declared effects, so callers need no universe-bound premise.
+Every nonterminal round strictly grows the set within this finite universe.
+
+The proof establishes extensiveness, containment in the least Horn closure,
+application of every initially enabled rule in each round, and equality with the
+least fixed point when the production cardinality stopping test succeeds. Equal
+size implies equal sets because every round is monotone. Closure is independent
+of derivation order and retains all mandatory composition effects. The input
+ability label universe and finite rule/set cardinalities are unbounded by the
+PBT bitset size. Standard value-preserving Clone and consistent Eq/Ord semantics
+remain part of the same collection abstraction used elsewhere.
+
+The source adapter consumes the exact loop/round/return shape and fails on
+unsupported changes. The proof is a refinement of that source-derived iterative
+value model, not a verification of BTreeSet memory internals. A direct native
+closure PBT compares it with independent synchronous bitset rounds, including
+empty premises, cycles, reordered rules, idempotence and growth through multiple
+rounds. This closes the concrete closure obligation; queue processing, visited-set
+deduplication and search budgets in the rest of `solve` remain separate work.
 
 ## Solver specification boundary
 

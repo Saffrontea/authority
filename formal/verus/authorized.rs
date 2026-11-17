@@ -4,7 +4,7 @@ verus! {
 pub struct ScopedPlan { pub mechanisms: Seq<AccessMechanism>, pub abilities: Set<ScopedAbility> }
 pub struct AuthorizedPlan {
     pub binding: AccessBinding, pub issued_at: i64, pub policy_reference: Seq<char>,
-    pub realization: ScopedPlan,
+    pub realization: ScopedPlan, pub evidence: Seq<char>,
 }
 impl AuthorizedPlan {
     pub open spec fn binding(self) -> AccessBinding { self.binding }

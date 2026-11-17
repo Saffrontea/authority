@@ -238,6 +238,34 @@ pub struct AuthorizedPlan {
 }
 
 impl AuthorizedPlan {
+    // One construction boundary for the invariant consumed by projection.
+    // Keep the checks here even though normal instantiation supplies these facts.
+    fn new(
+        binding: AccessBinding,
+        issued_at: i64,
+        policy_reference: String,
+        realization: Plan<ScopedAbility, AccessMechanism>,
+        evidence: crate::selection::PlanningEvidence,
+    ) -> Result<Self, ScopeError> {
+        if issued_at < 0 {
+            return Err(ScopeError::InvalidLifetime);
+        }
+        if realization
+            .abilities
+            .iter()
+            .any(|ability| ability.binding != binding || ability.validity.not_before != issued_at)
+        {
+            return Err(ScopeError::InvalidRequest);
+        }
+        Ok(Self {
+            binding,
+            issued_at,
+            policy_reference,
+            realization,
+            evidence,
+        })
+    }
+
     #[must_use]
     pub const fn evidence(&self) -> &crate::selection::PlanningEvidence {
         &self.evidence
@@ -595,17 +623,69 @@ pub fn evaluate_scoped(
     )
     .map_err(|_| ScopeError::Policy(DenialReason::NoRealization))?;
     let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
-    let plan = AuthorizedPlan {
-        evidence: crate::selection::PlanningEvidence::authorized(request, proof, resources),
-        binding: binding(request),
-        issued_at: request.evaluated_at,
-        policy_reference: decision
+    let plan = AuthorizedPlan::new(
+        binding(request),
+        request.evaluated_at,
+        decision
             .policies()
             .iter()
             .map(|source| format!("{}@{}", source.policy_id, source.revision))
             .collect::<Vec<_>>()
             .join("."),
         realization,
-    };
+        crate::selection::PlanningEvidence::authorized(request, proof, resources),
+    )?;
     Ok((decision, plan))
+}
+
+#[cfg(test)]
+mod construction_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn checked_plan_constructor_establishes_projection_invariant(
+            issued_at in prop_oneof![any::<i64>(), Just(100_i64)],
+            inputs in prop::collection::vec((0_u8..6, any::<i64>(), any::<u128>()), 0..8),
+        ) {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../contracts/test-vectors/policy-plan-evaluated-v1/valid/wireguard-mesh.json"
+            )).unwrap();
+            let evidence: crate::selection::PlanningEvidence = serde_json::from_value(fixture["planning"].clone()).unwrap();
+            let binding = evidence.binding;
+            let abilities = inputs.iter().map(|(change, timestamp, identity)| {
+                let mut selected = binding;
+                match change {
+                    1 => selected.domain_id = Uuid::from_u128(*identity),
+                    2 => selected.subject_user_id = Uuid::from_u128(*identity),
+                    3 => selected.device_id = Uuid::from_u128(*identity),
+                    4 => selected.target_node_id = Uuid::from_u128(*identity),
+                    _ => {},
+                }
+                ScopedAbility {
+                    binding: selected,
+                    validity: Validity { not_before: if *change == 5 { *timestamp } else { issued_at }, expires_at: i64::MAX },
+                    scope: AbilityScope::NetworkReachability {
+                        source: "10.0.0.1".parse().unwrap(), destination: "10.0.0.2".parse().unwrap(),
+                    },
+                }
+            }).collect::<BTreeSet<_>>();
+            let expected = issued_at >= 0 && abilities.iter().all(|ability|
+                ability.binding == binding && ability.validity.not_before == issued_at);
+            let realization = Plan { mechanisms: vec![], abilities };
+            let result = AuthorizedPlan::new(binding, issued_at, "policy@1".into(), realization.clone(), evidence.clone());
+            prop_assert_eq!(result.is_ok(), expected);
+            if let Ok(plan) = result {
+                prop_assert_eq!(plan.binding(), binding);
+                prop_assert_eq!(plan.issued_at(), issued_at);
+                prop_assert_eq!(plan.realization(), &realization);
+                prop_assert_eq!(plan.evidence(), &evidence);
+                for ability in &plan.realization().abilities {
+                    prop_assert_eq!(ability.binding, plan.binding());
+                    prop_assert_eq!(ability.validity.not_before, plan.issued_at());
+                }
+            }
+        }
+    }
 }

@@ -372,3 +372,96 @@ def authorized_source():
         "PRODUCTION_AUTHORIZED_SELECTION": "let selection = " + selection + ";",
         "PRODUCTION_AUTHORIZED_CALL": final_call,
     })
+
+
+def check_private_plan_declaration(source):
+    _, body = block(source, "pub struct AuthorizedPlan {")
+    fields = re.findall(r"^\s*(\w+): ([^\n]+),\s*$", body, re.MULTILINE)
+    expected = {"binding": "AccessBinding", "issued_at": "i64", "policy_reference": "String",
+        "realization": "Plan<ScopedAbility,AccessMechanism>", "evidence": "crate::selection::PlanningEvidence"}
+    actual = {name: re.sub(r"\s+", "", kind) for name, kind in fields}
+    if len(fields) != len(expected) or actual != expected or re.search(r"^\s*pub\b", body, re.MULTILINE):
+        raise SystemExit("AuthorizedPlan fields must retain checked private layout")
+    if len(re.findall(r"\bimpl[^{}]*\bAuthorizedPlan\b[^{}]*\{", source)) != 1:
+        raise SystemExit("additional AuthorizedPlan implementation requires invariant review")
+
+
+def factory_source():
+    source = (ROOT / "crates/policy-core/src/scoped.rs").read_text()
+    production = source.split("#[cfg(test)]", 1)[0]
+    check_private_plan_declaration(production)
+    _, implementation = block(production, "impl AuthorizedPlan {")
+    methods = re.findall(r"\bfn (\w+)\(", implementation)
+    expected_methods = {"new", "evidence", "set_selection", "binding", "issued_at", "policy_reference", "realization"}
+    if set(methods) != expected_methods or len(methods) != len(expected_methods):
+        raise SystemExit("AuthorizedPlan methods changed; extend invariant-preservation proof")
+    # There must be no additional direct construction path in the production
+    # module. Clone is field-derived; Deserialize/Default cannot bypass checks.
+    if len(re.findall(r"\bAuthorizedPlan\s*\{", production)) != 2:
+        raise SystemExit("AuthorizedPlan direct construction bypasses checked constructor")
+    if not re.search(r"#\[derive\(Debug, Clone, PartialEq, Eq\)\]\s*pub struct AuthorizedPlan", production):
+        raise SystemExit("AuthorizedPlan derives changed; review construction invariant")
+    _, setter = block(implementation, "pub(crate) fn set_selection(")
+    expected_setter = '''self.evidence.route_choice = options.choice;
+        self.evidence.deployment = (options.choice == crate::selection::RouteChoice::Automatic)
+            .then(|| options.availability.clone());
+        self.evidence.candidates = candidates;'''
+    if re.sub(r"\s+", "", setter) != re.sub(r"\s+", "", expected_setter):
+        raise SystemExit("selection setter changed; prove invariant preservation")
+    _, evaluate = block(production, "pub fn evaluate_scoped(")
+    call = evaluate.find("let plan = AuthorizedPlan::new(")
+    if call < 0:
+        raise SystemExit("evaluate_scoped must use the checked plan constructor")
+    opening = evaluate.index("(", call)
+    end = delimiter_end(evaluate, opening, "(", ")")
+    if re.sub(r"\s+", "", evaluate[end:]) != "?;Ok((decision,plan))":
+        raise SystemExit("plan modified after checked construction; extend factory proof")
+    _, body = block(implementation, "fn new(")
+    body = body.replace("Ok(Self {", "Ok(AuthorizedPlan {")
+    pattern = re.search(r"realization\s*\.abilities\s*\.iter\(\)\s*\.any\(", body)
+    if not pattern:
+        raise SystemExit("plan invariant guard changed; update source lift")
+    opening = pattern.end() - 1
+    end = delimiter_end(body, opening, "(", ")")
+    predicate = body[opening + 1:end - 1].strip()
+    if not predicate.startswith("|ability|"):
+        raise SystemExit("unexpected constructor predicate binder")
+    predicate = predicate[len("|ability|"):].strip()
+    if predicate.startswith("{"):
+        if delimiter_end(predicate, 0) != len(predicate):
+            raise SystemExit("unexpected constructor predicate block")
+        predicate = predicate[1:-1]
+    lifted = "(exists|ability: ScopedAbility| realization.abilities.contains(ability) && (" + predicate + "))"
+    body = body[:pattern.start()] + lifted + body[end:]
+    return authorized_source() + inject((ROOT / "formal/verus/factory.rs").read_text(), {"PRODUCTION_PLAN_CONSTRUCTOR": body})
+
+
+def closure_source():
+    source = (ROOT / "crates/planning-core/src/lib.rs").read_text()
+    declaration = checked_declaration(source, "Derivation<A>", {"requires": "BTreeSet<A>", "provides": "BTreeSet<A>"})
+    declaration = declaration.replace("Derivation<A>", "NativeRule")
+    declaration = re.sub(r"\bA\b", "nat", declaration)
+    declaration = value_types(declaration)
+    _, body = block(source, "fn closure<A: Ord + Clone>(")
+    match = re.fullmatch(r"\s*loop\s*\{(.*)\}\s*", body, re.DOTALL)
+    if not match:
+        raise SystemExit("closure loop shape changed; extend concrete proof")
+    loop = match[1]
+    prefix = re.match(r"\s*let count = abilities.len\(\);\s*for rule in derivations\s*\{", loop)
+    if not prefix:
+        raise SystemExit("closure round initialization/iteration changed")
+    opening = prefix.end() - 1
+    end = delimiter_end(loop, opening)
+    step = loop[opening + 1:end - 1]
+    step = step.replace(".is_subset(abilities)", ".subset_of(abilities)")
+    step = step.replace("abilities.extend(rule.provides.iter().cloned());", "abilities = abilities.union(rule.provides);")
+    guard = loop[end:].strip()
+    if not re.fullmatch(r"if (.*?)\s*\{\s*return;\s*\}", guard, re.DOTALL):
+        raise SystemExit("closure return boundary changed")
+    condition = re.fullmatch(r"if (.*?)\s*\{\s*return;\s*\}", guard, re.DOTALL)[1]
+    template = (ROOT / "formal/verus/closure.rs").read_text()
+    return (ROOT / "formal/verus/solver.rs").read_text() + inject(template, {
+        "PRODUCTION_DERIVATION_TYPE": declaration,
+        "PRODUCTION_RULE_APPLICATION": step,
+        "PRODUCTION_CLOSURE_STOP": condition,
+    })

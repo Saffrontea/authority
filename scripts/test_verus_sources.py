@@ -1,7 +1,8 @@
 """Source extraction is part of the proof boundary, so test it independently."""
 import unittest
 from verus_sources import (block, inject, scopes_source, projection_source, checked_declaration,
-                           contract_values, result_calls, authorized_source)
+                           contract_values, result_calls, authorized_source, factory_source, closure_source,
+                           check_private_plan_declaration, ROOT)
 
 
 class SourceExtraction(unittest.TestCase):
@@ -53,6 +54,17 @@ class SourceExtraction(unittest.TestCase):
             self.assertIn(text, pipeline)
         self.assertNotIn("/* PRODUCTION_", pipeline)
         self.assertIn("requires plan_bindings_valid(plan)", pipeline)
+
+    def test_plan_layout_and_checked_constructor_are_part_of_proof_boundary(self):
+        source = (ROOT / "crates/policy-core/src/scoped.rs").read_text().split("#[cfg(test)]", 1)[0]
+        check_private_plan_declaration(source)
+        for changed in [source.replace("    binding: AccessBinding,", "    pub binding: AccessBinding,", 1),
+                        source + "\nimpl Default for AuthorizedPlan { fn default() -> Self { todo!() } }"]:
+            with self.assertRaises(SystemExit):
+                check_private_plan_declaration(changed)
+        self.assertIn("pub proof fn checked_factory_then_projection", factory_source())
+        self.assertIn("decreases universe.len() - seed.len()", closure_source())
+        self.assertNotIn("/* PRODUCTION_", closure_source())
 
     def test_source_correspondence_includes_material_and_binding_guards(self):
         scope = scopes_source()
