@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 authority-contracts-model.workspace = true
+authority-policy-core.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

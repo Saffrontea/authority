@@ -17,7 +17,7 @@ pub struct AuthorizedAccess {
 }
 
 pub enum AuthorizationOutcome {
-    Allowed(AuthorizedAccess),
+    Allowed(Box<AuthorizedAccess>),
     Denied(DenialReason),
 }
 
@@ -114,14 +114,14 @@ pub async fn authorize(
                 .collect()
         })
         .unwrap_or_default();
-    Ok(AuthorizationOutcome::Allowed(AuthorizedAccess {
+    Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
         decision,
         ssh_principal,
         wireguard_public_key,
         device_mesh_address,
         target_mesh_address,
         tcp_ports,
-    }))
+    })))
 }
 
 fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {

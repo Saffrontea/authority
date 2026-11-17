@@ -2,6 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod realization;
+
+use realization::{AccessPlan, all_abilities, realize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -103,31 +106,20 @@ impl Capability {
     }
 }
 
-/// Computes the least set of capabilities required to realize an intent.
+/// Compatibility view of a realization using the built-in access catalog.
+/// Authorization uses `evaluate`, which selects inside the policy envelope.
+///
+/// # Panics
+/// Panics if the built-in catalog cannot realize a supported intent within its
+/// exhaustive 32-state budget. This is an internal catalog invariant.
 #[must_use]
 pub fn plan(intent: &AccessIntent) -> BTreeSet<Capability> {
-    let mut required = BTreeSet::new();
-    if intent.outcomes.contains(&Outcome::Ssh) {
-        required.insert(Capability::SshIssue);
-    }
-    if intent.outcomes.contains(&Outcome::TcpConnect) {
-        required.insert(Capability::TcpConnect);
-    }
-    if intent.outcomes.contains(&Outcome::MtlsService) {
-        required.insert(Capability::MtlsIssue);
-    }
-    if intent.outcomes.contains(&Outcome::NetworkReachability)
-        || ((intent.outcomes.contains(&Outcome::Ssh)
-            || intent.outcomes.contains(&Outcome::MtlsService)
-            || intent.outcomes.contains(&Outcome::TcpConnect))
-            && intent.route == Route::MeshRequired)
-    {
-        required.insert(Capability::NetworkReach);
-    }
-    if required.contains(&Capability::NetworkReach) && intent.route == Route::MeshRequired {
-        required.insert(Capability::MeshJoin);
-    }
-    required
+    realize(intent, all_abilities())
+        .expect("the built-in catalog realizes every supported intent within 32 states")
+        .abilities
+        .into_iter()
+        .map(realization::Ability::permission)
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +177,7 @@ pub struct PolicyRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessDecision {
+    pub realization: AccessPlan,
     pub intent: AccessIntent,
     pub required: BTreeSet<Capability>,
     pub sources: BTreeMap<Capability, PolicyRef>,
@@ -199,6 +192,8 @@ impl AccessDecision {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DenialReason {
+    #[error("no authorized realization satisfies the requested intent")]
+    NoRealization,
     #[error("no policy applies to the requested access")]
     NoApplicablePolicy,
     #[error("device identity does not match the authenticated subject")]
@@ -217,6 +212,7 @@ impl DenialReason {
     pub const fn code(&self) -> &'static str {
         match self {
             Self::NoApplicablePolicy => "no_applicable_policy",
+            Self::NoRealization => "no_authorized_realization",
             Self::DeviceMismatch => "device_mismatch",
             Self::Disabled => "device_or_target_disabled",
             Self::ExplicitDeny(_) => "explicit_deny",
@@ -231,7 +227,10 @@ impl DenialReason {
             Self::ExplicitDeny(capability) | Self::MissingCapability(capability) => {
                 Some(*capability)
             }
-            Self::NoApplicablePolicy | Self::DeviceMismatch | Self::Disabled => None,
+            Self::NoApplicablePolicy
+            | Self::NoRealization
+            | Self::DeviceMismatch
+            | Self::Disabled => None,
         }
     }
 }
@@ -258,13 +257,15 @@ pub fn evaluate(
         return Err(DenialReason::Disabled);
     }
 
-    let required = plan(&request.intent);
+    // Evaluate the permission envelope first; no mechanism is selected here.
     let mut sources = BTreeMap::new();
-    for capability in &required {
+    let mut denials = BTreeMap::new();
+    for ability in all_abilities() {
+        let capability = ability.permission();
         let winner = snapshot
             .rules
             .iter()
-            .filter(|rule| applicable(request, rule) && rule.grants.contains(capability))
+            .filter(|rule| applicable(request, rule) && rule.grants.contains(&capability))
             .max_by_key(|rule| {
                 (
                     rule.priority,
@@ -272,20 +273,45 @@ pub fn evaluate(
                     matches!(rule.effect, Effect::Deny),
                     rule.policy_id,
                 )
-            })
-            .ok_or(DenialReason::MissingCapability(*capability))?;
-        if winner.effect == Effect::Deny {
-            return Err(DenialReason::ExplicitDeny(*capability));
+            });
+        match winner {
+            Some(rule) if rule.effect == Effect::Allow => {
+                sources.insert(
+                    capability,
+                    PolicyRef {
+                        policy_id: rule.policy_id,
+                        revision: rule.revision,
+                    },
+                );
+            }
+            Some(_) => {
+                denials.insert(capability, DenialReason::ExplicitDeny(capability));
+            }
+            None => {
+                denials.insert(capability, DenialReason::MissingCapability(capability));
+            }
         }
-        sources.insert(
-            *capability,
-            PolicyRef {
-                policy_id: winner.policy_id,
-                revision: winner.revision,
-            },
-        );
     }
+    let permitted = all_abilities()
+        .into_iter()
+        .filter(|ability| sources.contains_key(&ability.permission()))
+        .collect();
+    let realization = realize(&request.intent, permitted).map_err(|_| {
+        // Preserve existing capability-level diagnostics for the built-in catalog.
+        // A search failure itself can never produce an allow decision.
+        plan(&request.intent)
+            .iter()
+            .find_map(|capability| denials.get(capability).cloned())
+            .unwrap_or(DenialReason::NoRealization)
+    })?;
+    let required = realization
+        .abilities
+        .iter()
+        .map(|ability| ability.permission())
+        .collect::<BTreeSet<_>>();
+    sources.retain(|capability, _| required.contains(capability));
     Ok(AccessDecision {
+        realization,
         intent: request.intent.clone(),
         required,
         sources,
@@ -381,6 +407,24 @@ mod tests {
         let denial = evaluate(&request, &snapshot).expect_err("explicit deny");
         assert_eq!(denial.code(), "explicit_deny");
         assert_eq!(denial.capability(), Some(Capability::SshIssue));
+    }
+
+    #[test]
+    fn unneeded_denied_abilities_do_not_reject_or_expand_a_direct_plan() {
+        let (request, mut snapshot) = fixture(AccessIntent::ssh(Route::Direct));
+        let mut deny_mesh = snapshot.rules[0].clone();
+        deny_mesh.policy_id = Uuid::new_v4();
+        deny_mesh.effect = Effect::Deny;
+        deny_mesh.priority = 1;
+        deny_mesh.grants = BTreeSet::from([Capability::MeshJoin]);
+        snapshot.rules.push(deny_mesh);
+        let decision = evaluate(&request, &snapshot).unwrap();
+        assert_eq!(
+            decision.realization.mechanisms,
+            vec![realization::AccessMechanism::SshCertificate]
+        );
+        assert_eq!(decision.required, BTreeSet::from([Capability::SshIssue]));
+        assert_eq!(decision.sources.len(), 1);
     }
 
     fn fixture(intent: AccessIntent) -> (AccessRequest, PolicySnapshot) {

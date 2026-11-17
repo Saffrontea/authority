@@ -254,9 +254,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "authority-planning-core"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "authority-policy-core"
 version = "0.1.0"
 dependencies = [
+ "authority-planning-core",
  "proptest",
  "thiserror 2.0.21",
  "uuid",
@@ -267,6 +276,7 @@ name = "authority-projection-core"
 version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
+ "authority-policy-core",
  "proptest",
  "thiserror 2.0.21",
 ]

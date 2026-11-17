@@ -236,3 +236,22 @@ fn tcp_can_be_selected_without_ssh_mtls_or_mesh_membership() {
         ])
     );
 }
+
+#[test]
+fn every_builtin_intent_fits_the_exhaustive_search_budget() {
+    use authority_policy_core::realization::{all_abilities, realize};
+    for outcomes in 0..16 {
+        for mesh in [false, true] {
+            let access_intent = intent(outcomes, mesh);
+            let realized = realize(&access_intent, all_abilities()).unwrap();
+            assert_eq!(
+                realized
+                    .abilities
+                    .iter()
+                    .map(|ability| ability.permission())
+                    .collect::<BTreeSet<_>>(),
+                plan(&access_intent),
+            );
+        }
+    }
+}

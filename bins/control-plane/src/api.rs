@@ -16,8 +16,8 @@ use authority_issuer_core::{
 };
 use authority_policy_core::{AccessIntent, Route};
 use authority_projection_core::{
-    CommonDecisionClaims, MtlsProjectionRequest, NetworkProjectionRequest, ProjectionLifetimes,
-    SshProjectionRequest, project,
+    CommonDecisionClaims, MtlsProjectionRequest, NetworkProjectionRequest, ProjectionInputs,
+    SshProjectionRequest, project_plan,
 };
 use axum::{
     Json, Router,
@@ -1183,6 +1183,10 @@ fn valid_contract_identifier(value: &str) -> bool {
         })
 }
 
+fn required_contract<T>(contract: Option<T>, name: &str) -> Result<T, ApiError> {
+    contract.ok_or_else(|| ApiError::internal(format!("authorized plan omitted {name}")))
+}
+
 fn build_access_bundle(
     state: &AppState,
     session: &AuthenticatedSession,
@@ -1198,7 +1202,7 @@ fn build_access_bundle(
         .ssh_principal
         .clone()
         .ok_or_else(|| ApiError::internal("SSH decision has no principal binding"))?;
-    let projected = project(
+    let projected = project_plan(
         &CommonDecisionClaims {
             decision_id: decision_id.clone(),
             issuer: format!("domain-authority:{}", state.domain_id()),
@@ -1209,43 +1213,65 @@ fn build_access_bundle(
             policy_id: common_policy,
             issued_at,
         },
-        &SshProjectionRequest {
-            public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
-            principals: vec![ssh_principal],
-            terminal_token_hash: request.terminal_token_hash.clone(),
-        },
-        &NetworkProjectionRequest {
-            wireguard_public_key: request.wireguard_public_key.clone(),
-            mesh_address: decision.device_mesh_address.clone(),
-        },
-        &MtlsProjectionRequest {
-            client_spki_sha256: request.mtls_client_spki_sha256.clone(),
-            identity_uri: format!(
-                "spiffe://authority.local/domain/{}/user/{}/device/{}",
-                state.domain_id(),
-                session.user_id,
-                request.device_id
-            ),
-            service_audience: "demo-api".to_owned(),
-        },
-        ProjectionLifetimes {
-            ssh_seconds: state.ssh_authorization_ttl_seconds(),
-            network_seconds: state.network_grant_ttl_seconds(),
-            mtls_seconds: state.network_grant_ttl_seconds(),
+        &decision.decision.realization,
+        ProjectionInputs {
+            ssh: Some((
+                &SshProjectionRequest {
+                    public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
+                    principals: vec![ssh_principal],
+                    terminal_token_hash: request.terminal_token_hash.clone(),
+                },
+                state.ssh_authorization_ttl_seconds(),
+            )),
+            network: Some((
+                &NetworkProjectionRequest {
+                    wireguard_public_key: request.wireguard_public_key.clone(),
+                    mesh_address: decision.device_mesh_address.clone(),
+                },
+                state.network_grant_ttl_seconds(),
+            )),
+            mtls: Some((
+                &MtlsProjectionRequest {
+                    client_spki_sha256: request.mtls_client_spki_sha256.clone(),
+                    identity_uri: format!(
+                        "spiffe://authority.local/domain/{}/user/{}/device/{}",
+                        state.domain_id(),
+                        session.user_id,
+                        request.device_id
+                    ),
+                    service_audience: "demo-api".to_owned(),
+                },
+                state.network_grant_ttl_seconds(),
+            )),
+            ..ProjectionInputs::default()
         },
     )
     .map_err(ApiError::internal)?;
-    let ssh_authorization =
-        sign_authorization(projected.ssh_issuance, state.signer()).map_err(ApiError::internal)?;
-    let node_authorization = sign_authorization(projected.ssh_node_install, state.signer())
-        .map_err(ApiError::internal)?;
-    let network_grant =
-        sign_network_grant(projected.network_grant, state.signer()).map_err(ApiError::internal)?;
-    let mtls_authorization = sign_mtls_authorization(projected.mtls_issuance, state.signer())
-        .map_err(ApiError::internal)?;
-    let mtls_node_authorization =
-        sign_mtls_authorization(projected.mtls_node_install, state.signer())
-            .map_err(ApiError::internal)?;
+    let ssh_authorization = sign_authorization(
+        required_contract(projected.ssh_issuance, "SSH")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let node_authorization = sign_authorization(
+        required_contract(projected.ssh_node_install, "SSH installation")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let network_grant = sign_network_grant(
+        required_contract(projected.network_grant, "WireGuard")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let mtls_authorization = sign_mtls_authorization(
+        required_contract(projected.mtls_issuance, "mTLS")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let mtls_node_authorization = sign_mtls_authorization(
+        required_contract(projected.mtls_node_install, "mTLS installation")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
     let bundle = AccessAuthorizationBundleV1 {
         version: "1".to_owned(),
         decision_id,
@@ -1703,6 +1729,11 @@ mod tests {
         };
         let evaluated = access_policy::AuthorizedAccess {
             decision: AccessDecision {
+                realization: authority_policy_core::realization::realize(
+                    &AccessIntent::ssh(Route::MeshRequired),
+                    authority_policy_core::realization::all_abilities(),
+                )
+                .expect("built-in SSH plan"),
                 intent: AccessIntent::ssh(Route::MeshRequired),
                 required: BTreeSet::from([
                     Capability::MeshJoin,
@@ -1883,34 +1914,48 @@ fn build_tcp_response(
         policy_id: policy_reference(&evaluated.decision),
         issued_at: now,
     };
-    let tcp = authority_projection_core::project_tcp(
-        &common,
-        &authority_projection_core::TcpProjectionRequest {
-            source_address: evaluated.device_mesh_address.clone(),
-            destination_address: evaluated.target_mesh_address.clone(),
-            destination_ports: request.destination_ports.clone(),
-        },
-        request.ttl_seconds,
-    )
-    .map_err(ApiError::internal)?;
-    let tcp_grant =
-        authority_issuer_core::sign_tcp_grant(tcp, state.signer()).map_err(ApiError::internal)?;
-    let network_grant = if request.include_network {
-        let key = String::from_utf8(evaluated.wireguard_public_key.clone())
-            .map_err(ApiError::internal)?;
-        let grant = authority_projection_core::project_network(
-            &common,
-            &NetworkProjectionRequest {
-                wireguard_public_key: key,
-                mesh_address: evaluated.device_mesh_address.clone(),
-            },
-            state.network_grant_ttl_seconds(),
-        )
-        .map_err(ApiError::internal)?;
-        Some(sign_network_grant(grant, state.signer()).map_err(ApiError::internal)?)
+    let plan = &evaluated.decision.realization;
+    let needs_network = plan
+        .mechanisms
+        .contains(&authority_policy_core::realization::AccessMechanism::WireGuardPeer);
+    let network = if needs_network {
+        Some(NetworkProjectionRequest {
+            wireguard_public_key: String::from_utf8(evaluated.wireguard_public_key.clone())
+                .map_err(ApiError::internal)?,
+            mesh_address: evaluated.device_mesh_address.clone(),
+        })
     } else {
         None
     };
+    let projected = project_plan(
+        &common,
+        plan,
+        ProjectionInputs {
+            tcp: Some((
+                &authority_projection_core::TcpProjectionRequest {
+                    source_address: evaluated.device_mesh_address.clone(),
+                    destination_address: evaluated.target_mesh_address.clone(),
+                    destination_ports: request.destination_ports.clone(),
+                },
+                request.ttl_seconds,
+            )),
+            network: network
+                .as_ref()
+                .map(|input| (input, state.network_grant_ttl_seconds())),
+            ..ProjectionInputs::default()
+        },
+    )
+    .map_err(ApiError::internal)?;
+    let tcp_grant = authority_issuer_core::sign_tcp_grant(
+        required_contract(projected.tcp_grant, "TCP admission")?,
+        state.signer(),
+    )
+    .map_err(ApiError::internal)?;
+    let network_grant = projected
+        .network_grant
+        .map(|grant| sign_network_grant(grant, state.signer()))
+        .transpose()
+        .map_err(ApiError::internal)?;
     let mut adapters = vec![AdapterGrantV1 {
         kind: AdapterGrantKindV1::TcpPort,
         audience: "network-agent".to_owned(),

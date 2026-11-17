@@ -129,6 +129,13 @@ established streams, late-grant denial, overlapping independent service access,
 and TCP expiry while WireGuard remains active. Linux targets require nftables;
 the LXC installer installs it before starting the Network Agent.
 
+## Ability planning
+
+Authorization now selects a realization from an ability/mechanism hypergraph
+inside the effective policy envelope, then projects only its selected adapters.
+See [Ability planning](docs/ability-planning.md) for the model, current access
+integration, search bounds and scoped-ability migration.
+
 ## Testing without Passkey hardware
 
 Chromium DevTools provides a software WebAuthn authenticator which still runs
