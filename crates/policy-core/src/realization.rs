@@ -67,6 +67,10 @@ pub enum AccessMechanism {
     TcpAdmission,
 }
 
+/// Exhaustive subset budget for the current wire-evidence plan bound.
+pub const ACCESS_PLANNING_STATES: usize =
+    1 << authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1;
+
 pub type AccessPlan = Plan<Ability, AccessMechanism>;
 
 #[must_use]
@@ -150,8 +154,8 @@ pub fn realize(
             available: BTreeSet::new(),
             permitted,
             forbidden_mechanisms: BTreeSet::new(),
-            max_mechanisms: 5,
-            max_states: 32,
+            max_mechanisms: authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1,
+            max_states: ACCESS_PLANNING_STATES,
         },
         |_| true,
     )

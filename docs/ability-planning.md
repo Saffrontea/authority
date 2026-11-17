@@ -174,6 +174,47 @@ configured mesh target. These are trusted deployment declarations, not live
 reachability probes, discoveries of active peers, or mechanisms for bypassing
 network policy. Explicit legacy TCP-only requests are unchanged.
 
+## Authorization transaction
+
+Both authorization endpoints begin one `SERIALIZABLE` PostgreSQL transaction
+before loading policy. The policy loader requires that transaction, rather than a
+pool, and locks all matching policy rows, the requesting device, target node and
+target device with `FOR SHARE`. Existing-row updates/deletes wait until the
+authorization finishes. Policy evaluation, scoped planning, local signing, decision
+persistence, audit and outbox writes all occur before that transaction commits.
+Persistence helpers borrow it and receive scalar context instead of an application
+state/pool; they cannot independently commit the authorization.
+
+Allow responses are returned only after commit. Policy denials also commit their
+audit/evidence in that same transaction before returning a denial response. Any
+projection/persistence/commit failure returns no grant. Serialization failures and
+deadlocks return `503 authorization_conflict`; a retry needs a fresh device proof.
+There is no reuse of a previously evaluated decision after a conflict.
+
+Serializable ordering defines consistency for concurrently inserted policies;
+`FOR SHARE` locks existing rows and does not block inserts into the policy table.
+Concurrent authorization and policy changes may serialize on either side of each
+other. This boundary does not retroactively revoke already issued contracts when
+later policy changes commit; enforcement/revocation remains a separate concern.
+
+The LXC concurrency regression checks the isolation level, observes real blocked
+writers through `pg_stat_activity` for policy/device/node changes, and forces an
+outbox constraint error after audit/evidence writes. Separate connections cannot
+see an uncommitted decision, and rollback leaves neither audit nor outbox records.
+The writer's test changes are themselves rolled back.
+
+## Shared definitions
+
+`contracts-model::protocol` owns wire audiences, lifetime/port bounds and v1
+planning-evidence bounds. Producers, verifiers, projection and policy scope checks
+reuse them, and conformance tests compare the numeric bounds with the immutable
+schema artifacts. Policy-core derives its exhaustive search budget from the plan
+bound, and `AccessBinding::identity_uri` owns subject/device identity formatting.
+Domain issuer formatting also has one definition in the protocol module. Deployment
+TTL defaults and the demo audience belong to the Control Plane configuration;
+unrelated timeouts and key sizes are not merged merely because numbers coincide.
+The generic planning engine remains independent of protocol/storage adapters.
+
 ## Planning audit
 
 Completed authorizations and policy-planning denials write an `access.plan` audit record and a
@@ -262,3 +303,11 @@ AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
 
 It uses the local development credential file (or `AUTHORITY_DB_PASSWORD` /
 `AUTHORITY_DB_PASSWORD_FILE`) and is explicitly opt-in outside LXC environments.
+
+The transaction regression uses the same LXC development credentials as the decoder
+test and a demo policy bootstrapped by `poc:e2e`:
+
+```sh
+AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
+  cargo test -p authority-control-plane authorization_transaction_locks_and_rolls_back_in_postgres -- --ignored
+```

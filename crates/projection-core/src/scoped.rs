@@ -26,7 +26,7 @@ pub fn project_authorized(
         || common.target_node_id != binding.target_node_id.to_string()
         || common.issued_at != plan.issued_at()
         || common.policy_id != plan.policy_reference()
-        || common.issuer != format!("domain-authority:{}", binding.domain_id)
+        || common.issuer != authority_contracts_model::protocol::domain_issuer(binding.domain_id)
     {
         return Err(ProjectionError::ScopeMismatch);
     }

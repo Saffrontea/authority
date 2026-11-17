@@ -1,3 +1,5 @@
+use authority_contracts_model::protocol::valid_ttl_seconds;
+use authority_contracts_model::protocol::{CREDENTIAL_ISSUER_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
     IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV1,
 };
@@ -28,7 +30,7 @@ pub struct SelectedProjections {
 }
 
 fn lifetime(common: &CommonDecisionClaims, seconds: i64) -> Result<(), ProjectionError> {
-    if !(1..=600).contains(&seconds) || common.issued_at.checked_add(seconds).is_none() {
+    if !valid_ttl_seconds(seconds) || common.issued_at.checked_add(seconds).is_none() {
         return Err(ProjectionError::InvalidLifetime);
     }
     Ok(())
@@ -69,14 +71,14 @@ pub fn project_plan(
                     common,
                     request,
                     &common.decision_id,
-                    "credential-issuer",
+                    CREDENTIAL_ISSUER_AUDIENCE,
                     ttl,
                 );
                 let install = ssh_contract(
                     common,
                     request,
                     &request.terminal_token_hash,
-                    "node-agent",
+                    NODE_AGENT_AUDIENCE,
                     ttl,
                 );
                 issuance.validate()?;
@@ -87,8 +89,8 @@ pub fn project_plan(
             AccessMechanism::MtlsCertificate => {
                 let (request, ttl) = inputs.mtls.ok_or(ProjectionError::MissingInput("mtls"))?;
                 lifetime(common, ttl)?;
-                let issuance = mtls_contract(common, request, "credential-issuer", ttl);
-                let install = mtls_contract(common, request, "node-agent", ttl);
+                let issuance = mtls_contract(common, request, CREDENTIAL_ISSUER_AUDIENCE, ttl);
+                let install = mtls_contract(common, request, NODE_AGENT_AUDIENCE, ttl);
                 issuance.validate()?;
                 install.validate()?;
                 result.mtls_issuance = Some(issuance);

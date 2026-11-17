@@ -1,5 +1,9 @@
 //! Pure projection of one policy decision into protocol adapter contracts.
 
+use authority_contracts_model::protocol::valid_ttl_seconds;
+use authority_contracts_model::protocol::{
+    CREDENTIAL_ISSUER_AUDIENCE, NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE,
+};
 mod selection;
 pub use selection::{ProjectionInputs, SelectedProjections, project_plan};
 mod scoped;
@@ -64,7 +68,7 @@ pub enum ProjectionError {
     ScopeMismatch,
     #[error("selected mechanism requires {0} projection input")]
     MissingInput(&'static str),
-    #[error("projection lifetime must be between 1 and 600 seconds")]
+    #[error("projection lifetime must be between {min} and {max} seconds", min = authority_contracts_model::protocol::MIN_TTL_SECONDS, max = authority_contracts_model::protocol::MAX_TTL_SECONDS)]
     InvalidLifetime,
     #[error(transparent)]
     Contract(#[from] ContractError),
@@ -88,7 +92,7 @@ pub fn project(
         lifetimes.mtls_seconds,
     ]
     .into_iter()
-    .any(|ttl| !(1..=600).contains(&ttl))
+    .any(|ttl| !valid_ttl_seconds(ttl))
     {
         return Err(ProjectionError::InvalidLifetime);
     }
@@ -96,19 +100,25 @@ pub fn project(
         common,
         ssh,
         &common.decision_id,
-        "credential-issuer",
+        CREDENTIAL_ISSUER_AUDIENCE,
         lifetimes.ssh_seconds,
     );
     let ssh_node_install = ssh_contract(
         common,
         ssh,
         &ssh.terminal_token_hash,
-        "node-agent",
+        NODE_AGENT_AUDIENCE,
         lifetimes.ssh_seconds,
     );
     let network_grant = project_network(common, network, lifetimes.network_seconds)?;
-    let mtls_issuance = mtls_contract(common, mtls, "credential-issuer", lifetimes.mtls_seconds);
-    let mtls_node_install = mtls_contract(common, mtls, "node-agent", lifetimes.mtls_seconds);
+    let mtls_issuance = mtls_contract(
+        common,
+        mtls,
+        CREDENTIAL_ISSUER_AUDIENCE,
+        lifetimes.mtls_seconds,
+    );
+    let mtls_node_install =
+        mtls_contract(common, mtls, NODE_AGENT_AUDIENCE, lifetimes.mtls_seconds);
     ssh_issuance.validate()?;
     ssh_node_install.validate()?;
     network_grant.validate()?;
@@ -131,7 +141,7 @@ fn ssh_contract(
     ttl: i64,
 ) -> IssuanceAuthorizationV1 {
     IssuanceAuthorizationV1 {
-        version: "1".to_owned(),
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -155,7 +165,7 @@ fn mtls_contract(
     ttl: i64,
 ) -> MtlsIssuanceAuthorizationV1 {
     MtlsIssuanceAuthorizationV1 {
-        version: "1".to_owned(),
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -192,11 +202,11 @@ pub fn project_tcp(
     tcp: &TcpProjectionRequest,
     ttl_seconds: i64,
 ) -> Result<authority_contracts_model::TcpAccessGrantV1, ProjectionError> {
-    if !(1..=600).contains(&ttl_seconds) {
+    if !valid_ttl_seconds(ttl_seconds) {
         return Err(ProjectionError::InvalidLifetime);
     }
     let grant = authority_contracts_model::TcpAccessGrantV1 {
-        version: "1".to_owned(),
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -213,7 +223,7 @@ pub fn project_tcp(
             .issued_at
             .checked_add(ttl_seconds)
             .ok_or(ProjectionError::InvalidLifetime)?,
-        audience: "network-agent".to_owned(),
+        audience: NETWORK_AGENT_AUDIENCE.to_owned(),
     };
     grant.validate()?;
     Ok(grant)
@@ -228,11 +238,11 @@ pub fn project_network(
     network: &NetworkProjectionRequest,
     ttl_seconds: i64,
 ) -> Result<NetworkAccessGrantV1, ProjectionError> {
-    if !(1..=600).contains(&ttl_seconds) {
+    if !valid_ttl_seconds(ttl_seconds) {
         return Err(ProjectionError::InvalidLifetime);
     }
     let grant = NetworkAccessGrantV1 {
-        version: "1".to_owned(),
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -248,7 +258,7 @@ pub fn project_network(
             .issued_at
             .checked_add(ttl_seconds)
             .ok_or(ProjectionError::InvalidLifetime)?,
-        audience: "node-agent".to_owned(),
+        audience: NODE_AGENT_AUDIENCE.to_owned(),
     };
     grant.validate()?;
     Ok(grant)

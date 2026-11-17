@@ -141,7 +141,9 @@ TCP requests can opt into automatic existing-route/mesh selection with
 Existing-route availability requires the server's optional
 `AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS` declaration. Planning choices, rejected
 candidates, scoped permissions and dependencies are recorded in `access.plan`
-and `policy.plan.evaluated` v1 within the authorization transaction.
+and `policy.plan.evaluated` v1 within the authorization transaction. Policy reads,
+scoped evaluation and all decision writes share one serializable transaction with
+shared locks on the policy/device/target rows; responses are returned after commit.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 

@@ -890,8 +890,11 @@ async fn issue_access_authorization(
         return Err(ApiError::forbidden("session_device_mismatch"));
     }
     let issued_at = unix_timestamp()?;
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::database)?;
     let decision = access_policy::authorize(
-        state.pool(),
+        &mut transaction,
         access_policy::request(
             state.domain_id(),
             session.user_id,
@@ -921,12 +924,13 @@ async fn issue_access_authorization(
         &SelectionOptions::exact(Route::MeshRequired),
     )
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::database)?;
     let decision = match decision {
         access_policy::AuthorizationOutcome::Allowed(decision) => decision,
         access_policy::AuthorizationOutcome::Denied(reason) => {
             record_access_decision(
-                &state,
+                &mut transaction,
+                state.domain_id(),
                 session.user_id,
                 request.target_node_id,
                 DecisionAudit {
@@ -941,12 +945,14 @@ async fn issue_access_authorization(
                 },
             )
             .await?;
+            transaction.commit().await.map_err(ApiError::database)?;
             return Err(authorization_denial(&reason.reason));
         }
     };
     let response = build_access_bundle(&state, &decision)?;
     record_access_decision(
-        &state,
+        &mut transaction,
+        state.domain_id(),
         session.user_id,
         request.target_node_id,
         DecisionAudit {
@@ -959,6 +965,7 @@ async fn issue_access_authorization(
         },
     )
     .await?;
+    transaction.commit().await.map_err(ApiError::database)?;
     Ok(Json(response))
 }
 
@@ -1031,8 +1038,8 @@ async fn revoke_access_authorization(
         .map_err(ApiError::internal)?;
     let envelope = sign_revocation_notice_v2(
         DecisionRevocationNoticeV2 {
-            version: "2".to_owned(),
-            issuer: format!("domain-authority:{}", state.domain_id()),
+            version: authority_contracts_model::protocol::CONTRACT_VERSION_V2.to_owned(),
+            issuer: authority_contracts_model::protocol::domain_issuer(state.domain_id()),
             domain_id: state.domain_id().to_string(),
             target_node_id: target_node_id.clone(),
             decision_id: decision_id.clone(),
@@ -1216,7 +1223,7 @@ fn authorized_claims(state: &AppState, plan: &AuthorizedPlan) -> CommonDecisionC
     let binding = plan.binding();
     CommonDecisionClaims {
         decision_id: Uuid::new_v4().simple().to_string(),
-        issuer: format!("domain-authority:{}", state.domain_id()),
+        issuer: authority_contracts_model::protocol::domain_issuer(state.domain_id()),
         domain_id: binding.domain_id.to_string(),
         subject_user_id: binding.subject_user_id.to_string(),
         device_id: binding.device_id.to_string(),
@@ -1259,7 +1266,7 @@ fn build_access_bundle(
     )
     .map_err(ApiError::internal)?;
     let bundle = AccessAuthorizationBundleV1 {
-        version: "1".to_owned(),
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         decision_id,
         ssh_authorization,
         network_grant,
@@ -1286,12 +1293,12 @@ struct DecisionAudit<'a> {
 }
 
 async fn record_access_decision(
-    state: &AppState,
+    transaction: &mut Transaction<'_, Postgres>,
+    domain_id: Uuid,
     user_id: Uuid,
     target_node_id: Uuid,
     audit: DecisionAudit<'_>,
 ) -> Result<(), ApiError> {
-    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     let payload = if let Some((bundle, evaluated)) = audit.authorization.zip(audit.evaluated) {
         policy_decision_payload(
             &evaluated.decision,
@@ -1348,7 +1355,7 @@ async fn record_access_decision(
          (domain_id, actor_type, actor_id, action, target_type, target_id, decision, reason, payload) \
          VALUES ($1, 'user', $2, 'access.authorize', 'node', $3, $4, $5, $6)",
     )
-    .bind(state.domain_id())
+    .bind(domain_id)
     .bind(user_id.to_string())
     .bind(target_node_id.to_string())
     .bind(audit.decision)
@@ -1357,12 +1364,12 @@ async fn record_access_decision(
             .then_some(audit.denial_reason.unwrap_or("policy_denied")),
     )
     .bind(&payload)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::database)?;
     if let Some(bundle) = audit.authorization {
-        insert_decision_outbox(&mut transaction, &bundle.decision_id, &payload).await?;
-        insert_access_bundle(&mut transaction, bundle).await?;
+        insert_decision_outbox(transaction, &bundle.decision_id, &payload).await?;
+        insert_access_bundle(transaction, bundle).await?;
     }
     if let Some(evidence) = audit
         .planning
@@ -1372,16 +1379,11 @@ async fn record_access_decision(
             || Uuid::new_v4().simple().to_string(),
             |bundle| bundle.decision_id.clone(),
         );
-        crate::planning_audit::insert(
-            &mut transaction,
-            &decision_id,
-            evidence,
-            audit.denial_reason,
-        )
-        .await
-        .map_err(ApiError::internal)?;
+        crate::planning_audit::insert(transaction, &decision_id, evidence, audit.denial_reason)
+            .await
+            .map_err(ApiError::database)?;
     }
-    transaction.commit().await.map_err(ApiError::internal)
+    Ok(())
 }
 
 async fn insert_access_bundle(
@@ -1405,7 +1407,7 @@ async fn insert_access_bundle(
         .bind(serde_json::to_value(signed_bundle).map_err(ApiError::internal)?)
         .execute(&mut **transaction)
         .await
-        .map_err(ApiError::internal)?;
+        .map_err(ApiError::database)?;
     Ok(())
 }
 
@@ -1481,7 +1483,7 @@ async fn insert_decision_outbox(
     .bind(payload)
     .execute(&mut **transaction)
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::database)?;
     Ok(())
 }
 
@@ -1645,6 +1647,16 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn database(cause: sqlx::Error) -> Self {
+        if matches!(&cause, sqlx::Error::Database(error)
+            if matches!(error.code().as_deref(), Some("40001" | "40P01")))
+        {
+            error!(%cause, "authorization transaction conflicted; no grant returned");
+            return Self::unavailable("authorization_conflict");
+        }
+        Self::internal(cause)
+    }
+
     fn bad_request(code: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
@@ -1896,9 +1908,11 @@ async fn issue_tcp_authorization(
         return Err(ApiError::forbidden("session_device_mismatch"));
     }
     if (request.automatic_route && request.include_network)
-        || !(1..=state.network_grant_ttl_seconds()).contains(&request.ttl_seconds)
+        || !(authority_contracts_model::protocol::MIN_TTL_SECONDS
+            ..=state.network_grant_ttl_seconds())
+            .contains(&request.ttl_seconds)
         || request.destination_ports.is_empty()
-        || request.destination_ports.len() > 64
+        || request.destination_ports.len() > authority_contracts_model::protocol::MAX_TCP_PORTS
         || request.destination_ports.contains(&0)
         || request
             .destination_ports
@@ -1908,8 +1922,11 @@ async fn issue_tcp_authorization(
         return Err(ApiError::bad_request("invalid_tcp_request"));
     }
     let now = unix_timestamp()?;
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::database)?;
     let outcome = access_policy::authorize(
-        state.pool(),
+        &mut transaction,
         access_policy::request(
             state.domain_id(),
             session.user_id,
@@ -1939,12 +1956,13 @@ async fn issue_tcp_authorization(
         &tcp_selection(&state, &request),
     )
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::database)?;
     let evaluated = match outcome {
         access_policy::AuthorizationOutcome::Allowed(value) => value,
         access_policy::AuthorizationOutcome::Denied(reason) => {
             record_access_decision(
-                &state,
+                &mut transaction,
+                state.domain_id(),
                 session.user_id,
                 request.target_node_id,
                 DecisionAudit {
@@ -1959,13 +1977,15 @@ async fn issue_tcp_authorization(
                 },
             )
             .await?;
+            transaction.commit().await.map_err(ApiError::database)?;
             return Err(authorization_denial(&reason.reason));
         }
     };
     let (response, adapters) = build_tcp_response(&state, &evaluated)?;
     let trace = policy_decision_payload(&evaluated.decision, &response.decision_id, adapters)?;
     persist_tcp_authorization(
-        &state,
+        &mut transaction,
+        state.domain_id(),
         &session,
         request.target_node_id,
         &response,
@@ -1973,6 +1993,7 @@ async fn issue_tcp_authorization(
         evaluated.plan.evidence(),
     )
     .await?;
+    transaction.commit().await.map_err(ApiError::database)?;
     Ok(Json(response))
 }
 
@@ -2013,36 +2034,35 @@ fn build_tcp_response(
 }
 
 async fn persist_tcp_authorization(
-    state: &AppState,
+    transaction: &mut Transaction<'_, Postgres>,
+    domain_id: Uuid,
     session: &AuthenticatedSession,
     target_node_id: Uuid,
     response: &TcpAuthorizationResponse,
     trace: &Value,
     planning: &PlanningEvidence,
 ) -> Result<(), ApiError> {
-    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
-    insert_decision_outbox(&mut transaction, &response.decision_id, trace).await?;
+    insert_decision_outbox(transaction, &response.decision_id, trace).await?;
     sqlx::query(
         "INSERT INTO audit.events \
         (domain_id, actor_type, actor_id, action, target_type, target_id, decision, payload) \
         VALUES ($1, 'user', $2, 'access.authorize_tcp', 'node', $3, 'allow', $4)",
     )
-    .bind(state.domain_id())
+    .bind(domain_id)
     .bind(session.user_id.to_string())
     .bind(target_node_id.to_string())
     .bind(trace)
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await
-    .map_err(ApiError::internal)?;
+    .map_err(ApiError::database)?;
     sqlx::query("INSERT INTO outbox.events \
         (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
         VALUES ($1, 'policy', 'access_decision', $2, 'access.tcp_authorization.issued', 1, $3, now())")
         .bind(Uuid::new_v4()).bind(&response.decision_id).bind(serde_json::to_value(response).map_err(ApiError::internal)?)
-        .execute(&mut *transaction).await.map_err(ApiError::internal)?;
-    crate::planning_audit::insert(&mut transaction, &response.decision_id, planning, None)
+        .execute(&mut **transaction).await.map_err(ApiError::database)?;
+    crate::planning_audit::insert(transaction, &response.decision_id, planning, None)
         .await
-        .map_err(ApiError::internal)?;
-    transaction.commit().await.map_err(ApiError::internal)?;
+        .map_err(ApiError::database)?;
     Ok(())
 }
 

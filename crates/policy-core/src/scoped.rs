@@ -3,6 +3,7 @@
 //! Policy precedence is resolved before scope containment. Scopes from losing
 //! policies are never unioned with those of the winning capability source.
 
+use authority_contracts_model::protocol::valid_ttl_seconds;
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::Ipv4Addr,
@@ -26,6 +27,16 @@ pub struct AccessBinding {
     pub subject_user_id: Uuid,
     pub device_id: Uuid,
     pub target_node_id: Uuid,
+}
+
+impl AccessBinding {
+    #[must_use]
+    pub fn identity_uri(self) -> String {
+        format!(
+            "spiffe://authority.local/domain/{}/user/{}/device/{}",
+            self.domain_id, self.subject_user_id, self.device_id
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -121,7 +132,7 @@ impl AbilityScope {
                 source == from
                     && destination == to
                     && !selected.is_empty()
-                    && selected.len() <= 64
+                    && selected.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
                     && !selected.contains(&0)
                     && selected.is_subset(ports)
             }
@@ -315,7 +326,7 @@ impl ScopeError {
 }
 
 fn validity(now: i64, ttl: i64) -> Result<Validity, ScopeError> {
-    if now < 0 || !(1..=600).contains(&ttl) {
+    if now < 0 || !valid_ttl_seconds(ttl) {
         return Err(ScopeError::InvalidLifetime);
     }
     Ok(Validity {
@@ -399,10 +410,7 @@ fn requested_scope(
             (
                 AbilityScope::ServiceIdentity {
                     client_spki_sha256: input.client_spki_sha256.clone(),
-                    identity_uri: format!(
-                        "spiffe://authority.local/domain/{}/user/{}/device/{}",
-                        request.domain_id, request.subject_user_id, request.device_id
-                    ),
+                    identity_uri: binding(request).identity_uri(),
                     service_audience: resources.service_audience.clone(),
                 },
                 input.ttl_seconds,
@@ -580,8 +588,8 @@ pub fn evaluate_scoped(
             available: BTreeSet::new(),
             permitted: abilities.values().cloned().collect(),
             forbidden_mechanisms: BTreeSet::new(),
-            max_mechanisms: 5,
-            max_states: 32,
+            max_mechanisms: authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1,
+            max_states: crate::realization::ACCESS_PLANNING_STATES,
         },
         |_| true,
     )

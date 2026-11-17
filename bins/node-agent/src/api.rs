@@ -1,3 +1,4 @@
+use authority_contracts_model::protocol::NODE_AGENT_AUDIENCE;
 use std::{
     fs,
     net::IpAddr,
@@ -270,7 +271,7 @@ async fn install_ssh_certificate(
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_node_authorization", cause))?;
     let authorization = &signed_authorization.authorization;
     let now = unix_timestamp()?;
-    if authorization.audience != "node-agent"
+    if authorization.audience != NODE_AGENT_AUDIENCE
         || now < authorization.not_before
         || now >= authorization.expires_at
     {

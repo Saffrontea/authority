@@ -7,6 +7,41 @@ use authority_contracts_model::{
 };
 
 #[test]
+fn protocol_bounds_match_the_versioned_wire_schemas() {
+    use authority_contracts_model::protocol::{
+        MAX_PLAN_CANDIDATES_V1, MAX_PLAN_MECHANISMS_V1, MAX_TCP_PORTS, PLANNING_EVIDENCE_VERSION_V1,
+    };
+    let plan: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/artifacts/policy-plan-evaluated-v1.schema.json"
+    ))
+    .unwrap();
+    let tcp: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/artifacts/tcp-access-grant-v1.schema.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        plan["$defs"]["planning"]["properties"]["selection_rule"]["const"].as_str(),
+        Some(authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1)
+    );
+    assert_eq!(
+        plan["$defs"]["planning"]["properties"]["version"]["const"].as_u64(),
+        Some(u64::from(PLANNING_EVIDENCE_VERSION_V1))
+    );
+    assert_eq!(
+        plan["$defs"]["plan"]["properties"]["steps"]["maxItems"].as_u64(),
+        u64::try_from(MAX_PLAN_MECHANISMS_V1).ok()
+    );
+    assert_eq!(
+        plan["$defs"]["planning"]["properties"]["candidates"]["maxItems"].as_u64(),
+        u64::try_from(MAX_PLAN_CANDIDATES_V1).ok()
+    );
+    assert_eq!(
+        tcp["properties"]["destination_ports"]["maxItems"].as_u64(),
+        u64::try_from(MAX_TCP_PORTS).ok()
+    );
+}
+
+#[test]
 fn valid_vectors_conform_and_have_stable_preimages() {
     for path in vectors("valid") {
         let bytes = fs::read(&path).expect("read valid vector");

@@ -69,7 +69,7 @@ impl TcpAccessGrantV1 {
             }
         }
         if self.destination_ports.is_empty()
-            || self.destination_ports.len() > 64
+            || self.destination_ports.len() > crate::protocol::MAX_TCP_PORTS
             || self.destination_ports.contains(&0)
             || self
                 .destination_ports

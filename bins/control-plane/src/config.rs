@@ -1,8 +1,15 @@
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 
+use authority_contracts_model::protocol::{MAX_TTL_SECONDS, MIN_TTL_SECONDS, valid_ttl_seconds};
+
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use uuid::Uuid;
 use webauthn_rs::prelude::Url;
+
+const DEFAULT_NETWORK_TTL_SECONDS: &str = "300";
+const DEFAULT_SSH_TTL_SECONDS: &str = "300";
+const MIN_SSH_TTL_SECONDS: i64 = 5;
+pub const DEMO_SERVICE_AUDIENCE: &str = "demo-api";
 
 pub struct Config {
     pub bind: SocketAddr,
@@ -62,22 +69,27 @@ impl Config {
             return Err("invalid target mesh address".to_owned());
         }
         let existing_route_source_address = existing_route_source()?;
-        let network_grant_ttl_seconds = value("AUTHORITY_NETWORK_GRANT_TTL_SECONDS", "300")?
-            .parse::<i64>()
-            .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
-        if !(1..=600).contains(&network_grant_ttl_seconds) {
-            return Err("AUTHORITY_NETWORK_GRANT_TTL_SECONDS must be between 1 and 600".to_owned());
+        let network_grant_ttl_seconds = value(
+            "AUTHORITY_NETWORK_GRANT_TTL_SECONDS",
+            DEFAULT_NETWORK_TTL_SECONDS,
+        )?
+        .parse::<i64>()
+        .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
+        if !valid_ttl_seconds(network_grant_ttl_seconds) {
+            return Err(format!(
+                "AUTHORITY_NETWORK_GRANT_TTL_SECONDS must be between {MIN_TTL_SECONDS} and {MAX_TTL_SECONDS}"
+            ));
         }
-        let ssh_authorization_ttl_seconds =
-            value("AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS", "300")?
-                .parse::<i64>()
-                .map_err(|error| {
-                    format!("AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS is invalid: {error}")
-                })?;
-        if !(5..=600).contains(&ssh_authorization_ttl_seconds) {
-            return Err(
-                "AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS must be between 5 and 600".to_owned(),
-            );
+        let ssh_authorization_ttl_seconds = value(
+            "AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS",
+            DEFAULT_SSH_TTL_SECONDS,
+        )?
+        .parse::<i64>()
+        .map_err(|error| format!("AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS is invalid: {error}"))?;
+        if !(MIN_SSH_TTL_SECONDS..=MAX_TTL_SECONDS).contains(&ssh_authorization_ttl_seconds) {
+            return Err(format!(
+                "AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS must be between {MIN_SSH_TTL_SECONDS} and {MAX_TTL_SECONDS}"
+            ));
         }
         if network_grant_ttl_seconds < ssh_authorization_ttl_seconds {
             return Err(

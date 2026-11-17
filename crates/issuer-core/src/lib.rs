@@ -1,5 +1,6 @@
 //! Cryptographic ports and application logic for issuance authorization.
 
+use authority_contracts_model::protocol::{NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
     AdapterGrantKindV1, ContractError, DecisionRevocationNoticeV1, DecisionRevocationNoticeV2,
     IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
@@ -73,7 +74,7 @@ pub fn sign_authorization(
     let signature = signer.sign(&preimage)?;
     let envelope = SignedIssuanceAuthorizationV1 {
         authorization,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -114,7 +115,7 @@ pub fn sign_network_grant(
     let signature = signer.sign(&preimage)?;
     let envelope = SignedNetworkAccessGrantV1 {
         grant,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -154,7 +155,7 @@ pub fn verify_network_grant_for_node(
     now: i64,
 ) -> Result<(), AuthorizationEnvelopeError> {
     verify_network_grant(envelope, verifier)?;
-    if envelope.grant.audience != "node-agent" {
+    if envelope.grant.audience != NODE_AGENT_AUDIENCE {
         return Err(AuthorizationEnvelopeError::InvalidAudience);
     }
     if envelope.grant.target_node_id != expected_target_node_id {
@@ -179,7 +180,7 @@ pub fn sign_revocation_notice(
     let signature = signer.sign(&preimage)?;
     let envelope = SignedDecisionRevocationNoticeV1 {
         notice,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -205,7 +206,7 @@ pub fn verify_revocation_notice_for_node(
     if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
-    if envelope.notice.audience != "network-agent" {
+    if envelope.notice.audience != NETWORK_AGENT_AUDIENCE {
         return Err(AuthorizationEnvelopeError::InvalidRevocationAudience);
     }
     if envelope.notice.target_node_id != expected_target_node_id {
@@ -230,7 +231,7 @@ pub fn sign_revocation_notice_v2(
     let signature = signer.sign(&preimage)?;
     let envelope = SignedDecisionRevocationNoticeV2 {
         notice,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -283,7 +284,7 @@ pub fn sign_mtls_authorization(
     let signature = signer.sign(&preimage)?;
     let envelope = SignedMtlsIssuanceAuthorizationV1 {
         authorization,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -376,7 +377,7 @@ pub fn sign_tcp_grant(
     let signature = signer.sign(&grant.signing_preimage()?)?;
     let envelope = authority_contracts_model::SignedTcpAccessGrantV1 {
         grant,
-        algorithm: "Ed25519".to_owned(),
+        algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
         signature: encode_base64url(&signature),
     };
@@ -404,7 +405,7 @@ pub fn verify_tcp_grant_for_node(
     )? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
-    if envelope.grant.audience != "network-agent" {
+    if envelope.grant.audience != NETWORK_AGENT_AUDIENCE {
         return Err(AuthorizationEnvelopeError::InvalidAudience);
     }
     if envelope.grant.target_node_id != target_node_id {

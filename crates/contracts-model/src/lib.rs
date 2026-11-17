@@ -2,6 +2,7 @@
 //!
 //! This crate contains no database, HTTP, CA, or policy-engine adapters.
 
+pub mod protocol;
 mod tcp;
 pub use tcp::{SignedTcpAccessGrantV1, TcpAccessGrantV1};
 
@@ -10,14 +11,15 @@ use std::{collections::HashSet, net::IpAddr};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const VERSION: &str = "1";
-const MAX_TTL_SECONDS: i64 = 600;
+use protocol::{
+    CONTRACT_VERSION_V1 as VERSION, MAX_TTL_SECONDS,
+    SIGNATURE_ALGORITHM_ED25519 as SIGNATURE_ALGORITHM,
+};
 const DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-ISSUANCE-AUTHORIZATION-V1\0";
 const NETWORK_GRANT_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-NETWORK-ACCESS-GRANT-V1\0";
 const REVOCATION_NOTICE_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V1\0";
 const REVOCATION_NOTICE_V2_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V2\0";
 const MTLS_AUTHORIZATION_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-MTLS-ISSUANCE-AUTHORIZATION-V1\0";
-const SIGNATURE_ALGORITHM: &str = "Ed25519";
 
 /// Control-plane authorization consumed by the isolated credential issuer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,7 +292,7 @@ pub enum ContractError {
     InvalidWireGuardPublicKey,
     #[error("mesh_address must be an IPv4 address")]
     InvalidMeshAddress,
-    #[error("TCP ports must be sorted, unique, nonzero, and contain at most 64 entries")]
+    #[error("TCP ports must be sorted, unique, nonzero, and contain at most {max} entries", max = protocol::MAX_TCP_PORTS)]
     InvalidTcpPorts,
     #[error("access authorization bundle field does not match: {0}")]
     BundleMismatch(&'static str),
@@ -586,7 +588,7 @@ impl DecisionRevocationNoticeV2 {
     /// Returns [`ContractError`] for invalid identifiers, lifetime, sequence,
     /// or duplicate/empty adapter kinds.
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.version != "2" {
+        if self.version != protocol::CONTRACT_VERSION_V2 {
             return Err(ContractError::UnsupportedVersion);
         }
         for (name, value) in [

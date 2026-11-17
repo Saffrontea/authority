@@ -4,6 +4,7 @@
 //! Existing-route plans reuse an externally provided transport; they do not grant
 //! mesh membership. `WireGuard` plans explicitly authorize and project that membership.
 
+use authority_contracts_model::protocol::valid_ttl_seconds;
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::Ipv4Addr,
@@ -194,10 +195,10 @@ impl PlanningEvidence {
     /// evidence replay, not authorization against current policy or live routing.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
-        if self.version != 1
+        if self.version != authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1
             || self.evaluated_at < 0
             || self.outcomes.is_empty()
-            || self.selection_rule != "fewest_mechanisms_then_candidate_id"
+            || self.selection_rule != authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1
         {
             return false;
         }
@@ -221,7 +222,9 @@ impl PlanningEvidence {
         for evaluation in &self.candidates {
             match &evaluation.result {
                 CandidateResult::Authorized { mechanism_count } => {
-                    if !(1..=5).contains(mechanism_count) {
+                    if !(1..=authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1)
+                        .contains(mechanism_count)
+                    {
                         return false;
                     }
                     authorized.push((*mechanism_count, evaluation.candidate));
@@ -284,14 +287,14 @@ impl PlanningEvidence {
 
     fn base(request: &AccessRequest, choice: RouteChoice) -> Self {
         Self {
-            version: 1,
+            version: authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1,
             binding: binding(request),
             evaluated_at: request.evaluated_at,
             outcomes: request.intent.outcomes.clone(),
             route_choice: choice,
             resources: None,
             deployment: None,
-            selection_rule: "fewest_mechanisms_then_candidate_id".to_owned(),
+            selection_rule: authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1.to_owned(),
             candidates: Vec::new(),
             selected: None,
             plan: None,
@@ -342,7 +345,7 @@ impl PlanEvidence {
                     .validity
                     .expires_at
                     .checked_sub(evaluated_at)
-                    .is_some_and(|ttl| (1..=600).contains(&ttl))
+                    .is_some_and(valid_ttl_seconds)
             {
                 return false;
             }
@@ -426,11 +429,7 @@ fn scope_matches_resources(
             ..
         } => {
             *service_audience == resources.service_audience
-                && *identity_uri
-                    == format!(
-                        "spiffe://authority.local/domain/{}/user/{}/device/{}",
-                        binding.domain_id, binding.subject_user_id, binding.device_id
-                    )
+                && *identity_uri == binding.identity_uri()
         }
         AbilityScope::SshSession { .. } => true,
     }

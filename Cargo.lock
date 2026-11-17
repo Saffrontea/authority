@@ -265,6 +265,7 @@ dependencies = [
 name = "authority-policy-core"
 version = "0.1.0"
 dependencies = [
+ "authority-contracts-model",
  "authority-planning-core",
  "proptest",
  "serde",

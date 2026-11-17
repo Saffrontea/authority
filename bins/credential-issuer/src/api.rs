@@ -1,3 +1,4 @@
+use authority_contracts_model::protocol::CREDENTIAL_ISSUER_AUDIENCE;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1};
@@ -90,7 +91,7 @@ async fn issue_mtls_certificate(
     verify_mtls_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_authorization", cause))?;
     let authorization = &request.authorization.authorization;
-    if authorization.audience != "credential-issuer" {
+    if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
     let now = unix_timestamp()?;
@@ -178,7 +179,7 @@ fn issue_ssh_certificate_inner(
     verify_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_authorization", cause))?;
     let authorization = &request.authorization.authorization;
-    if authorization.audience != "credential-issuer" {
+    if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
     let now = unix_timestamp()?;
