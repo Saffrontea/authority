@@ -1649,7 +1649,7 @@ struct ApiError {
 impl ApiError {
     fn database(cause: sqlx::Error) -> Self {
         if matches!(&cause, sqlx::Error::Database(error)
-            if matches!(error.code().as_deref(), Some("40001" | "40P01")))
+            if error.code().as_deref() == Some("40P01"))
         {
             error!(%cause, "authorization transaction conflicted; no grant returned");
             return Self::unavailable("authorization_conflict");

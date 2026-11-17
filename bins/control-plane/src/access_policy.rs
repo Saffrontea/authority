@@ -44,7 +44,7 @@ impl From<sqlx::Error> for PolicyReadError {
 /// decision, planning evidence and issued contracts have all been persisted.
 pub async fn begin_authorization(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
         .execute(&mut *transaction)
         .await?;
     Ok(transaction)
@@ -390,7 +390,7 @@ mod tests {
                 .fetch_one(&mut *transaction)
                 .await
                 .unwrap();
-            assert_eq!(isolation, "serializable");
+            assert_eq!(isolation, "read committed");
             let result = authorize(
                 &mut transaction,
                 request.clone(),

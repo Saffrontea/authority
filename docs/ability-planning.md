@@ -176,7 +176,7 @@ network policy. Explicit legacy TCP-only requests are unchanged.
 
 ## Authorization transaction
 
-Both authorization endpoints begin one `SERIALIZABLE` PostgreSQL transaction
+Both authorization endpoints begin one `READ COMMITTED` PostgreSQL transaction
 before loading policy. The policy loader requires that transaction, rather than a
 pool, and locks all matching policy rows, the requesting device, target node and
 target device with `FOR SHARE`. Existing-row updates/deletes wait until the
@@ -187,14 +187,16 @@ state/pool; they cannot independently commit the authorization.
 
 Allow responses are returned only after commit. Policy denials also commit their
 audit/evidence in that same transaction before returning a denial response. Any
-projection/persistence/commit failure returns no grant. Serialization failures and
-deadlocks return `503 authorization_conflict`; a retry needs a fresh device proof.
+projection/persistence/commit failure returns no grant. Deadlocks return
+`503 authorization_conflict`; a retry needs a fresh device proof.
 There is no reuse of a previously evaluated decision after a conflict.
 
-Serializable ordering defines consistency for concurrently inserted policies;
-`FOR SHARE` locks existing rows and does not block inserts into the policy table.
-Concurrent authorization and policy changes may serialize on either side of each
-other. This boundary does not retroactively revoke already issued contracts when
+The single policy/identity SELECT observes a statement snapshot and locks existing
+rows with `FOR SHARE`; it does not block insertion of new policies. A policy inserted
+after that snapshot applies to subsequent authorizations, rather than changing
+the decision already being evaluated. Ordering new policy inserts against issuance
+would require a shared locking protocol on both the policy-writing and issuing
+paths. This boundary does not retroactively revoke already issued contracts when
 later policy changes commit; enforcement/revocation remains a separate concern.
 
 The LXC concurrency regression checks the isolation level, observes real blocked
