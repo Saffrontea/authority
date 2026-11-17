@@ -10,11 +10,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def block(source, signature):
-    if source.count(signature) != 1:
-        raise SystemExit(f"expected one source declaration: {signature}")
-    start = source.index(signature)
-    opening = source.index("{", start)
+def delimiter_end(source, opening, left="{", right="}"):
+    if source[opening] != left:
+        raise SystemExit("invalid delimiter opening")
     depth = 1
     position = opening + 1
     while depth and position < len(source):
@@ -58,11 +56,20 @@ def block(source, signature):
         if char:
             position += char.end()
             continue
-        depth += (source[position] == "{") - (source[position] == "}")
+        depth += (source[position] == left) - (source[position] == right)
         position += 1
     if depth:
-        raise SystemExit(f"unbalanced declaration: {signature}")
-    return source[start:position], source[opening + 1:position - 1]
+        raise SystemExit("unbalanced source delimiters")
+    return position
+
+
+def block(source, signature):
+    if source.count(signature) != 1:
+        raise SystemExit(f"expected one source declaration: {signature}")
+    start = source.index(signature)
+    opening = source.index("{", start)
+    end = delimiter_end(source, opening)
+    return source[start:end], source[opening + 1:end - 1]
 
 
 def inject(template, replacements):
@@ -141,13 +148,30 @@ def expiry_source():
     })
 
 
+def checked_declaration(source, name, fields):
+    declaration, body = block(source, f"pub struct {name} {{")
+    actual = dict(re.findall(r"^\s*pub (\w+): ([^\n]+),\s*$", body, re.MULTILINE))
+    if actual != fields:
+        raise SystemExit(f"{name} fields changed; extend the contract authority specification")
+    return value_types(declaration).replace("Vec<", "Seq<")
+
+
+REQUEST_FIELDS = {
+    "CommonDecisionClaims": {name: ("i64" if name == "issued_at" else "String") for name in
+        ["decision_id", "issuer", "domain_id", "subject_user_id", "device_id", "target_node_id", "policy_id", "issued_at"]},
+    "NetworkProjectionRequest": {"wireguard_public_key": "String", "mesh_address": "String"},
+    "SshProjectionRequest": {"public_key_fingerprint": "String", "principals": "Vec<String>", "terminal_token_hash": "String"},
+    "MtlsProjectionRequest": {"client_spki_sha256": "String", "identity_uri": "String", "service_audience": "String"},
+    "TcpProjectionRequest": {"source_address": "String", "destination_address": "String", "destination_ports": "Vec<u16>"},
+}
+
+
 def projection_source():
     source = (ROOT / "crates/projection-core/src/scoped.rs").read_text()
     library = (ROOT / "crates/projection-core/src/lib.rs").read_text()
     declarations = []
     for name in ("CommonDecisionClaims", "NetworkProjectionRequest", "SshProjectionRequest", "MtlsProjectionRequest", "TcpProjectionRequest"):
-        declaration, _ = block(library, f"pub struct {name} {{")
-        declarations.append(value_types(declaration).replace("Vec<", "Seq<"))
+        declarations.append(checked_declaration(library, name, REQUEST_FIELDS[name]))
     declaration, _ = block(source, "enum ScopeProjection {")
     declarations.append("pub " + declaration)
     _, body = block(source, "fn project_scope(scope: &AbilityScope) -> ScopeProjection {")
@@ -167,4 +191,184 @@ def projection_source():
     return scopes_source() + inject((ROOT / "formal/verus/projection.rs").read_text(), {
         "PRODUCTION_PROJECTION_TYPES": "\n\n".join(declarations),
         "PRODUCTION_PROJECT_SCOPE": body, "PRODUCTION_COMMON_MATCHES": "!(" + matches + ")",
+    })
+
+
+def result_calls(body, names):
+    """Lift Rust Result propagation to proof-mode match, preserving early return."""
+    for name in names:
+        position = 0
+        while True:
+            match = re.search(rf"\b{re.escape(name)}\s*\(", body[position:])
+            if not match:
+                break
+            start = position + match.start()
+            opening = position + match.end() - 1
+            end = delimiter_end(body, opening, "(", ")")
+            question = end
+            while question < len(body) and body[question].isspace():
+                question += 1
+            if body[question:question + 1] == "?":
+                lifted = "propagate!(" + body[start:end] + ")"
+                body = body[:start] + lifted + body[question + 1:]
+                position = start + len(lifted)
+            else:
+                position = end
+    return body
+
+
+def protocol_string(name):
+    source = (ROOT / "crates/contracts-model/src/protocol.rs").read_text()
+    values = re.findall(rf'pub const {name}: &str = ("[^"\\]*");', source)
+    if len(values) != 1:
+        raise SystemExit(f"expected explicit protocol string: {name}")
+    return values[0] + "@"
+
+
+def contract_values(body):
+    constants = {
+        "authority_contracts_model::protocol::CONTRACT_VERSION_V1": "version_v1()",
+        "CREDENTIAL_ISSUER_AUDIENCE": "credential_audience()",
+        "NODE_AGENT_AUDIENCE": "node_audience()",
+        "NETWORK_AGENT_AUDIENCE": "network_audience()",
+    }
+    for native, logical in constants.items():
+        body = body.replace(native, logical)
+    nonce = '''format!("{}_mtls_{}", common.decision_id, audience.replace('-', "_"))'''
+    body = body.replace(nonce, "mtls_nonce(common.decision_id, audience)")
+    body = body.replace("authority_contracts_model::TcpAccessGrantV1", "TcpAccessGrantV1")
+    body = body.replace(".clone()", "").replace(".to_owned()", "")
+    body = body.replace("&common.decision_id", "common.decision_id")
+    body = body.replace("&request.terminal_token_hash", "request.terminal_token_hash")
+    # Only these known Option conversions are lifted. Any new unsupported '?'
+    # path remains visible and fails proof-mode compilation, rather than skipped.
+    body = re.sub(r"projection_expiry\(common\.issued_at, (ttl|ttl_seconds)\)\s*"
+        r"\.ok_or\(ProjectionError::InvalidLifetime\)\?",
+        r"require_some!(expiry_spec(common.issued_at, \1), ProjectionError::InvalidLifetime)", body)
+    body = re.sub(r'(inputs\s*\.\s*(?:ssh|mtls|tcp|network))\s*\.ok_or\(ProjectionError::MissingInput\("(\w+)"\)\)\?',
+        r'require_some!(\1, ProjectionError::MissingInput("\2".view()))', body)
+    body = re.sub(r"(\b\w+)\.validate\(\)\?", r"propagate!(\1.validate())", body)
+    return result_calls(body, ["ssh_contract", "mtls_contract", "project_network", "project_tcp"])
+
+
+def constructors_source():
+    library = (ROOT / "crates/projection-core/src/lib.rs").read_text()
+    contract_files = [ROOT / "crates/contracts-model/src/lib.rs", ROOT / "crates/contracts-model/src/tcp.rs"]
+    names = ["IssuanceAuthorizationV1", "MtlsIssuanceAuthorizationV1", "NetworkAccessGrantV1", "TcpAccessGrantV1"]
+    declarations = []
+    for name in names:
+        source = next(path.read_text() for path in contract_files if f"pub struct {name} {{" in path.read_text())
+        common_fields = ["version", "issuer", "domain_id", "subject_user_id", "device_id", "target_node_id", "policy_id", "issued_at", "not_before", "expires_at", "audience"]
+        extras = {
+            "IssuanceAuthorizationV1": ["ssh_public_key_fingerprint", "principals", "nonce"],
+            "MtlsIssuanceAuthorizationV1": ["client_spki_sha256", "identity_uri", "service_audience", "decision_id", "nonce"],
+            "NetworkAccessGrantV1": ["wireguard_public_key", "mesh_address", "nonce"],
+            "TcpAccessGrantV1": ["source_address", "destination_address", "destination_ports", "decision_id"],
+        }
+        fields = {field: ("i64" if field in ["issued_at", "not_before", "expires_at"] else
+            "Vec<String>" if field == "principals" else "Vec<u16>" if field == "destination_ports" else "String")
+            for field in common_fields + extras[name]}
+        declarations.append(checked_declaration(source, name, fields))
+    replacements = {"PRODUCTION_CONTRACT_TYPES": "\n\n".join(declarations)}
+    for name in ["ssh_contract", "mtls_contract", "project_network", "project_tcp"]:
+        _, body = block(library, f"fn {name}(")
+        replacements[f"PRODUCTION_{name.upper()}"] = contract_values(body)
+    for name in ["CONTRACT_VERSION_V1", "CREDENTIAL_ISSUER_AUDIENCE", "NODE_AGENT_AUDIENCE", "NETWORK_AGENT_AUDIENCE"]:
+        replacements[name] = protocol_string(name)
+    template = (ROOT / "formal/verus/constructors.rs").read_text()
+    # The previous units are checked again here so no theorem is imported via an
+    # unchecked external specification. All shared definitions keep the same name.
+    return projection_source() + expiry_source().replace("use vstd::prelude::*;\n", "", 1) + inject(template, replacements)
+
+
+def selected_source():
+    source = (ROOT / "crates/projection-core/src/selection.rs").read_text()
+    topology = (ROOT / "crates/policy-core/src/realization.rs").read_text()
+    planner = (ROOT / "crates/planning-core/src/lib.rs").read_text()
+    declarations = []
+    declaration, _ = block(topology, "pub enum AccessMechanism {")
+    declaration = re.sub(r"^\s*#\[serde\([^\n]*\)\]\n", "\n", declaration, flags=re.MULTILINE)
+    declarations.append(declaration)
+    declaration, _ = block(planner, "pub struct Plan<A, M> {")
+    declaration = declaration.replace("Plan<A, M>", "AccessPlan")
+    declaration = re.sub(r"\bA\b", "Ability", declaration)
+    declaration = re.sub(r"\bM\b", "AccessMechanism", declaration)
+    declarations.append(value_types(declaration).replace("Vec<", "Seq<"))
+    declaration, _ = block(source, "pub struct ProjectionInputs<'a> {")
+    declaration = declaration.replace("<'a>", "").replace("&'a ", "")
+    declarations.append(declaration)
+    if not re.search(r"#\[derive\([^]]*\bDefault\b[^]]*\)\]\s*pub struct SelectedProjections", source) or "impl Default for SelectedProjections" in source:
+        raise SystemExit("SelectedProjections must use field-derived Default; update proof if changed")
+    selected_fields = {"ssh_issuance": "Option<IssuanceAuthorizationV1>", "ssh_node_install": "Option<IssuanceAuthorizationV1>",
+        "network_grant": "Option<NetworkAccessGrantV1>", "mtls_issuance": "Option<MtlsIssuanceAuthorizationV1>",
+        "mtls_node_install": "Option<MtlsIssuanceAuthorizationV1>", "tcp_grant": "Option<TcpAccessGrantV1>"}
+    declarations.append(checked_declaration(source, "SelectedProjections", selected_fields))
+    _, body = block(source, "pub fn project_plan(")
+    prefix = re.match(r"\s*let mut result = SelectedProjections::default\(\);\s*for mechanism in &plan.mechanisms\s*\{", body)
+    if not prefix:
+        raise SystemExit("projection loop initialization changed; update proof extraction")
+    opening = prefix.end() - 1
+    end = delimiter_end(body, opening)
+    if body[end:].strip() != "Ok(result)":
+        raise SystemExit("projection return boundary changed; update proof extraction")
+    loop = contract_values(body[opening + 1:end - 1])
+    return constructors_source() + inject((ROOT / "formal/verus/selected.rs").read_text(), {
+        "PRODUCTION_SELECTED_TYPES": "\n\n".join(declarations),
+        "PRODUCTION_SELECTED_LOOP": loop,
+    })
+
+
+def authorized_source():
+    policy = (ROOT / "crates/policy-core/src/scoped.rs").read_text()
+    _, accessors = block(policy, "impl AuthorizedPlan {")
+    getters = {
+        "pub const fn binding(&self) -> AccessBinding {": "self.binding",
+        "pub const fn issued_at(&self) -> i64 {": "self.issued_at",
+        "pub fn policy_reference(&self) -> &str {": "&self.policy_reference",
+        "pub const fn realization(&self) -> &Plan<ScopedAbility, AccessMechanism> {": "&self.realization",
+    }
+    for signature, expected in getters.items():
+        if block(accessors, signature)[1].strip() != expected:
+            raise SystemExit(f"AuthorizedPlan accessor changed: {signature}")
+    source = (ROOT / "crates/projection-core/src/scoped.rs").read_text()
+    _, body = block(source, "pub fn project_authorized(")
+    initialization = "let (mut ssh, mut mtls, mut network, mut tcp) = (None, None, None, None);"
+    if body.count(initialization) != 1:
+        raise SystemExit("authorized input initialization changed; update source proof")
+    guard, rest = body.split(initialization)
+    header = re.match(r"\s*for ability in &plan.realization\(\).abilities\s*\{", rest)
+    if not header:
+        raise SystemExit("authorized ability iteration changed; update source proof")
+    opening = header.end() - 1
+    end = delimiter_end(rest, opening)
+    loop = rest[opening + 1:end - 1]
+    loop = re.sub(r"authority_contracts_model::protocol::lifetime_seconds\(\s*common.issued_at,\s*ability.validity.expires_at,?\s*\)\s*"
+        r"\.ok_or\(ProjectionError::InvalidLifetime\)\?",
+        "require_some!(lifetime_spec(common.issued_at, ability.validity.expires_at), ProjectionError::InvalidLifetime)", loop)
+    loop = loop.replace("project_scope(&ability.scope)", "project_scope(ability.scope)")
+    tail = rest[end:]
+    literal, _ = block(tail, "ProjectionInputs {")
+    normalized = re.sub(r"(ssh|mtls|network|tcp)\.as_ref\(\)\.map\(\|\(input, ttl\)\| \(input, \*ttl\)\)", r"\1", literal)
+    expected = "ProjectionInputs{ssh:ssh,mtls:mtls,network:network,tcp:tcp,}"
+    if re.sub(r"\s+", "", normalized) != expected:
+        raise SystemExit("authorized input assembly changed; update source proof")
+    tail = tail.replace(literal, "inputs").replace("&selection", "selection").replace(".clone()", "")
+    tail = re.sub(r"plan\s*\.realization\(\)\s*\.abilities\s*\.iter\(\)\s*\.map\(\|ability\| ability.scope.kind\(\)\)\s*\.collect\(\)",
+        "plan.realization().abilities.map(|ability: ScopedAbility| ability.scope.kind())", tail)
+    selection, _ = block(tail, "AccessPlan {")
+    if tail[:tail.index(selection)].strip() != "let selection =":
+        raise SystemExit("authorized selection initialization changed")
+    final_call = tail[tail.index(selection) + len(selection):].strip()
+    if not final_call.startswith(";"):
+        raise SystemExit("authorized selection terminator changed")
+    final_call = final_call[1:].strip()
+    guard = re.sub(r"binding\.(domain_id|subject_user_id|device_id|target_node_id)\.to_string\(\)",
+        r"uuid_text(binding.\1)", guard)
+    guard = guard.replace("authority_contracts_model::protocol::domain_issuer", "domain_issuer")
+    template = (ROOT / "formal/verus/authorized.rs").read_text()
+    return selected_source() + inject(template, {
+        "PRODUCTION_AUTHORIZED_GUARD": guard,
+        "PRODUCTION_GATHER_STEP": loop,
+        "PRODUCTION_AUTHORIZED_SELECTION": "let selection = " + selection + ";",
+        "PRODUCTION_AUTHORIZED_CALL": final_call,
     })

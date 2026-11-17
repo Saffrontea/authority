@@ -12,7 +12,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-from verus_sources import scopes_source, expiry_source, projection_source
+from verus_sources import scopes_source, expiry_source, projection_source, authorized_source
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.2026.11.02.8bf68ee"
@@ -135,6 +135,8 @@ def main():
     verify(binary, env, "production_scopes", scopes, minimum=7)
     verify(binary, env, "production_expiry", expiry, minimum=8)
     verify(binary, env, "production_projection", projection, minimum=9)
+    pipeline = authorized_source()
+    verify(binary, env, "production_contract_pipeline", pipeline, minimum=33)
     if args.mutations:
         mutations = [
             ("widened_deadline", validity, "other.expires_at <= self.expires_at", "other.expires_at >= self.expires_at"),
@@ -148,6 +150,15 @@ def main():
             ("rebound_projection_domain", projection, "common.domain_id != uuid_text(binding.domain_id)", "false"),
             ("wrong_tcp_source", projection, "source_address: ip_text(source),", "source_address: ip_text(destination),"),
             ("wrong_ssh_key", projection, "public_key_fingerprint: public_key_fingerprint,", "public_key_fingerprint: terminal_token_hash,"),
+            ("wrong_contract_tcp_ports", pipeline, "destination_ports: tcp.destination_ports,", "destination_ports: Seq::empty(),"),
+            ("wrong_contract_endpoint", pipeline, "source_address: tcp.source_address,", "source_address: tcp.destination_address,"),
+            ("wrong_wireguard_audience", pipeline, "audience: node_audience(),", "audience: network_audience(),"),
+            ("wrong_terminal_nonce", pipeline, "nonce: nonce,", "nonce: common.decision_id,"),
+            ("wrong_mtls_identity", pipeline, "identity_uri: mtls.identity_uri,", "identity_uri: mtls.service_audience,"),
+            ("omitted_ssh_install", pipeline, "result.ssh_node_install = Some(install);", "result.ssh_node_install = None;"),
+            ("unselected_wireguard", pipeline, "AccessMechanism::NetworkRoute => {}",
+                'AccessMechanism::NetworkRoute => { let (request, ttl) = require_some!(inputs.network, ProjectionError::MissingInput("network".view())); result.network_grant = Some(propagate!(project_network(common, request, ttl))); }'),
+            ("narrowed_collected_tcp_ttl", pipeline, "ScopeProjection::Tcp(request) => tcp = Some((request, ttl)),", "ScopeProjection::Tcp(request) => tcp = Some((request, 1)),"),
         ]
         for name, source, before, after in mutations:
             if source.count(before) != 1:

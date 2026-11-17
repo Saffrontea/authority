@@ -4,15 +4,16 @@ This work tracks the full verification target; a passing model is not a proof of
 all production code. Verus now proves the abstract solver and directly checks the
 production TTL containment and checked-lifetime predicates. Source-derived value
 models also cover all scope variants, binding checks and projection material. The
-concrete BFS, standard-library representation internals and full projection pipeline
-are not yet universally proved. Each row identifies both current evidence
-and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
+concrete BFS, private plan-factory invariant and standard-library/encoding
+representation internals are not yet universally proved. The source-derived
+projection pipeline is now proved conditional on its stated input invariant.
+Each row identifies both current evidence and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Verus least-closure, selected-set equivalence, execution/layer correspondence and shortest-search theorems; independent PBT oracle against real `solve` | Concrete closure-loop termination, BFS queue/visited/budget refinement and deterministic tie-breaking proof |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
-| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Source-derived material-field and common-binding proofs; actual checked arithmetic kernels and inverse theorem; production projection and contract timestamp PBT | Final contract-constructor and mechanism-selection loop proofs; wire encoding/consumer correspondence |
+| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Source-derived constructor, selection-fold, collection and final scope-origin proofs; checked arithmetic kernels; generated native mechanism and factory PBT | Universal discharge of the private plan-factory invariant; wire/consumer and representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters, plus safety and liveness mutations | Expiry, receiver restart and kernel failure/recovery model; trace correspondence with actual HTTP/DB/adapters |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; durable ledger, all-scope authority and contract-time PBT | Generated end-to-end action traces compared with the formal transition model |
 
@@ -54,15 +55,19 @@ These existing E2E scenarios do not yet constitute model-based generated traces.
 `mise run verification:verus` checks the solver, direct-source TTL/checked-arithmetic
 kernels, and source-derived scope/projection value models. Reported counts are 20
 for the solver, four for direct TTL containment, seven for scopes, eight for
-checked lifetimes, and nine for projection (which rechecks the seven scope
-obligations). Counts include verifier-generated obligations and are not a count
-of independent end-to-end guarantees.
+checked lifetimes, nine for material projection (which rechecks the seven scope
+obligations), and 33 for the conditional complete projection pipeline (which
+rechecks shared scope/material/lifetime obligations). Counts include generated
+obligations and are not a count of independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for eleven
+`mise run verification:verus:mutations` also requires proof failures for nineteen
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a
-projection domain, substituting a TCP source, and substituting an SSH key. These
+projection domain, substituting a TCP source, and substituting an SSH key. Pipeline
+mutations additionally corrupt final TCP ports/endpoints, the WireGuard audience,
+terminal nonce and mTLS identity; omit the SSH install contract; emit an unselected
+WireGuard grant; or replace the approved TCP lifetime while collecting inputs. These
 mutations must produce verifier errors, rather than merely parse failures. The
 combined gate includes these checks. Own proof files may not introduce `assume`,
 `admit`, or unchecked external bodies/specifications.
@@ -131,13 +136,60 @@ IPv4/UUID/domain string encoders are opaque functions, with no injectivity axiom
 field equality is to the exact approved value's encoding. Native field assertions
 and E2E cover the real encoders, while a universal encoding/refinement proof remains.
 
-These material-field and lifetime proofs are not yet a proof of the final four
-contract constructors, the mechanism-selection loop, byte serialization, signature
-verification or adapter consumption. Existing production projection PBT checks
-final contracts, and `time_properties.rs` compares all four contract validators
-with a mathematical integer-time oracle, including `i64::MIN`/`i64::MAX`. Missing
-pipeline refinements remain separate obligations, rather than being inferred
-from the local proofs.
+`formal/verus/constructors.rs` lifts the complete bodies of `ssh_contract`,
+`mtls_contract`, `project_network` and `project_tcp`. An independent common-binding
+specification requires version, issuer, domain, user, device, target, policy and
+all validity fields to agree, as well as each adapter's material, nonce and
+audience. The mathematical models of String/Vec cloning preserve values. Rust
+`Result`/`Option` propagation is translated to explicit early-return matches;
+unknown unsupported propagation paths remain visible and fail verification.
+Native protocol constants are read from production source. The mTLS nonce encoder
+is opaque, like IP/UUID encoders, without injectivity or collision assumptions.
+
+Contract validation is modeled as an arbitrary predicate for each complete
+contract. Proof-mode validation returns success exactly when that predicate holds,
+without assuming success. Therefore a successful return must preserve all fields
+regardless of the validator's decision. This is a constructor-consistency proof,
+not a proof of every validator or the cryptographic verifier. Actual timestamp
+validators retain their independent PBT against integer arithmetic.
+
+`formal/verus/selected.rs` checks the entire production mechanism-match body as a
+state transition and proves its ordered fold by induction over every finite
+mechanism sequence, including empty sequences, duplicates and arbitrary order.
+Exactly selected adapter kinds have output contracts; SSH/mTLS issue/install
+pairs preserve their distinct nonces/audiences. Unselected inputs need not exist
+or have valid lifetimes. The source adapter checks the exact derived-Default
+initialization, Vec iteration and final Result boundary. It uses a recursive proof
+of the same fold, rather than a Verus proof-mode loop. Early failures return an
+error, never a partial `SelectedProjections` value.
+
+`formal/verus/authorized.rs` connects the common-binding guard, complete ability
+collection body, actual selection record, input assembly and final call. Every
+successfully returned contract has an origin witness in the approved ability set:
+its material and full interval equal that ability's approved scope/interval; SSH
+installation also retains its authorized terminal-token hash. No union of multiple
+ability scopes is substituted for one authorization. Each output still satisfies
+the complete common-binding/selection predicates. BTreeSet enumeration is a finite
+sequence with the same members; the proof works for any such order. The production
+accessors must remain their exact identity-field reads or extraction fails.
+
+The final theorem explicitly requires `plan_bindings_valid`: the plan's issuance
+time is nonnegative, and every realized ability carries the plan's binding and
+start time. This is the intended invariant of the private `AuthorizedPlan`
+factory, **not yet a universally discharged theorem of that factory**. Native
+factory PBT checks it through successful `evaluate_scoped` and `project_authorized`
+for independent SSH/mTLS/network lifetimes. `selected_agrees` is independently
+checked against native `project_plan` with generated mechanism sequences, missing
+input masks, invalid/overflowing lifetimes, output presence, metadata and adapter
+fields. This provides implementation correspondence evidence, not a proof of the
+source adapter/compiler transformation or every producer of the invariant.
+
+Contract/request declaration fields are checked against explicit supported layouts;
+adding authority fields requires extending the specifications. Source adapter tests
+cover nested call arguments and Result propagation, schema drift, source-injection
+boundaries and presence of complete constructor/collection/selection code. The
+pipeline proof does not cover byte serialization, signature verification, encoder
+injectivity or adapter consumption. Those remain separate correspondence work.
 
 `formal/verus/solver.rs` is an unbounded mathematical model, using arbitrary
 scoped-ability labels and a finite catalog with unique positional IDs. It proves:

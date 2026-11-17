@@ -1,6 +1,7 @@
 """Source extraction is part of the proof boundary, so test it independently."""
 import unittest
-from verus_sources import block, inject, scopes_source, projection_source
+from verus_sources import (block, inject, scopes_source, projection_source, checked_declaration,
+                           contract_values, result_calls, authorized_source)
 
 
 class SourceExtraction(unittest.TestCase):
@@ -30,6 +31,28 @@ class SourceExtraction(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 inject(source, {"TARGET": "expression"})
         self.assertEqual(inject('/* TARGET */', {"TARGET": "expression"}), "expression")
+
+    def test_result_propagation_keeps_nested_arguments_and_unknown_paths(self):
+        source = 'let value = project_tcp(common, tuple(")?", nested(1)))?; next();'
+        lifted = result_calls(source, ["project_tcp"])
+        self.assertEqual(lifted, 'let value = propagate!(project_tcp(common, tuple(")?", nested(1)))); next();')
+        self.assertEqual(result_calls("unknown()?;", ["project_tcp"]), "unknown()?;")
+        self.assertIn('require_some!', contract_values('inputs\n .tcp.ok_or(ProjectionError::MissingInput("tcp"))?'))
+
+    def test_new_or_changed_contract_authority_fields_fail_closed(self):
+        original = "pub struct C {\n    pub key: String,\n}"
+        self.assertIn("Seq<char>", checked_declaration(original, "C", {"key": "String"}))
+        for changed in [original.replace("String", "u128"), original.replace("\n}", "\n    pub can_delegate: bool,\n}")]:
+            with self.assertRaises(SystemExit):
+                checked_declaration(changed, "C", {"key": "String"})
+
+    def test_full_pipeline_contains_constructor_collection_and_selection_code(self):
+        pipeline = authorized_source()
+        for text in ["nonce: nonce", "destination_ports: tcp.destination_ports", "result.ssh_node_install = Some(install)",
+                     "ScopeProjection::Tcp(request) => tcp = Some((request, ttl))", "plan.realization().mechanisms"]:
+            self.assertIn(text, pipeline)
+        self.assertNotIn("/* PRODUCTION_", pipeline)
+        self.assertIn("requires plan_bindings_valid(plan)", pipeline)
 
     def test_source_correspondence_includes_material_and_binding_guards(self):
         scope = scopes_source()

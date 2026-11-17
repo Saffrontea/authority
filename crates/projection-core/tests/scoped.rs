@@ -299,3 +299,35 @@ proptest::proptest! {
         prop_assert!(matches!(project_authorized(&rebound, &plan), Err(ProjectionError::ScopeMismatch)));
     }
 }
+
+proptest::proptest! {
+    #[test]
+    fn private_plan_factory_supplies_pipeline_invariant_and_exact_expiries(
+        ssh_ttl in 1_i64..=60, mtls_ttl in 1_i64..=300, network_ttl in 1_i64..=300,
+    ) {
+        use proptest::prelude::*;
+        let requested = RequestedAccess {
+            ssh: Some(RequestedSsh {
+                public_key_fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+                principals: None, terminal_token_hash: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(), ttl_seconds: ssh_ttl,
+            }),
+            mtls: Some(RequestedMtls { client_spki_sha256: "SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC".into(), ttl_seconds: mtls_ttl }),
+            network: Some(RequestedNetwork { wireguard_public_key: None, ttl_seconds: network_ttl }),
+            ..RequestedAccess::default()
+        };
+        let (plan, common) = authorize(AccessIntent::infrastructure(Route::MeshRequired), &requested);
+        prop_assert!(plan.issued_at() >= 0);
+        for ability in &plan.realization().abilities {
+            prop_assert_eq!(ability.binding, plan.binding());
+            prop_assert_eq!(ability.validity.not_before, plan.issued_at());
+        }
+        let output = project_authorized(&common, &plan).unwrap();
+        let ssh = output.ssh_issuance.unwrap();
+        prop_assert_eq!(ssh.expires_at, common.issued_at + ssh_ttl);
+        prop_assert_eq!(output.ssh_node_install.unwrap().nonce, requested.ssh.unwrap().terminal_token_hash);
+        prop_assert_eq!(output.network_grant.unwrap().expires_at, common.issued_at + network_ttl);
+        prop_assert_eq!(output.mtls_issuance.unwrap().expires_at, common.issued_at + mtls_ttl);
+        prop_assert_eq!(output.mtls_node_install.unwrap().expires_at, common.issued_at + mtls_ttl);
+        prop_assert!(output.tcp_grant.is_none());
+    }
+}
