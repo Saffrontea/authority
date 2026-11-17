@@ -20,6 +20,9 @@
     },
     "0007_decision_revocation_notices.sql": {
       "sha256": "b2a17b5c8a951d4c7d7e082fa562948ec514a68c91bf1cdc912bd1950657f25b"
+    },
+    "0008_tcp_admission.sql": {
+      "sha256": "7bfbe876aca9fe03b15b672ddd1cd6a1bec2ca7d5f4151033b0d3e42461f622e"
     }
   }
 }

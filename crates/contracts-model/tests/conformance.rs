@@ -1,9 +1,9 @@
 use std::{fs, path::Path};
 
 use authority_contracts_model::{
-    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
-    PolicyDecisionEvaluatedV1, SignedDecisionRevocationNoticeV1, SignedIssuanceAuthorizationV1,
-    SignedNetworkAccessGrantV1,
+    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1,
+    NetworkAccessGrantV1, PolicyDecisionEvaluatedV1, SignedDecisionRevocationNoticeV1,
+    SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 
 #[test]
@@ -23,6 +23,48 @@ fn valid_vectors_conform_and_have_stable_preimages() {
             encode_hex(&first),
             golden.trim(),
             "signing preimage changed for {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn mtls_authorization_vectors_conform() {
+    for path in contract_vectors("mtls-issuance-authorization-v1", "valid") {
+        let value: MtlsIssuanceAuthorizationV1 =
+            serde_json::from_slice(&fs::read(&path).expect("read vector"))
+                .expect("deserialize mTLS authorization");
+        value.validate().expect("validate mTLS authorization");
+    }
+    for path in contract_vectors("mtls-issuance-authorization-v1", "invalid") {
+        let rejected = serde_json::from_slice::<MtlsIssuanceAuthorizationV1>(
+            &fs::read(&path).expect("read vector"),
+        )
+        .map_or(true, |value| value.validate().is_err());
+        assert!(
+            rejected,
+            "invalid mTLS authorization accepted: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn common_revocation_vectors_conform() {
+    for path in contract_vectors("signed-decision-revocation-notice-v2", "valid") {
+        let value: SignedDecisionRevocationNoticeV2 =
+            serde_json::from_slice(&fs::read(&path).expect("read vector"))
+                .expect("deserialize common revocation");
+        value.validate().expect("validate common revocation");
+    }
+    for path in contract_vectors("signed-decision-revocation-notice-v2", "invalid") {
+        let rejected = serde_json::from_slice::<SignedDecisionRevocationNoticeV2>(
+            &fs::read(&path).expect("read vector"),
+        )
+        .map_or(true, |value| value.validate().is_err());
+        assert!(
+            rejected,
+            "invalid common revocation accepted: {}",
             path.display()
         );
     }
@@ -227,4 +269,40 @@ fn envelope_vectors(kind: &str) -> Vec<std::path::PathBuf> {
     paths.sort();
     assert!(!paths.is_empty(), "envelope vector set must not be empty");
     paths
+}
+
+#[test]
+fn tcp_grant_vectors_conform_and_preserve_preimages() {
+    use authority_contracts_model::{SignedTcpAccessGrantV1, TcpAccessGrantV1};
+    for path in contract_vectors("tcp-access-grant-v1", "valid") {
+        let grant: TcpAccessGrantV1 = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let preimage = grant.signing_preimage().unwrap();
+        assert_eq!(
+            encode_hex(&preimage),
+            fs::read_to_string(path.with_extension("preimage.hex"))
+                .unwrap()
+                .trim()
+        );
+    }
+    for path in contract_vectors("signed-tcp-access-grant-v1", "valid") {
+        let grant: SignedTcpAccessGrantV1 =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        grant.validate().unwrap();
+    }
+    for path in contract_vectors("tcp-access-grant-v1", "invalid") {
+        assert!(
+            serde_json::from_slice::<TcpAccessGrantV1>(&fs::read(&path).unwrap())
+                .map_or(true, |grant| grant.validate().is_err()),
+            "{}",
+            path.display()
+        );
+    }
+    for path in contract_vectors("signed-tcp-access-grant-v1", "invalid") {
+        assert!(
+            serde_json::from_slice::<SignedTcpAccessGrantV1>(&fs::read(&path).unwrap())
+                .map_or(true, |grant| grant.validate().is_err()),
+            "{}",
+            path.display()
+        );
+    }
 }

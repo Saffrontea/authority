@@ -260,3 +260,11 @@ run = "./scripts/run-poc-e2e.sh"
 description = "Run contract checks and all Rust tests"
 depends = ["contracts:check", "migrations:check", "ca:test"]
 run = "cargo test --workspace"
+
+[tasks."mesh:tcp-demo:install"]
+description = "Install two TCP echo services and mesh proxies for E2E"
+run = "./scripts/authority-agent.sh run _mesh:tcp-demo-install"
+
+[tasks."_mesh:tcp-demo-install"]
+description = "Internal: install TCP admission E2E services"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh tcp-demo-install"

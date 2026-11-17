@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/signed-decision-revocation-notice-v2.schema.json",
+  "title": "SignedDecisionRevocationNoticeV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "notice",
+    "algorithm",
+    "key_id",
+    "signature"
+  ],
+  "properties": {
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "issuer",
+        "domain_id",
+        "target_node_id",
+        "decision_id",
+        "reason",
+        "sequence",
+        "revoked_at",
+        "expires_at",
+        "adapter_kinds"
+      ],
+      "properties": {
+        "version": {
+          "const": "2"
+        },
+        "issuer": {
+          "$ref": "#/$defs/identifier"
+        },
+        "domain_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_node_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "decision_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revoked_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "adapter_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ssh.certificate",
+              "ssh.session",
+              "wireguard.peer",
+              "mtls.client_certificate",
+              "tcp.port"
+            ]
+          }
+        }
+      }
+    },
+    "algorithm": {
+      "const": "Ed25519"
+    },
+    "key_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 80,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    }
+  }
+}

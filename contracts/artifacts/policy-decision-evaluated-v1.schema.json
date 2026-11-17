@@ -20,22 +20,45 @@
     "intent": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["outcomes", "route"],
+      "required": [
+        "outcomes",
+        "route"
+      ],
       "properties": {
         "outcomes": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "enum": ["ssh", "network.reachability"] }
+          "items": {
+            "enum": [
+              "ssh",
+              "network.reachability",
+              "mtls.service",
+              "tcp.connect"
+            ]
+          }
         },
-        "route": { "enum": ["direct", "mesh_required"] }
+        "route": {
+          "enum": [
+            "direct",
+            "mesh_required"
+          ]
+        }
       }
     },
     "required_capabilities": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "enum": ["ssh.issue", "mesh.join", "network.reach"] }
+      "items": {
+        "enum": [
+          "ssh.issue",
+          "mesh.join",
+          "network.reach",
+          "mtls.issue",
+          "tcp.connect"
+        ]
+      }
     },
     "policy_sources": {
       "type": "array",
@@ -43,11 +66,29 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["capability", "policy_id", "revision"],
+        "required": [
+          "capability",
+          "policy_id",
+          "revision"
+        ],
         "properties": {
-          "capability": { "enum": ["ssh.issue", "mesh.join", "network.reach"] },
-          "policy_id": { "type": "string", "format": "uuid" },
-          "revision": { "type": "integer", "minimum": 1 }
+          "capability": {
+            "enum": [
+              "ssh.issue",
+              "mesh.join",
+              "network.reach",
+              "mtls.issue",
+              "tcp.connect"
+            ]
+          },
+          "policy_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     },
@@ -57,11 +98,30 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["kind", "audience", "expires_at"],
+        "required": [
+          "kind",
+          "audience",
+          "expires_at"
+        ],
         "properties": {
-          "kind": { "enum": ["ssh.certificate", "wireguard.peer", "ssh.session"] },
-          "audience": { "type": "string", "minLength": 1, "maxLength": 128 },
-          "expires_at": { "type": "integer", "minimum": 1 }
+          "kind": {
+            "enum": [
+              "ssh.certificate",
+              "wireguard.peer",
+              "ssh.session",
+              "mtls.client_certificate",
+              "tcp.port"
+            ]
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "expires_at": {
+            "type": "integer",
+            "minimum": 1
+          }
         }
       }
     }

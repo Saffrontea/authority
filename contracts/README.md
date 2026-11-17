@@ -30,3 +30,9 @@ scoped signed projection, so neither consumer gains authority over the other.
 decision, target node, reason, monotonic sequence, audience, and retention
 window. Push delivery and Pull reconciliation carry the identical envelope;
 consumers must therefore apply it idempotently.
+
+`MtlsIssuanceAuthorizationV1` is a third projection of the same policy
+decision. It binds the client SPKI digest, SPIFFE identity, service audience,
+target and decision ID. `SignedDecisionRevocationNoticeV2` replaces the
+protocol-specific audience with an explicit adapter set, allowing one signed
+notice to be verified independently by WireGuard and mTLS consumers.

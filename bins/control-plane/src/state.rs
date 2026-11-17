@@ -34,6 +34,7 @@ pub struct EnrollmentConfig {
     pub target_identity_file: PathBuf,
     pub client_wireguard_public_key: String,
     pub network_agent_origin: String,
+    pub target_mesh_address: String,
 }
 
 pub struct PendingRegistration {
@@ -104,6 +105,10 @@ impl AppState {
 
     pub fn client_wireguard_public_key(&self) -> &str {
         &self.0.enrollment.client_wireguard_public_key
+    }
+
+    pub fn target_mesh_address(&self) -> &str {
+        &self.0.enrollment.target_mesh_address
     }
 
     pub fn network_agent_origin(&self) -> &str {

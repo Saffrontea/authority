@@ -350,6 +350,11 @@ CONTAINER_SCRIPT
   as_root install -m 0644 "${CONTROL_PLANE_PUBLIC_KEY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-control-plane.pub.pem"
   as_root install -m 0644 "${trusted_ca_file}" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-ssh-ca.pub"
   attach "${TARGET_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+if ! command -v nft >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends nftables
+fi
 if ! command -v sshd >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
@@ -395,6 +400,13 @@ systemctl daemon-reload
 systemctl enable authority-network-agent.service >/dev/null
 systemctl restart authority-network-agent.service
 CONTAINER_SCRIPT
+  # The agent clears target peers on startup. Reset the PoC client's cached
+  # WireGuard session as well so its next authorized connection handshakes
+  # immediately instead of reusing keys that the target has discarded.
+  attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+wg-quick down wg0
+wg-quick up wg0
+CONTAINER_SCRIPT
   client_underlay="$(container_ip "${CLIENT_NAME}")"
   target_underlay="$(container_ip "${TARGET_NAME}")"
   target_host_key="$(attach "${TARGET_NAME}" cat /etc/ssh/ssh_host_ed25519_key.pub)"
@@ -407,6 +419,79 @@ CONTAINER_SCRIPT
   log "network-agent=http://${target_underlay}:3003 ssh-mesh-proxy=${client_underlay}:2222"
 }
 
+install_tcp_demo() {
+  attach "${TARGET_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+if ! command -v python3 >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends python3
+fi
+id authority-tcp-demo >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin authority-tcp-demo
+install -d /usr/local/lib/authority
+cat > /usr/local/lib/authority/tcp-demo.py <<'PYTHON'
+import socketserver
+import threading
+
+class Echo(socketserver.BaseRequestHandler):
+    def handle(self):
+        while chunk := self.request.recv(4096):
+            self.request.sendall(chunk)
+
+class Server(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+for port in (8080, 8081):
+    server = Server(('10.77.0.2', port), Echo)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+threading.Event().wait()
+PYTHON
+cat > /etc/systemd/system/authority-tcp-demo.service <<'UNIT'
+[Unit]
+Description=Authority TCP E2E echo services
+After=wg-quick@wg0.service
+Requires=wg-quick@wg0.service
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/authority/tcp-demo.py
+User=authority-tcp-demo
+Group=authority-tcp-demo
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable authority-tcp-demo.service
+systemctl reset-failed authority-tcp-demo.service
+systemctl restart authority-tcp-demo.service
+CONTAINER_SCRIPT
+  attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+systemctl stop authority-tcp-demo-2223.service authority-tcp-demo-2224.service authority-tcp-demo-2223.socket authority-tcp-demo-2224.socket >/dev/null 2>&1 || true
+for pair in 2223:8080 2224:8081; do
+  listen=${pair%:*}
+  target=${pair#*:}
+  cat > "/etc/systemd/system/authority-tcp-demo-${listen}.socket" <<UNIT
+[Unit]
+Description=Authority TCP E2E mesh entry
+After=wg-quick@wg0.service
+[Socket]
+ListenStream=${listen}
+Accept=no
+[Install]
+WantedBy=sockets.target
+UNIT
+  cat > "/etc/systemd/system/authority-tcp-demo-${listen}.service" <<UNIT
+[Unit]
+Description=Authority TCP E2E proxy
+After=wg-quick@wg0.service
+[Service]
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd 10.77.0.2:${target}
+UNIT
+done
+systemctl daemon-reload
+systemctl restart authority-tcp-demo-2223.socket authority-tcp-demo-2224.socket
+CONTAINER_SCRIPT
+}
+
 network_agent_status() {
   local target_underlay
   target_underlay="$(container_ip "${TARGET_NAME}")"
@@ -414,6 +499,11 @@ network_agent_status() {
   attach "${CLIENT_NAME}" journalctl --no-pager -n 20 -u authority-ssh-mesh-proxy.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status authority-network-agent.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status ssh.service || true
+  attach "${TARGET_NAME}" nft list table inet authority_tcp || true
+  attach "${TARGET_NAME}" ss -lnt || true
+  attach "${CLIENT_NAME}" ip route get 10.77.0.2 || true
+  attach "${TARGET_NAME}" systemctl --no-pager --full status authority-tcp-demo.service || true
+  attach "${CLIENT_NAME}" systemctl --no-pager --full status authority-tcp-demo-2223.socket authority-tcp-demo-2223.service || true
   log "network-agent=http://${target_underlay}:3003"
 }
 
@@ -467,6 +557,7 @@ main() {
     verify) verify_mesh ;;
     agent-install) install_network_agent ;;
     agent-status) network_agent_status ;;
+    tcp-demo-install) install_tcp_demo ;;
     stop) stop_containers ;;
     destroy) destroy_containers ;;
     help | --help | -h) usage ;;

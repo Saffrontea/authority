@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod mtls_ca;
 mod ssh_ca;
 mod state;
 
@@ -31,6 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let initial_serial = now << 20;
     let state = AppState::new(verifier, ca_key, replay_ledger, initial_serial);
+    state.install_mtls_ca(mtls_ca::load_or_generate(
+        &config.mtls_ca_key_file,
+        &config.mtls_ca_certificate_file,
+    )?)?;
     spawn_ca_reload(state.clone(), config.ssh_ca_key_file.clone())?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 

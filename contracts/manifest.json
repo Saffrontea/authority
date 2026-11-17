@@ -1,5 +1,13 @@
 {
   "artifacts": {
+    "artifacts/mtls-issuance-authorization-v1.schema.json": {
+      "version": 1,
+      "sha256": "7412c5ed7c50441c661209d77e841cbc0e173dda8f16ba4dad0a103b8e086f02"
+    },
+    "artifacts/signed-decision-revocation-notice-v2.schema.json": {
+      "version": 2,
+      "sha256": "3ae0a095a6e8057d9a14290365b445a277c0b2a159bea9728a6793f1f101232c"
+    },
     "artifacts/signed-decision-revocation-notice-v1.schema.json": {
       "version": 1,
       "sha256": "f39744e2a95e57b4a378b88dd31fe043d36a97b8ac78acc7f7e6229df8f00ada"
@@ -14,7 +22,7 @@
     },
     "artifacts/policy-decision-evaluated-v1.schema.json": {
       "version": 1,
-      "sha256": "20f6b446a91b25acfd6c8cf235c5a7d8c2cced8d926bf8e3d0cd71773107bf5d"
+      "sha256": "ce7142dd82223f544a1cac4a28f464cd920675142bb7fa7809f106482043329e"
     },
     "artifacts/issuance-authorization-v1.schema.json": {
       "version": 1,
@@ -27,6 +35,14 @@
     "artifacts/signed-network-access-grant-v1.schema.json": {
       "version": 1,
       "sha256": "1ab47a205e8336e85ec495f89b51b193354a61519bab309d34f0b09011df7927"
+    },
+    "artifacts/signed-tcp-access-grant-v1.schema.json": {
+      "version": 1,
+      "sha256": "2f3dc75d38c1772a76721f1b5ed2b405ffd55fde777120ad4e3f7391e4fef120"
+    },
+    "artifacts/tcp-access-grant-v1.schema.json": {
+      "version": 1,
+      "sha256": "0c59b6d644abc2ac4405207f734bec736a514a07a643ae7ab9c3a71892397435"
     }
   }
 }

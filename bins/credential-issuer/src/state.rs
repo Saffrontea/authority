@@ -7,6 +7,8 @@ use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use authority_replay_ledger::ReplayLedger;
 use ssh_key::PrivateKey;
 
+use crate::mtls_ca::MtlsCa;
+
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
 
@@ -15,6 +17,7 @@ struct Inner {
     ca_key: RwLock<PrivateKey>,
     replay_ledger: Mutex<ReplayLedger>,
     next_serial: AtomicU64,
+    mtls_ca: RwLock<Option<MtlsCa>>,
 }
 
 impl AppState {
@@ -29,6 +32,7 @@ impl AppState {
             ca_key: RwLock::new(ca_key),
             replay_ledger: Mutex::new(replay_ledger),
             next_serial: AtomicU64::new(initial_serial),
+            mtls_ca: RwLock::new(None),
         }))
     }
 
@@ -55,5 +59,22 @@ impl AppState {
 
     pub fn next_serial(&self) -> u64 {
         self.0.next_serial.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn install_mtls_ca(&self, ca: MtlsCa) -> Result<(), String> {
+        *self.0.mtls_ca.write().map_err(|error| error.to_string())? = Some(ca);
+        Ok(())
+    }
+
+    pub fn with_mtls_ca<T>(
+        &self,
+        operation: impl FnOnce(&MtlsCa) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.0.mtls_ca.read().map_err(|error| error.to_string())?;
+        operation(
+            guard
+                .as_ref()
+                .ok_or_else(|| "mTLS CA is not initialized".to_owned())?,
+        )
     }
 }

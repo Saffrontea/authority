@@ -2,6 +2,9 @@
 //!
 //! This crate contains no database, HTTP, CA, or policy-engine adapters.
 
+mod tcp;
+pub use tcp::{SignedTcpAccessGrantV1, TcpAccessGrantV1};
+
 use std::{collections::HashSet, net::IpAddr};
 
 use serde::{Deserialize, Serialize};
@@ -12,6 +15,8 @@ const MAX_TTL_SECONDS: i64 = 600;
 const DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-ISSUANCE-AUTHORIZATION-V1\0";
 const NETWORK_GRANT_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-NETWORK-ACCESS-GRANT-V1\0";
 const REVOCATION_NOTICE_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V1\0";
+const REVOCATION_NOTICE_V2_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V2\0";
+const MTLS_AUTHORIZATION_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-MTLS-ISSUANCE-AUTHORIZATION-V1\0";
 const SIGNATURE_ALGORITHM: &str = "Ed25519";
 
 /// Control-plane authorization consumed by the isolated credential issuer.
@@ -98,6 +103,62 @@ pub struct SignedDecisionRevocationNoticeV1 {
     pub signature: String,
 }
 
+/// Protocol-independent decision revocation consumed by multiple adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRevocationNoticeV2 {
+    pub version: String,
+    pub issuer: String,
+    pub domain_id: String,
+    pub target_node_id: String,
+    pub decision_id: String,
+    pub reason: String,
+    pub sequence: i64,
+    pub revoked_at: i64,
+    pub expires_at: i64,
+    pub adapter_kinds: Vec<AdapterGrantKindV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedDecisionRevocationNoticeV2 {
+    pub notice: DecisionRevocationNoticeV2,
+    pub algorithm: String,
+    pub key_id: String,
+    pub signature: String,
+}
+
+/// Authorization to issue one short-lived mTLS client certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MtlsIssuanceAuthorizationV1 {
+    pub version: String,
+    pub issuer: String,
+    pub domain_id: String,
+    pub subject_user_id: String,
+    pub device_id: String,
+    pub target_node_id: String,
+    pub client_spki_sha256: String,
+    pub identity_uri: String,
+    pub service_audience: String,
+    pub policy_id: String,
+    pub decision_id: String,
+    pub nonce: String,
+    pub issued_at: i64,
+    pub not_before: i64,
+    pub expires_at: i64,
+    pub audience: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedMtlsIssuanceAuthorizationV1 {
+    pub authorization: MtlsIssuanceAuthorizationV1,
+    pub algorithm: String,
+    pub key_id: String,
+    pub signature: String,
+}
+
 /// One policy decision projected into two independently consumable contracts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -132,6 +193,10 @@ pub enum PolicyOutcomeV1 {
     Ssh,
     #[serde(rename = "network.reachability")]
     NetworkReachability,
+    #[serde(rename = "mtls.service")]
+    MtlsService,
+    #[serde(rename = "tcp.connect")]
+    TcpConnect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +215,10 @@ pub enum PolicyCapabilityV1 {
     NetworkReach,
     #[serde(rename = "ssh.issue")]
     SshIssue,
+    #[serde(rename = "mtls.issue")]
+    MtlsIssue,
+    #[serde(rename = "tcp.connect")]
+    TcpConnect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,7 +229,7 @@ pub struct PolicySourceV1 {
     pub revision: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AdapterGrantKindV1 {
     #[serde(rename = "ssh.certificate")]
     SshCertificate,
@@ -168,6 +237,23 @@ pub enum AdapterGrantKindV1 {
     WireGuardPeer,
     #[serde(rename = "ssh.session")]
     SshSession,
+    #[serde(rename = "mtls.client_certificate")]
+    MtlsClientCertificate,
+    #[serde(rename = "tcp.port")]
+    TcpPort,
+}
+
+impl AdapterGrantKindV1 {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SshCertificate => "ssh.certificate",
+            Self::WireGuardPeer => "wireguard.peer",
+            Self::SshSession => "ssh.session",
+            Self::MtlsClientCertificate => "mtls.client_certificate",
+            Self::TcpPort => "tcp.port",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,10 +290,16 @@ pub enum ContractError {
     InvalidWireGuardPublicKey,
     #[error("mesh_address must be an IPv4 address")]
     InvalidMeshAddress,
+    #[error("TCP ports must be sorted, unique, nonzero, and contain at most 64 entries")]
+    InvalidTcpPorts,
     #[error("access authorization bundle field does not match: {0}")]
     BundleMismatch(&'static str),
     #[error("revocation sequence must be positive")]
     InvalidSequence,
+    #[error("adapter kind set must be non-empty and unique")]
+    InvalidAdapterKinds,
+    #[error("mTLS identity URI must use the spiffe scheme")]
+    InvalidIdentityUri,
 }
 
 impl IssuanceAuthorizationV1 {
@@ -486,6 +578,167 @@ impl SignedDecisionRevocationNoticeV1 {
     }
 }
 
+impl DecisionRevocationNoticeV2 {
+    /// Validates the common revocation and its affected adapter set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for invalid identifiers, lifetime, sequence,
+    /// or duplicate/empty adapter kinds.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.version != "2" {
+            return Err(ContractError::UnsupportedVersion);
+        }
+        for (name, value) in [
+            ("issuer", self.issuer.as_str()),
+            ("domain_id", self.domain_id.as_str()),
+            ("target_node_id", self.target_node_id.as_str()),
+            ("decision_id", self.decision_id.as_str()),
+            ("reason", self.reason.as_str()),
+        ] {
+            if !valid_identifier(value) {
+                return Err(ContractError::InvalidIdentifier(name));
+            }
+        }
+        if self.sequence <= 0 {
+            return Err(ContractError::InvalidSequence);
+        }
+        if self.revoked_at >= self.expires_at {
+            return Err(ContractError::InvalidTimeRange);
+        }
+        let unique: HashSet<_> = self.adapter_kinds.iter().collect();
+        if unique.is_empty() || unique.len() != self.adapter_kinds.len() {
+            return Err(ContractError::InvalidAdapterKinds);
+        }
+        Ok(())
+    }
+
+    /// Returns the stable bytes signed for a common revocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::validate`].
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, ContractError> {
+        self.validate()?;
+        let mut output = Vec::with_capacity(384);
+        output.extend_from_slice(REVOCATION_NOTICE_V2_DOMAIN_SEPARATOR);
+        for value in [
+            self.version.as_str(),
+            self.issuer.as_str(),
+            self.domain_id.as_str(),
+            self.target_node_id.as_str(),
+            self.decision_id.as_str(),
+            self.reason.as_str(),
+        ] {
+            push_string(&mut output, value);
+        }
+        output.extend_from_slice(&self.sequence.to_be_bytes());
+        output.extend_from_slice(&self.revoked_at.to_be_bytes());
+        output.extend_from_slice(&self.expires_at.to_be_bytes());
+        push_u32(&mut output, self.adapter_kinds.len());
+        for kind in &self.adapter_kinds {
+            push_string(&mut output, kind.as_str());
+        }
+        Ok(output)
+    }
+}
+
+impl SignedDecisionRevocationNoticeV2 {
+    /// Validates envelope shape without cryptographic verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for an invalid notice or signature envelope.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.notice.validate()?;
+        validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+}
+
+impl MtlsIssuanceAuthorizationV1 {
+    /// Validates common claims and mTLS-specific key and service bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for malformed identity, key, nonce, or time fields.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.version != VERSION {
+            return Err(ContractError::UnsupportedVersion);
+        }
+        for (name, value) in [
+            ("issuer", self.issuer.as_str()),
+            ("domain_id", self.domain_id.as_str()),
+            ("subject_user_id", self.subject_user_id.as_str()),
+            ("device_id", self.device_id.as_str()),
+            ("target_node_id", self.target_node_id.as_str()),
+            ("service_audience", self.service_audience.as_str()),
+            ("policy_id", self.policy_id.as_str()),
+            ("decision_id", self.decision_id.as_str()),
+            ("audience", self.audience.as_str()),
+        ] {
+            if !valid_identifier(value) {
+                return Err(ContractError::InvalidIdentifier(name));
+            }
+        }
+        if !self.identity_uri.starts_with("spiffe://") || self.identity_uri.len() > 512 {
+            return Err(ContractError::InvalidIdentityUri);
+        }
+        if !valid_sha256_fingerprint(&self.client_spki_sha256) {
+            return Err(ContractError::InvalidFingerprint);
+        }
+        validate_nonce_and_time(
+            &self.nonce,
+            self.issued_at,
+            self.not_before,
+            self.expires_at,
+        )
+    }
+
+    /// Returns stable, domain-separated signing bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::validate`].
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, ContractError> {
+        self.validate()?;
+        let mut output = Vec::with_capacity(512);
+        output.extend_from_slice(MTLS_AUTHORIZATION_DOMAIN_SEPARATOR);
+        for value in [
+            self.version.as_str(),
+            self.issuer.as_str(),
+            self.domain_id.as_str(),
+            self.subject_user_id.as_str(),
+            self.device_id.as_str(),
+            self.target_node_id.as_str(),
+            self.client_spki_sha256.as_str(),
+            self.identity_uri.as_str(),
+            self.service_audience.as_str(),
+            self.policy_id.as_str(),
+            self.decision_id.as_str(),
+            self.nonce.as_str(),
+        ] {
+            push_string(&mut output, value);
+        }
+        output.extend_from_slice(&self.issued_at.to_be_bytes());
+        output.extend_from_slice(&self.not_before.to_be_bytes());
+        output.extend_from_slice(&self.expires_at.to_be_bytes());
+        push_string(&mut output, &self.audience);
+        Ok(output)
+    }
+}
+
+impl SignedMtlsIssuanceAuthorizationV1 {
+    /// Validates the embedded authorization and signature envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContractError`] for invalid authorization or envelope fields.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.authorization.validate()?;
+        validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+}
+
 impl AccessAuthorizationBundleV1 {
     /// Validates both consumer contracts and their shared decision bindings.
     ///
@@ -629,6 +882,12 @@ fn is_base64_character(byte: u8) -> bool {
 
 fn is_base64url_character(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+}
+
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    value.starts_with("SHA256:")
+        && value.len() > "SHA256:".len()
+        && value["SHA256:".len()..].bytes().all(is_base64_character)
 }
 
 fn push_u32(output: &mut Vec<u8>, value: usize) {

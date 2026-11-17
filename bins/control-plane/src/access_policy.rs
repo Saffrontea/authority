@@ -12,6 +12,8 @@ pub struct AuthorizedAccess {
     pub ssh_principal: Option<String>,
     pub wireguard_public_key: Vec<u8>,
     pub device_mesh_address: String,
+    pub target_mesh_address: String,
+    pub tcp_ports: Vec<u16>,
 }
 
 pub enum AuthorizationOutcome {
@@ -22,6 +24,7 @@ pub enum AuthorizationOutcome {
 struct StoredRule {
     rule: PolicyRule,
     ssh_principal: String,
+    tcp_ports: Vec<i32>,
 }
 
 /// Extracts an immutable snapshot from PostgreSQL, then delegates all policy
@@ -37,7 +40,7 @@ pub async fn authorize(
                 EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
                 EXTRACT(EPOCH FROM policy.valid_from)::bigint AS valid_from, \
                 EXTRACT(EPOCH FROM policy.valid_until)::bigint AS valid_until, \
-                policy.ssh_principal, client.domain_id AS device_domain_id, \
+                policy.ssh_principal, policy.tcp_ports, host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
                 client.status = 'active' AS device_active, \
                 target.status = 'active' AND target_device.status = 'active' \
@@ -72,6 +75,7 @@ pub async fn authorize(
     };
     let wireguard_public_key = first.try_get("wireguard_public_key")?;
     let device_mesh_address = first.try_get("device_mesh_address")?;
+    let target_mesh_address = first.try_get("target_mesh_address")?;
     let stored = rows
         .iter()
         .map(stored_rule)
@@ -95,11 +99,28 @@ pub async fn authorize(
                 })
                 .map(|item| item.ssh_principal.clone())
         });
+    let tcp_ports = decision
+        .sources
+        .get(&Capability::TcpConnect)
+        .and_then(|source| {
+            stored.iter().find(|item| {
+                item.rule.policy_id == source.policy_id && item.rule.revision == source.revision
+            })
+        })
+        .map(|item| {
+            item.tcp_ports
+                .iter()
+                .filter_map(|port| u16::try_from(*port).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(AuthorizationOutcome::Allowed(AuthorizedAccess {
         decision,
         ssh_principal,
         wireguard_public_key,
         device_mesh_address,
+        target_mesh_address,
+        tcp_ports,
     }))
 }
 
@@ -114,6 +135,12 @@ fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {
         match capability.as_str() {
             "ssh" | "ssh.issue" => {
                 grants.insert(Capability::SshIssue);
+            }
+            "tcp.connect" => {
+                grants.insert(Capability::TcpConnect);
+            }
+            "mtls.issue" => {
+                grants.insert(Capability::MtlsIssue);
             }
             // `wireguard` is the legacy PoC aggregate. New writes persist
             // atomic capabilities and dependency closure stays in policy-core.
@@ -147,6 +174,7 @@ fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {
             valid_until: row.try_get("valid_until")?,
         },
         ssh_principal: row.try_get("ssh_principal")?,
+        tcp_ports: row.try_get("tcp_ports")?,
     })
 }
 

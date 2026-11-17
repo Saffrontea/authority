@@ -7,6 +7,7 @@ use std::{
 use ::ssh_key::{PrivateKey, PublicKey};
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use axum::http::HeaderValue;
+use openssl::pkey::{PKey, Private};
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
@@ -24,6 +25,7 @@ struct Inner {
     terminal_slots: Arc<Semaphore>,
     verifier: OpenSslEd25519Verifier,
     terminal_lease: Mutex<Option<TerminalLease>>,
+    mtls_private_key: PKey<Private>,
 }
 
 pub struct TerminalLease {
@@ -37,9 +39,14 @@ pub struct AgentPaths {
     pub known_hosts: PathBuf,
 }
 
+pub struct AgentCredentials {
+    pub ssh_private_key: PrivateKey,
+    pub mtls_private_key: PKey<Private>,
+}
+
 impl AppState {
     pub fn new(
-        private_key: PrivateKey,
+        credentials: AgentCredentials,
         trusted_cas: Vec<PublicKey>,
         paths: AgentPaths,
         ssh_target: Option<IpAddr>,
@@ -48,7 +55,7 @@ impl AppState {
         verifier: OpenSslEd25519Verifier,
     ) -> Self {
         Self(Arc::new(Inner {
-            private_key,
+            private_key: credentials.ssh_private_key,
             trusted_cas,
             private_key_path: paths.private_key,
             certificate_path: paths.certificate,
@@ -59,6 +66,7 @@ impl AppState {
             terminal_slots: Arc::new(Semaphore::new(4)),
             verifier,
             terminal_lease: Mutex::new(None),
+            mtls_private_key: credentials.mtls_private_key,
         }))
     }
 
@@ -98,6 +106,10 @@ impl AppState {
 
     pub fn verifier(&self) -> &OpenSslEd25519Verifier {
         &self.0.verifier
+    }
+
+    pub fn mtls_private_key(&self) -> &PKey<Private> {
+        &self.0.mtls_private_key
     }
 
     pub fn install_terminal_lease(&self, lease: TerminalLease) -> Result<(), String> {

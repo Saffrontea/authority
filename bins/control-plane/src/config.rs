@@ -18,6 +18,7 @@ pub struct Config {
     pub target_identity_file: PathBuf,
     pub client_wireguard_public_key: String,
     pub network_agent_origin: String,
+    pub target_mesh_address: String,
     pub network_grant_ttl_seconds: i64,
     pub ssh_authorization_ttl_seconds: i64,
 }
@@ -49,6 +50,16 @@ impl Config {
         let target_identity_file = PathBuf::from(required("AUTHORITY_TARGET_IDENTITY_FILE")?);
         let client_wireguard_public_key = required("AUTHORITY_CLIENT_WIREGUARD_PUBLIC_KEY")?;
         let network_agent_origin = required("AUTHORITY_NETWORK_AGENT_ORIGIN")?;
+        let target_mesh_address = value("AUTHORITY_TARGET_MESH_ADDRESS", "10.77.0.2")?;
+        let target_address = target_mesh_address
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|error| format!("invalid target mesh address: {error}"))?;
+        if target_address.is_unspecified()
+            || target_address.is_multicast()
+            || target_address.is_broadcast()
+        {
+            return Err("invalid target mesh address".to_owned());
+        }
         let network_grant_ttl_seconds = value("AUTHORITY_NETWORK_GRANT_TTL_SECONDS", "300")?
             .parse::<i64>()
             .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
@@ -98,6 +109,7 @@ impl Config {
             target_identity_file,
             client_wireguard_public_key,
             network_agent_origin,
+            target_mesh_address,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
         })

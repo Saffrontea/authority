@@ -9,6 +9,8 @@ use uuid::Uuid;
 pub enum Outcome {
     Ssh,
     NetworkReachability,
+    MtlsService,
+    TcpConnect,
 }
 
 impl Outcome {
@@ -17,6 +19,8 @@ impl Outcome {
         match self {
             Self::Ssh => "ssh",
             Self::NetworkReachability => "network.reachability",
+            Self::MtlsService => "mtls.service",
+            Self::TcpConnect => "tcp.connect",
         }
     }
 }
@@ -59,6 +63,22 @@ impl AccessIntent {
             route: Route::MeshRequired,
         }
     }
+
+    #[must_use]
+    pub fn tcp(route: Route) -> Self {
+        Self {
+            outcomes: BTreeSet::from([Outcome::TcpConnect]),
+            route,
+        }
+    }
+
+    #[must_use]
+    pub fn infrastructure(route: Route) -> Self {
+        Self {
+            outcomes: BTreeSet::from([Outcome::Ssh, Outcome::MtlsService]),
+            route,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,6 +86,8 @@ pub enum Capability {
     MeshJoin,
     NetworkReach,
     SshIssue,
+    MtlsIssue,
+    TcpConnect,
 }
 
 impl Capability {
@@ -75,6 +97,8 @@ impl Capability {
             Self::MeshJoin => "mesh.join",
             Self::NetworkReach => "network.reach",
             Self::SshIssue => "ssh.issue",
+            Self::MtlsIssue => "mtls.issue",
+            Self::TcpConnect => "tcp.connect",
         }
     }
 }
@@ -86,8 +110,17 @@ pub fn plan(intent: &AccessIntent) -> BTreeSet<Capability> {
     if intent.outcomes.contains(&Outcome::Ssh) {
         required.insert(Capability::SshIssue);
     }
+    if intent.outcomes.contains(&Outcome::TcpConnect) {
+        required.insert(Capability::TcpConnect);
+    }
+    if intent.outcomes.contains(&Outcome::MtlsService) {
+        required.insert(Capability::MtlsIssue);
+    }
     if intent.outcomes.contains(&Outcome::NetworkReachability)
-        || (intent.outcomes.contains(&Outcome::Ssh) && intent.route == Route::MeshRequired)
+        || ((intent.outcomes.contains(&Outcome::Ssh)
+            || intent.outcomes.contains(&Outcome::MtlsService)
+            || intent.outcomes.contains(&Outcome::TcpConnect))
+            && intent.route == Route::MeshRequired)
     {
         required.insert(Capability::NetworkReach);
     }
@@ -302,6 +335,19 @@ mod tests {
             plan(&AccessIntent::ssh(Route::MeshRequired)),
             BTreeSet::from([
                 Capability::MeshJoin,
+                Capability::NetworkReach,
+                Capability::SshIssue,
+            ])
+        );
+    }
+
+    #[test]
+    fn plans_ssh_and_mtls_over_one_mesh_dependency_closure() {
+        assert_eq!(
+            plan(&AccessIntent::infrastructure(Route::MeshRequired)),
+            BTreeSet::from([
+                Capability::MeshJoin,
+                Capability::MtlsIssue,
                 Capability::NetworkReach,
                 Capability::SshIssue,
             ])

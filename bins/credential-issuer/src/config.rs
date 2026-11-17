@@ -9,6 +9,8 @@ pub struct Config {
     pub ssh_ca_key_file: PathBuf,
     pub ssh_ca_public_key_file: PathBuf,
     pub replay_ledger_file: PathBuf,
+    pub mtls_ca_key_file: PathBuf,
+    pub mtls_ca_certificate_file: PathBuf,
     pub browser_origins: Vec<HeaderValue>,
 }
 
@@ -25,6 +27,10 @@ impl Config {
             ssh_ca_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_KEY_FILE")?),
             ssh_ca_public_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_PUBLIC_KEY_FILE")?),
             replay_ledger_file: PathBuf::from(required("AUTHORITY_ISSUER_REPLAY_LEDGER_FILE")?),
+            mtls_ca_key_file: PathBuf::from(required("AUTHORITY_MTLS_CA_KEY_FILE")?),
+            mtls_ca_certificate_file: PathBuf::from(required(
+                "AUTHORITY_MTLS_CA_CERTIFICATE_FILE",
+            )?),
             browser_origins: origins("AUTHORITY_BROWSER_ORIGINS", "http://localhost:3000")?,
         })
     }

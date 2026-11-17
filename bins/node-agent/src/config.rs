@@ -17,6 +17,7 @@ pub struct Config {
     pub ssh_target_port: u16,
     pub control_plane_public_key_file: PathBuf,
     pub control_plane_key_id: String,
+    pub mtls_private_key_file: PathBuf,
 }
 
 impl Config {
@@ -47,6 +48,7 @@ impl Config {
                 "AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE",
             )?),
             control_plane_key_id: value("AUTHORITY_SIGNING_KEY_ID", "control-plane-key-1")?,
+            mtls_private_key_file: PathBuf::from(required("AUTHORITY_NODE_MTLS_KEY_FILE")?),
         })
     }
 }

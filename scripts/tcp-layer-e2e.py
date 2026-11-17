@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Exercise signed TCP derivation and real kernel enforcement over the mesh."""
+import copy
+import json
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+session, control, agent, client = sys.argv[1:]
+
+
+def http(url, body, expected=200, headers=None):
+    request = urllib.request.Request(url, json.dumps(body).encode(),
+                                     {'content-type': 'application/json', **(headers or {})})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status, value = response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        status, value = error.code, json.load(error)
+    assert status == expected, (url, status, value)
+    return value
+
+
+def browser(script, args):
+    value = http(f'http://127.0.0.1:9515/session/{session}/execute/async', {
+        'script': 'const done=arguments[arguments.length-1]; ' + script,
+        'args': args,
+    })['value']
+    assert 'error' not in value, value
+    return value
+
+
+def issue(ports, ttl=20, network=False):
+    return browser('window.authorityRequestTcpAuthorization(arguments[0],arguments[1],arguments[2])'
+                   '.then(value=>done({value})).catch(error=>done({error:error.message}));',
+                   [ports, network, ttl])['value']
+
+
+def revoke(decision, kinds):
+    return browser('window.authorityRevokeDecision(arguments[0],arguments[1])'
+                   '.then(value=>done({value})).catch(error=>done({error:error.message}));',
+                   [decision, kinds])['value']
+
+
+def connect(port):
+    stream = socket.create_connection((client, port), timeout=1)
+    stream.settimeout(1)
+    return stream
+
+
+def echo(stream):
+    stream.sendall(b'TCP_ADMISSION_OK')
+    assert stream.recv(64) == b'TCP_ADMISSION_OK', 'echo did not arrive'
+
+
+def allowed(port):
+    try:
+        with connect(port) as stream:
+            echo(stream)
+        return True
+    except (OSError, AssertionError):
+        return False
+
+
+def wait(predicate, seconds=5):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.1)
+    subprocess.run(['mise', 'run', 'mesh:agent:status'], check=False)
+    raise AssertionError('TCP enforcement deadline exceeded')
+
+
+# Both listeners exist but TCP grants are absent. Mesh membership alone does
+# not authorize either managed TCP service.
+assert not allowed(2223) and not allowed(2224)
+rejected = browser('window.authorityRequestTcpAuthorization([8082],false,10)'
+                   '.then(value=>done({unexpected:value})).catch(error=>done({denial:error.message}));', [])
+assert 'tcp_port_denied' in rejected.get('denial', ''), rejected
+
+combined = issue([8080], network=True)
+assert combined['decision_id'] == combined['tcp_grant']['grant']['decision_id']
+assert combined['decision_id'] == combined['network_grant']['grant']['nonce']
+assert 'ssh_authorization' not in combined and 'mtls_authorization' not in combined
+assert combined['tcp_grant']['grant']['source_address'] == '10.77.0.1'
+assert combined['tcp_grant']['grant']['destination_address'] == '10.77.0.2'
+http(f'{agent}/v1/network-grants', combined['network_grant'])
+http(f'{agent}/v1/tcp-grants', combined['tcp_grant'])
+wait(lambda: allowed(2223))
+assert not allowed(2224), 'unselected port was admitted'
+
+# TCP-only selection emits no peer or credential contracts.
+other = issue([8081])
+assert set(other) == {'decision_id', 'tcp_grant'}, other
+http(f'{agent}/v1/tcp-grants', other['tcp_grant'])
+wait(lambda: allowed(2224))
+replay = http(f'{agent}/v1/tcp-grants', combined['tcp_grant'], 409)
+assert replay['error'] == 'tcp_grant_replayed'
+tampered = copy.deepcopy(combined['tcp_grant'])
+tampered['grant']['destination_ports'] = [8081]
+assert http(f'{agent}/v1/tcp-grants', tampered, 401)['error'] == 'invalid_tcp_grant'
+
+# The selection is part of the authenticated request, not an unsigned hint.
+prepared = browser('window.authorityPrepareRevocation(arguments[0],"user_requested",["tcp.port"])'
+                   '.then(value=>done({value})).catch(error=>done({error:error.message}));',
+                   [combined['decision_id']])['value']
+prepared['body']['adapter_kinds'] = ['wireguard.peer']
+http(f'{control}/v1/access-authorizations/{combined["decision_id"]}/revocations',
+     prepared['body'], 401, prepared['headers'])
+
+with connect(2223) as existing:
+    echo(existing)
+    notice = revoke(combined['decision_id'], ['tcp.port'])
+    assert notice['notice']['adapter_kinds'] == ['tcp.port']
+    wait(lambda: not allowed(2223))
+    try:
+        echo(existing)
+    except (OSError, AssertionError):
+        pass
+    else:
+        raise AssertionError('existing TCP stream survived revocation')
+assert time.time() < combined['tcp_grant']['grant']['expires_at'], 'denial was only expiry'
+assert allowed(2224), 'TCP revocation affected another decision/port'
+assert subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode == 0, 'TCP revocation removed peer'
+assert http(f'{agent}/v1/tcp-grants', combined['tcp_grant'], 409)['error'] == 'tcp_grant_revoked'
+print('TCP selection: one port admitted, unselected port denied; TCP-only projection needs no SSH/mTLS/peer', flush=True)
+print('TCP revocation: new and existing streams denied; another TCP grant and WireGuard remain active', flush=True)
+
+# A revocation can arrive before a still-unconsumed grant.
+late = issue([8080], ttl=10)
+late_notice = revoke(late['decision_id'], ['tcp.port'])
+http(f'{agent}/v1/revocations', late_notice)
+assert http(f'{agent}/v1/tcp-grants', late['tcp_grant'], 409)['error'] == 'tcp_grant_revoked'
+
+# Independent TCP expiry is enforced by the kernel even for an existing stream.
+short = issue([8080], ttl=3)
+http(f'{agent}/v1/tcp-grants', short['tcp_grant'])
+with connect(2223) as existing:
+    echo(existing)
+    deadline = short['tcp_grant']['grant']['expires_at']
+    time.sleep(max(0, deadline - time.time() + 0.2))
+    assert not allowed(2223)
+    try:
+        echo(existing)
+    except (OSError, AssertionError):
+        pass
+    else:
+        raise AssertionError('existing TCP stream survived expiry')
+assert allowed(2224), 'one TCP grant expiry removed another grant'
+assert subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode == 0
+
+# A second scope on the same decision is a separate durable notice.
+network_notice = revoke(combined['decision_id'], ['wireguard.peer'])
+assert network_notice['notice']['sequence'] > notice['notice']['sequence']
+assert network_notice['notice']['adapter_kinds'] == ['wireguard.peer']
+# Repeating an earlier scope must return its original sequence even after a
+# broader scope has been recorded for the same decision.
+assert revoke(combined['decision_id'], ['tcp.port'])['notice']['sequence'] == notice['notice']['sequence']
+wait(lambda: subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL).returncode != 0)
+assert time.time() < combined['network_grant']['grant']['expires_at'], 'peer denial was only expiry'
+print('TCP expiry: active streams denied independently; later peer-only revocation has its own sequence', flush=True)
+
+# Exercise the visible selection controls as well as the programmatic API.
+def page(script):
+    return http(f'http://127.0.0.1:9515/session/{session}/execute/sync', {
+        'script': script, 'args': [],
+    })['value']
+
+
+page("document.querySelector('#tcp-ports').value='8080';"
+     "document.querySelector('#tcp-ttl').value='10';"
+     "document.querySelector('#tcp-network').checked=true;"
+     "document.querySelector('#tcp-form').requestSubmit(); return true;")
+wait(lambda: page("return document.querySelector('#tcp-result').textContent;").startswith('TCP access allowed.'))
+page("document.querySelector('#tcp-revoke').click(); return true;")
+wait(lambda: page("return document.querySelector('#tcp-result').textContent;").startswith('TCP revocation recorded.'))
+print('TCP UI: port/lifetime/network selection and TCP-only revocation succeeded', flush=True)

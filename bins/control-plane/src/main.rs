@@ -1,6 +1,7 @@
 mod access_policy;
 mod api;
 mod config;
+mod revocation_delivery;
 mod state;
 mod ui;
 
@@ -44,18 +45,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_identity_file: config.target_identity_file,
             client_wireguard_public_key: config.client_wireguard_public_key,
             network_agent_origin: config.network_agent_origin,
+            target_mesh_address: config.target_mesh_address,
         },
         (
             config.network_grant_ttl_seconds,
             config.ssh_authorization_ttl_seconds,
         ),
     );
+    let delivery = tokio::spawn(revocation_delivery::run(state.clone()));
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 
     info!(address = %config.bind, origin = %config.rp_origin, "control plane listening");
     axum::serve(listener, api::router(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    delivery.abort();
     Ok(())
 }
 

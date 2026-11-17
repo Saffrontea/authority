@@ -69,3 +69,47 @@ fn fixture() -> IssuanceAuthorizationV1 {
         audience: "credential-issuer".to_owned(),
     }
 }
+
+#[test]
+fn tcp_signature_binds_ports_addresses_identity_audience_and_deadline() {
+    use authority_contracts_model::TcpAccessGrantV1;
+    use authority_issuer_core::{sign_tcp_grant, verify_tcp_grant_for_node};
+    let key = PKey::generate_ed25519().unwrap();
+    let signer =
+        OpenSslEd25519Signer::from_pem("tcp-key", &key.private_key_to_pem_pkcs8().unwrap())
+            .unwrap();
+    let verifier =
+        OpenSslEd25519Verifier::from_pem("tcp-key", &key.public_key_to_pem().unwrap()).unwrap();
+    let grant: TcpAccessGrantV1 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/tcp-access-grant-v1/valid/basic.json"
+    ))
+    .unwrap();
+    let envelope = sign_tcp_grant(grant, &signer).unwrap();
+    verify_tcp_grant_for_node(&envelope, &verifier, "node_01", 1_700_000_001).unwrap();
+    assert!(verify_tcp_grant_for_node(&envelope, &verifier, "other-node", 1_700_000_001).is_err());
+    for now in [1_699_999_999, 1_700_000_060] {
+        assert!(verify_tcp_grant_for_node(&envelope, &verifier, "node_01", now).is_err());
+    }
+    for field in [
+        "source_address",
+        "destination_address",
+        "device_id",
+        "target_node_id",
+        "audience",
+        "expires_at",
+        "destination_ports",
+    ] {
+        let mut value = serde_json::to_value(&envelope).unwrap();
+        value["grant"][field] = match field {
+            "source_address" | "destination_address" => serde_json::json!("10.77.0.99"),
+            "expires_at" => serde_json::json!(1_700_000_059),
+            "destination_ports" => serde_json::json!([8081]),
+            _ => serde_json::json!("other-value"),
+        };
+        let tampered = serde_json::from_value(value).unwrap();
+        assert!(
+            verify_tcp_grant_for_node(&tampered, &verifier, "node_01", 1_700_000_001).is_err(),
+            "accepted changed {field}"
+        );
+    }
+}

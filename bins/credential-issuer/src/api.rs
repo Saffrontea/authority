@@ -1,7 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use authority_contracts_model::SignedIssuanceAuthorizationV1;
-use authority_issuer_core::verify_authorization;
+use authority_contracts_model::{SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1};
+use authority_issuer_core::{verify_authorization, verify_mtls_authorization};
 use axum::http::{HeaderValue, Method, header::CONTENT_TYPE};
 use axum::{
     Json, Router,
@@ -9,6 +9,16 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
+};
+use openssl::{
+    asn1::{Asn1Integer, Asn1Time},
+    bn::BigNum,
+    hash::{MessageDigest, hash},
+    pkey::{PKey, Public},
+    x509::{
+        X509, X509NameBuilder,
+        extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -22,6 +32,7 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/ssh-certificates", post(issue_ssh_certificate))
+        .route("/v1/mtls-certificates", post(issue_mtls_certificate))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -55,6 +66,109 @@ async fn issue_ssh_certificate(
     Json(request): Json<IssueSshCertificateRequest>,
 ) -> Result<Json<IssueSshCertificateResponse>, ApiError> {
     issue_ssh_certificate_inner(&state, &request).map(Json)
+}
+
+#[derive(Deserialize)]
+struct IssueMtlsCertificateRequest {
+    authorization: SignedMtlsIssuanceAuthorizationV1,
+    public_key_pem: String,
+}
+
+#[derive(Serialize)]
+struct IssueMtlsCertificateResponse {
+    certificate_pem: String,
+    ca_certificate_pem: String,
+    decision_id: String,
+    identity_uri: String,
+    expires_at: i64,
+}
+
+async fn issue_mtls_certificate(
+    State(state): State<AppState>,
+    Json(request): Json<IssueMtlsCertificateRequest>,
+) -> Result<Json<IssueMtlsCertificateResponse>, ApiError> {
+    verify_mtls_authorization(&request.authorization, state.verifier())
+        .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_authorization", cause))?;
+    let authorization = &request.authorization.authorization;
+    if authorization.audience != "credential-issuer" {
+        return Err(ApiError::unauthorized("invalid_audience"));
+    }
+    let now = unix_timestamp()?;
+    if now < authorization.not_before || now >= authorization.expires_at {
+        return Err(ApiError::unauthorized("authorization_expired"));
+    }
+    let public_key = PKey::public_key_from_pem(request.public_key_pem.as_bytes())
+        .map_err(|_| ApiError::bad_request("invalid_mtls_public_key"))?;
+    let digest = hash(
+        MessageDigest::sha256(),
+        &public_key.public_key_to_der().map_err(ApiError::internal)?,
+    )
+    .map_err(ApiError::internal)?;
+    let fingerprint = format!(
+        "SHA256:{}",
+        openssl::base64::encode_block(&digest).trim_end_matches('=')
+    );
+    if fingerprint != authorization.client_spki_sha256 {
+        return Err(ApiError::unauthorized("mtls_key_fingerprint_mismatch"));
+    }
+    if !state
+        .consume_nonce(&authorization.nonce, authorization.expires_at, now)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::conflict("authorization_replayed"));
+    }
+    let certificate = state
+        .with_mtls_ca(|ca| {
+            build_mtls_certificate(&public_key, authorization, ca, state.next_serial())
+                .map_err(|error| error.to_string())
+        })
+        .map_err(ApiError::internal)?;
+    let ca_certificate_pem = state
+        .with_mtls_ca(|ca| {
+            String::from_utf8(ca.certificate.to_pem().map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(ApiError::internal)?;
+    Ok(Json(IssueMtlsCertificateResponse {
+        certificate_pem: String::from_utf8(certificate.to_pem().map_err(ApiError::internal)?)
+            .map_err(ApiError::internal)?,
+        ca_certificate_pem,
+        decision_id: authorization.decision_id.clone(),
+        identity_uri: authorization.identity_uri.clone(),
+        expires_at: authorization.expires_at,
+    }))
+}
+
+fn build_mtls_certificate(
+    public_key: &PKey<Public>,
+    authorization: &authority_contracts_model::MtlsIssuanceAuthorizationV1,
+    ca: &crate::mtls_ca::MtlsCa,
+    serial: u64,
+) -> Result<X509, openssl::error::ErrorStack> {
+    let mut name = X509NameBuilder::new()?;
+    name.append_entry_by_text("CN", &authorization.decision_id)?;
+    let name = name.build();
+    let mut builder = X509::builder()?;
+    builder.set_version(2)?;
+    let serial = BigNum::from_dec_str(&serial.to_string())?;
+    let serial = Asn1Integer::from_bn(&serial)?;
+    builder.set_serial_number(&serial)?;
+    builder.set_subject_name(&name)?;
+    builder.set_issuer_name(ca.certificate.subject_name())?;
+    builder.set_pubkey(public_key)?;
+    builder.set_not_before(Asn1Time::from_unix(authorization.not_before)?.as_ref())?;
+    builder.set_not_after(Asn1Time::from_unix(authorization.expires_at)?.as_ref())?;
+    builder.append_extension(BasicConstraints::new().critical().build()?)?;
+    builder.append_extension(KeyUsage::new().critical().digital_signature().build()?)?;
+    builder.append_extension(ExtendedKeyUsage::new().client_auth().build()?)?;
+    let context = builder.x509v3_context(Some(&ca.certificate), None);
+    let san = SubjectAlternativeName::new()
+        .uri(&authorization.identity_uri)
+        .dns(&authorization.service_audience)
+        .build(&context)?;
+    builder.append_extension(san)?;
+    builder.sign(&ca.key, MessageDigest::sha256())?;
+    Ok(builder.build())
 }
 
 fn issue_ssh_certificate_inner(
@@ -186,10 +300,23 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+
     use authority_contracts_model::IssuanceAuthorizationV1;
     use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
     use authority_issuer_core::sign_authorization;
     use authority_replay_ledger::ReplayLedger;
+    use openssl::{
+        ec::{EcGroup, EcKey},
+        nid::Nid,
+        ssl::{SslAcceptor, SslConnector, SslMethod, SslVerifyMode},
+        x509::extension::SubjectAlternativeName,
+    };
     use ssh_key::{Algorithm, Certificate, PrivateKey, rand_core::OsRng};
 
     use super::*;
@@ -360,5 +487,138 @@ mod tests {
         new_certificate
             .validate_at(u64::try_from(now).expect("timestamp"), [&new_fingerprint])
             .expect("new certificate survives retirement of old CA");
+    }
+
+    #[test]
+    fn issued_client_certificate_completes_a_real_mutual_tls_handshake() {
+        let unique = format!("{}-{}", std::process::id(), unix_timestamp().expect("time"));
+        let directory = std::env::temp_dir().join(format!("authority-mtls-{unique}"));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        let ca = crate::mtls_ca::load_or_generate(
+            &directory.join("ca-key.pem"),
+            &directory.join("ca-cert.pem"),
+        )
+        .expect("generate mTLS CA");
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("curve");
+        let client_key =
+            PKey::from_ec_key(EcKey::generate(&group).expect("client key")).expect("client pkey");
+        let now = unix_timestamp().expect("time");
+        let authorization = authority_contracts_model::MtlsIssuanceAuthorizationV1 {
+            version: "1".into(),
+            issuer: "domain-authority:example".into(),
+            domain_id: "domain_example".into(),
+            subject_user_id: "user_01".into(),
+            device_id: "device_01".into(),
+            target_node_id: "node_01".into(),
+            client_spki_sha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            identity_uri: "spiffe://authority.example/user/user_01/device/device_01".into(),
+            service_audience: "demo-api".into(),
+            policy_id: "policy_01@1".into(),
+            decision_id: "0123456789abcdef0123456789abcdef".into(),
+            nonce: "0123456789abcdef0123456789abcdef_mtls_test".into(),
+            issued_at: now,
+            not_before: now - 1,
+            expires_at: now + 60,
+            audience: "credential-issuer".into(),
+        };
+        let client_cert = build_mtls_certificate(
+            &PKey::public_key_from_der(&client_key.public_key_to_der().expect("public der"))
+                .expect("public key"),
+            &authorization,
+            &ca,
+            7,
+        )
+        .expect("client certificate");
+        let (server_key, server_cert) = test_server_certificate(&ca, &group, now);
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS server");
+        let address = listener.local_addr().expect("server address");
+        let mut acceptor =
+            SslAcceptor::mozilla_intermediate(SslMethod::tls_server()).expect("acceptor");
+        acceptor.set_private_key(&server_key).expect("server key");
+        acceptor.set_certificate(&server_cert).expect("server cert");
+        acceptor
+            .cert_store_mut()
+            .add_cert(ca.certificate.clone())
+            .expect("client CA");
+        acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+        let acceptor = acceptor.build();
+        let server = thread::spawn(move || {
+            let stream = listener.accept().expect("accept TCP").0;
+            let mut stream = acceptor.accept(stream).expect("mutual TLS accept");
+            let peer = stream.ssl().peer_certificate().expect("client certificate");
+            let common_name = peer
+                .subject_name()
+                .entries_by_nid(Nid::COMMONNAME)
+                .next()
+                .expect("client CN")
+                .data()
+                .to_string()
+                .expect("utf8 CN");
+            assert_eq!(common_name, "0123456789abcdef0123456789abcdef");
+            let mut byte = [0_u8; 1];
+            stream.read_exact(&mut byte).expect("read protected byte");
+            stream.write_all(&byte).expect("echo protected byte");
+        });
+
+        let mut connector = SslConnector::builder(SslMethod::tls_client()).expect("connector");
+        connector.set_private_key(&client_key).expect("client key");
+        connector
+            .set_certificate(&client_cert)
+            .expect("client cert");
+        connector
+            .cert_store_mut()
+            .add_cert(ca.certificate.clone())
+            .expect("server CA");
+        let mut stream = connector
+            .build()
+            .connect(
+                "localhost",
+                TcpStream::connect(address).expect("connect TCP"),
+            )
+            .expect("mutual TLS connect");
+        stream.write_all(b"x").expect("write protected byte");
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).expect("read protected byte");
+        assert_eq!(&byte, b"x");
+        server.join().expect("TLS server");
+        fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+
+    fn test_server_certificate(
+        ca: &crate::mtls_ca::MtlsCa,
+        group: &EcGroup,
+        now: i64,
+    ) -> (PKey<openssl::pkey::Private>, X509) {
+        let key =
+            PKey::from_ec_key(EcKey::generate(group).expect("server key")).expect("server pkey");
+        let mut name = X509NameBuilder::new().expect("name");
+        name.append_entry_by_text("CN", "localhost").expect("CN");
+        let name = name.build();
+        let mut builder = X509::builder().expect("certificate");
+        builder.set_version(2).expect("version");
+        let serial_bn = BigNum::from_u32(9).expect("serial");
+        let serial = Asn1Integer::from_bn(&serial_bn).expect("serial integer");
+        builder.set_serial_number(&serial).expect("serial");
+        builder.set_subject_name(&name).expect("subject");
+        builder
+            .set_issuer_name(ca.certificate.subject_name())
+            .expect("issuer");
+        builder.set_pubkey(&key).expect("public key");
+        builder
+            .set_not_before(Asn1Time::from_unix(now - 1).expect("not before").as_ref())
+            .expect("not before");
+        builder
+            .set_not_after(Asn1Time::from_unix(now + 60).expect("not after").as_ref())
+            .expect("not after");
+        let san = SubjectAlternativeName::new()
+            .dns("localhost")
+            .build(&builder.x509v3_context(Some(&ca.certificate), None))
+            .expect("SAN");
+        builder.append_extension(san).expect("SAN extension");
+        builder
+            .sign(&ca.key, MessageDigest::sha256())
+            .expect("sign server cert");
+        (key, builder.build())
     }
 }

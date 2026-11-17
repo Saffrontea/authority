@@ -86,6 +86,12 @@ impl ReplayLedger {
         Ok(true)
     }
 
+    /// Tests a durable record without consuming or refreshing it.
+    #[must_use]
+    pub fn contains(&self, nonce: &str, now: i64) -> bool {
+        self.entries.get(nonce).is_some_and(|expiry| *expiry > now)
+    }
+
     fn compact(&mut self) -> Result<(), String> {
         let temporary = self.path.with_extension("tmp");
         let mut file = secure_truncate(&temporary)?;
@@ -171,4 +177,32 @@ mod tests {
         );
         fs::remove_dir_all(directory).expect("cleanup");
     }
+}
+
+#[cfg(test)]
+mod scoped_revocation_tests {
+    use super::*;
+
+    #[test]
+    fn tcp_tombstone_survives_restart_without_revoking_wireguard() {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("authority-tcp-revocation-{unique}"));
+        let path = directory.join("revocations");
+        let mut ledger = ReplayLedger::open(&path, 100).unwrap();
+        ledger.consume("tcp_decision", 200, 100).unwrap();
+        assert!(ledger.contains("tcp_decision", 101));
+        assert!(!ledger.contains("wg_decision", 101));
+        drop(ledger);
+        let mut ledger = ReplayLedger::open(&path, 102).unwrap();
+        assert!(ledger.contains("tcp_decision", 102));
+        assert!(!ledger.contains("wg_decision", 102));
+        ledger.consume("wg_decision", 200, 102).unwrap();
+        assert!(ledger.contains("wg_decision", 103));
+        assert!(!ledger.contains("tcp_decision", 200));
+        fs::remove_dir_all(directory).unwrap();
+    }
+    use std::time::SystemTime;
 }

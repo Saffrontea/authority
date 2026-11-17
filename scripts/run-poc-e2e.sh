@@ -14,7 +14,7 @@ client_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-client:/ { 
     exit 1
 }
 AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
-AUTHORITY_NETWORK_GRANT_TTL_SECONDS=15
+AUTHORITY_NETWORK_GRANT_TTL_SECONDS=25
 AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS=15
 AUTHORITY_BIND=127.0.0.1:3100
 AUTHORITY_RP_ORIGIN=http://localhost:3100
@@ -60,6 +60,8 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM
 
+mise run mesh:tcp-demo:install
+
 setsid "${SCRIPT_DIR}/run-poc.sh" &
 poc_pid=$!
 
@@ -84,7 +86,7 @@ echo "[poc] issuer and node-agent CORS allowlists verified" >&2
 # build; an empty unauthenticated request reaches it and returns 401.
 grant_probe_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --request POST --header 'content-type: application/json' \
-    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","ssh_public_key_fingerprint":"SHA256:test","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","terminal_token_hash":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
+    --data '{"device_id":"00000000-0000-0000-0000-000000000001","target_node_id":"00000000-0000-0000-0000-000000000002","ssh_public_key_fingerprint":"SHA256:test","wireguard_public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","mtls_client_spki_sha256":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","terminal_token_hash":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
     "${AUTHORITY_POC_CONTROL_ORIGIN}/v1/access-authorizations")"
 if [[ "${grant_probe_status}" != "401" ]]; then
     echo "poc:e2e: expected current grant route (401), got HTTP ${grant_probe_status}" >&2

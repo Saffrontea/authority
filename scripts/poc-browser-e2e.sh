@@ -109,6 +109,17 @@ wait_for_terminal() {
     die "timed out waiting for ${description}: ${value}"
 }
 
+wait_for_mesh() {
+    local description="$1"
+    for _ in {1..10}; do
+        if mise run mesh:verify >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    die "${description}"
+}
+
 json_post() {
     local url="$1" body="$2" authorization="${3:-}" response_file status
     response_file="$(mktemp)"
@@ -234,10 +245,16 @@ for legacy_route in /v1/issuance-authorizations /v1/network-access-grants; do
 done
 printf 'Local SSH boundary: certificate-only install denied, tokenless terminal denied, legacy routes absent\n'
 
+if [[ -n "${wireguard_public_key}" ]]; then
+    wait_for_mesh 'login network grant did not establish the WireGuard tunnel'
+    reconnected="$(webdriver POST "/session/${session}/execute/async" \
+        '{"script":"const done = arguments[0]; window.authorityReconnectTerminal(); setTimeout(() => done({ok:true}), 100);","args":[]}')"
+    [[ "$(jq -r '.ok' <<<"${reconnected}")" == 'true' ]] || die 'SSH terminal reconnect could not be started'
+fi
 terminal_command="$(webdriver POST "/session/${session}/execute/async" \
-    '{"script":"const done = arguments[0]; window.authorityTerminalCommand(\"printf WEB_TERMINAL_OK\").then(() => done({ok:true})).catch(error => done({error:error.message}));","args":[]}')"
-terminal_error="$(jq -r '.error // empty' <<<"${terminal_command}")"
-[[ -z "${terminal_error}" ]] || die "web SSH terminal command failed: ${terminal_error}"
+    '{"script":"const done = arguments[0]; window.authorityTerminalCommand(\"printf WEB_TERMINAL_OK\").then(() => done({ok:true})).catch(error => done({terminal_error:error.message,output:document.querySelector(\"#terminal-output\").textContent}));","args":[]}')"
+terminal_error="$(jq -r '.terminal_error // empty' <<<"${terminal_command}")"
+[[ -z "${terminal_error}" ]] || die "web SSH terminal command failed: ${terminal_error} $(jq -r '.output // empty' <<<"${terminal_command}")"
 wait_for_terminal 'WEB_TERMINAL_OK' 'web SSH terminal command' >/dev/null
 printf 'Web SSH terminal: signed certificate opened an interactive session\n'
 
@@ -248,6 +265,7 @@ plain_key="$(mktemp)"
 cp "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" "${plain_key}"
 chmod 0600 "${plain_key}"
 ssh_options=(
+    -F /dev/null
     -o BatchMode=yes
     -o ConnectTimeout=5
     -o IdentitiesOnly=yes
@@ -322,8 +340,10 @@ if [[ -n "${wireguard_public_key}" ]]; then
     decision_id="$(jq -r '.decision_id' <<<"${decision}")"
     ssh_decision_id="$(jq -r '.ssh_authorization.authorization.nonce' <<<"${decision}")"
     network_decision_id="$(jq -r '.network_grant.grant.nonce' <<<"${decision}")"
-    [[ "${decision_id}" == "${ssh_decision_id}" && "${decision_id}" == "${network_decision_id}" ]] ||
-        die 'SSH and WireGuard artifacts do not share the signed decision id'
+    mtls_decision_id="$(jq -r '.mtls_authorization.authorization.decision_id' <<<"${decision}")"
+    [[ "${decision_id}" == "${ssh_decision_id}" && "${decision_id}" == "${network_decision_id}" && "${decision_id}" == "${mtls_decision_id}" ]] ||
+        die 'SSH, WireGuard, and mTLS artifacts do not share the signed decision id'
+    printf 'Common projection: SSH, WireGuard, and mTLS share decision %s\n' "${decision_id}"
 
     replay_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
         --request POST --header 'content-type: application/json' \
@@ -361,9 +381,13 @@ if [[ -n "${wireguard_public_key}" ]]; then
     [[ "$(jq -r '.notice.decision_id' <<<"${revocation}")" == "${decision_id}" ]] ||
         die 'revocation notice did not bind the decision'
 
-    pushed="$(json_post "${network_agent_origin}/v1/revocations" "${revocation}")"
-    [[ "$(jq -r '.peer_removed' <<<"${pushed}")" == 'true' ]] ||
-        die 'pushed revocation did not remove the active peer'
+    # Only the Control Plane delivers this notice. No client-side relay.
+    for attempt in $(seq 1 15); do
+        if ! mise run mesh:verify >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
     if mise run mesh:verify >/dev/null 2>&1; then
         die 'WireGuard peer remained active after pushed revocation'
     fi
@@ -396,20 +420,49 @@ if [[ -n "${wireguard_public_key}" ]]; then
         die "revoked grant was accepted: HTTP ${revoked_grant_status} ${revoked_grant_error}"
     printf 'Revocation distribution: push removed peer, pull reconciled idempotently, late grant denied\n'
 
-    ttl="${AUTHORITY_NETWORK_GRANT_TTL_SECONDS:-5}"
-    printf '[poc:e2e] waiting %ss for grant and notice expiry\n' "$((ttl + 2))"
-    sleep "$((ttl + 2))"
-    printf 'WireGuard grant expiry: revoked peer remained denied\n'
-    sleep 4
-    if ssh "${ssh_options[@]}" \
-        -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \
-        -o "CertificateFile=${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" \
-        "deploy@${ssh_target}" true; then
-        die 'target accepted an expired SSH certificate'
-    fi
+    replacement_result="$(webdriver POST "/session/${session}/execute/async" \
+        '{"script":"const done = arguments[0]; window.authorityRequestNetworkGrant().then(grant => done({grant})).catch(error => done({error:error.message}));","args":[]}')"
+    replacement_error="$(jq -r '.error // empty' <<<"${replacement_result}")"
+    [[ -z "${replacement_error}" ]] || die "replacement network grant failed: ${replacement_error}"
+    replacement_grant="$(jq -c '.grant' <<<"${replacement_result}")"
+    replacement="$(json_post "${network_agent_origin}/v1/network-grants" "${replacement_grant}")"
+    wait_for_mesh 'replacement WireGuard grant did not restore the tunnel'
+
+    ssh_expired=0
+    for _ in {1..20}; do
+        if ssh "${ssh_options[@]}" \
+            -i "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519" \
+            -o "CertificateFile=${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" \
+            "deploy@${ssh_target}" true; then
+            sleep 1
+        else
+            ssh_expired=1
+            break
+        fi
+    done
+    (( ssh_expired == 1 )) || die 'SSH certificate did not expire within its configured lifetime'
+    mise run mesh:verify >/dev/null 2>&1 ||
+        die 'SSH certificate expiry incorrectly removed the longer-lived WireGuard grant'
+    printf 'Independent lifetime: SSH expired while the longer-lived WireGuard grant remained active\n'
+
     wait_for_terminal 'terminal transport error' 'expired web SSH terminal capability denial' >/dev/null
     printf 'OpenSSH certificate expiry: target denied expired certificate; node-agent denied expired terminal capability\n'
+    replacement_expires="$(jq -r '.expires_at' <<<"${replacement}")"
+    remaining="$((replacement_expires - $(date +%s) + 2))"
+    (( remaining > 0 )) || remaining=1
+    printf '[poc:e2e] waiting %ss for the longer-lived WireGuard grant to expire\n' "${remaining}"
+    sleep "${remaining}"
+    if mise run mesh:verify >/dev/null 2>&1; then
+        die 'WireGuard tunnel remained active after its independent grant expired'
+    fi
+    printf 'Independent lifetime: WireGuard expired on its own deadline\n'
     mise run mesh:configure
 fi
 
-printf 'OpenSSH certificate validation: OK\n'
+if [[ -n "${wireguard_public_key}" ]]; then
+    client_underlay="${AUTHORITY_SSH_TARGET:?}"
+    python3 "${SCRIPT_DIR}/tcp-layer-e2e.py" "${session}" "${control_origin}" "${network_agent_origin}" "${client_underlay}"
+    mise run mesh:configure
+fi
+
+printf 'OpenSSH and TCP admission validation: OK\n'

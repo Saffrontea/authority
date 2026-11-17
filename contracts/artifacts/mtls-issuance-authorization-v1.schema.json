@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/mtls-issuance-authorization-v1.schema.json",
+  "title": "MtlsIssuanceAuthorizationV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "issuer", "domain_id", "subject_user_id", "device_id", "target_node_id", "client_spki_sha256", "identity_uri", "service_audience", "policy_id", "decision_id", "nonce", "issued_at", "not_before", "expires_at", "audience"],
+  "properties": {
+    "version": { "const": "1" },
+    "issuer": { "$ref": "#/$defs/identifier" },
+    "domain_id": { "$ref": "#/$defs/identifier" },
+    "subject_user_id": { "$ref": "#/$defs/identifier" },
+    "device_id": { "$ref": "#/$defs/identifier" },
+    "target_node_id": { "$ref": "#/$defs/identifier" },
+    "client_spki_sha256": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_+/=-]+$" },
+    "identity_uri": { "type": "string", "minLength": 10, "maxLength": 512, "pattern": "^spiffe://" },
+    "service_audience": { "$ref": "#/$defs/identifier" },
+    "policy_id": { "$ref": "#/$defs/identifier" },
+    "decision_id": { "$ref": "#/$defs/identifier" },
+    "nonce": { "type": "string", "minLength": 32, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$" },
+    "issued_at": { "type": "integer", "minimum": 0 },
+    "not_before": { "type": "integer", "minimum": 0 },
+    "expires_at": { "type": "integer", "minimum": 1 },
+    "audience": { "$ref": "#/$defs/identifier" }
+  },
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:@-]+$" }
+  }
+}

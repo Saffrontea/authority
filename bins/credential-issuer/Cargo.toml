@@ -11,6 +11,7 @@ authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true
 authority-replay-ledger.workspace = true
 axum.workspace = true
+openssl.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ssh-key.workspace = true

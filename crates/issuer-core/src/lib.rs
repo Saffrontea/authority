@@ -1,8 +1,10 @@
 //! Cryptographic ports and application logic for issuance authorization.
 
 use authority_contracts_model::{
-    ContractError, DecisionRevocationNoticeV1, IssuanceAuthorizationV1, NetworkAccessGrantV1,
-    SignedDecisionRevocationNoticeV1, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    AdapterGrantKindV1, ContractError, DecisionRevocationNoticeV1, DecisionRevocationNoticeV2,
+    IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
+    SignedDecisionRevocationNoticeV1, SignedDecisionRevocationNoticeV2,
+    SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 use thiserror::Error;
 
@@ -54,6 +56,8 @@ pub enum AuthorizationEnvelopeError {
     RevocationTargetNodeMismatch,
     #[error("revocation notice is expired at the supplied time")]
     RevocationNoticeExpired,
+    #[error("revocation notice does not affect the expected adapter")]
+    RevocationAdapterMismatch,
 }
 
 /// Signs a validated authorization using an injected cryptographic adapter.
@@ -213,6 +217,99 @@ pub fn verify_revocation_notice_for_node(
     Ok(())
 }
 
+/// Signs a protocol-independent decision revocation notice.
+///
+/// # Errors
+///
+/// Returns an error for invalid fields or signing adapter failures.
+pub fn sign_revocation_notice_v2(
+    notice: DecisionRevocationNoticeV2,
+    signer: &impl AuthorizationSigner,
+) -> Result<SignedDecisionRevocationNoticeV2, AuthorizationEnvelopeError> {
+    let preimage = notice.signing_preimage()?;
+    let signature = signer.sign(&preimage)?;
+    let envelope = SignedDecisionRevocationNoticeV2 {
+        notice,
+        algorithm: "Ed25519".to_owned(),
+        key_id: signer.key_id().to_owned(),
+        signature: encode_base64url(&signature),
+    };
+    envelope.validate()?;
+    Ok(envelope)
+}
+
+/// Verifies a common revocation for one target and adapter.
+///
+/// # Errors
+///
+/// Returns an error for malformed, tampered, expired, misdirected notices or
+/// notices which do not include the expected adapter.
+pub fn verify_revocation_notice_v2_for_adapter(
+    envelope: &SignedDecisionRevocationNoticeV2,
+    verifier: &impl AuthorizationVerifier,
+    expected_target_node_id: &str,
+    expected_adapter: AdapterGrantKindV1,
+    now: i64,
+) -> Result<(), AuthorizationEnvelopeError> {
+    envelope.validate()?;
+    let signature = decode_base64url(&envelope.signature)
+        .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
+    let preimage = envelope.notice.signing_preimage()?;
+    if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
+        return Err(AuthorizationEnvelopeError::VerificationFailed);
+    }
+    if envelope.notice.target_node_id != expected_target_node_id {
+        return Err(AuthorizationEnvelopeError::RevocationTargetNodeMismatch);
+    }
+    if !envelope.notice.adapter_kinds.contains(&expected_adapter) {
+        return Err(AuthorizationEnvelopeError::RevocationAdapterMismatch);
+    }
+    if now >= envelope.notice.expires_at {
+        return Err(AuthorizationEnvelopeError::RevocationNoticeExpired);
+    }
+    Ok(())
+}
+
+/// Signs an mTLS issuance authorization.
+///
+/// # Errors
+///
+/// Returns an error for invalid fields or signing adapter failures.
+pub fn sign_mtls_authorization(
+    authorization: MtlsIssuanceAuthorizationV1,
+    signer: &impl AuthorizationSigner,
+) -> Result<SignedMtlsIssuanceAuthorizationV1, AuthorizationEnvelopeError> {
+    let preimage = authorization.signing_preimage()?;
+    let signature = signer.sign(&preimage)?;
+    let envelope = SignedMtlsIssuanceAuthorizationV1 {
+        authorization,
+        algorithm: "Ed25519".to_owned(),
+        key_id: signer.key_id().to_owned(),
+        signature: encode_base64url(&signature),
+    };
+    envelope.validate()?;
+    Ok(envelope)
+}
+
+/// Verifies an mTLS issuance authorization signature.
+///
+/// # Errors
+///
+/// Returns an error for malformed, tampered, or unverifiable envelopes.
+pub fn verify_mtls_authorization(
+    envelope: &SignedMtlsIssuanceAuthorizationV1,
+    verifier: &impl AuthorizationVerifier,
+) -> Result<(), AuthorizationEnvelopeError> {
+    envelope.validate()?;
+    let signature = decode_base64url(&envelope.signature)
+        .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
+    let preimage = envelope.authorization.signing_preimage()?;
+    if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
+        return Err(AuthorizationEnvelopeError::VerificationFailed);
+    }
+    Ok(())
+}
+
 fn encode_base64url(input: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -266,6 +363,57 @@ fn decode_character(value: u8) -> Option<u8> {
         b'_' => Some(63),
         _ => None,
     }
+}
+
+/// Signs a port-scoped TCP admission grant.
+///
+/// # Errors
+/// Returns an error for invalid claims or signer failure.
+pub fn sign_tcp_grant(
+    grant: authority_contracts_model::TcpAccessGrantV1,
+    signer: &impl AuthorizationSigner,
+) -> Result<authority_contracts_model::SignedTcpAccessGrantV1, AuthorizationEnvelopeError> {
+    let signature = signer.sign(&grant.signing_preimage()?)?;
+    let envelope = authority_contracts_model::SignedTcpAccessGrantV1 {
+        grant,
+        algorithm: "Ed25519".to_owned(),
+        key_id: signer.key_id().to_owned(),
+        signature: encode_base64url(&signature),
+    };
+    envelope.validate()?;
+    Ok(envelope)
+}
+
+/// Verifies TCP admission and binds it to a node, audience, and time.
+///
+/// # Errors
+/// Returns an error for invalid, tampered, misdirected, or inactive grants.
+pub fn verify_tcp_grant_for_node(
+    envelope: &authority_contracts_model::SignedTcpAccessGrantV1,
+    verifier: &impl AuthorizationVerifier,
+    target_node_id: &str,
+    now: i64,
+) -> Result<(), AuthorizationEnvelopeError> {
+    envelope.validate()?;
+    let signature = decode_base64url(&envelope.signature)
+        .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
+    if !verifier.verify(
+        &envelope.key_id,
+        &envelope.grant.signing_preimage()?,
+        &signature,
+    )? {
+        return Err(AuthorizationEnvelopeError::VerificationFailed);
+    }
+    if envelope.grant.audience != "network-agent" {
+        return Err(AuthorizationEnvelopeError::InvalidAudience);
+    }
+    if envelope.grant.target_node_id != target_node_id {
+        return Err(AuthorizationEnvelopeError::TargetNodeMismatch);
+    }
+    if now < envelope.grant.not_before || now >= envelope.grant.expires_at {
+        return Err(AuthorizationEnvelopeError::GrantNotActive);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -370,6 +518,53 @@ mod tests {
         assert!(matches!(
             verify_network_grant_for_node(&envelope, &crypto, "node_01", 1_794_326_700),
             Err(AuthorizationEnvelopeError::GrantNotActive)
+        ));
+    }
+
+    #[test]
+    fn one_common_revocation_is_consumable_by_wireguard_and_mtls_adapters() {
+        let crypto = FakeCrypto::default();
+        let envelope = sign_revocation_notice_v2(
+            DecisionRevocationNoticeV2 {
+                version: "2".to_owned(),
+                issuer: "domain-authority:example".to_owned(),
+                domain_id: "domain_example".to_owned(),
+                target_node_id: "node_01".to_owned(),
+                decision_id: "0123456789abcdef0123456789abcdef".to_owned(),
+                reason: "user_requested".to_owned(),
+                sequence: 1,
+                revoked_at: 1_794_326_400,
+                expires_at: 1_794_326_700,
+                adapter_kinds: vec![
+                    AdapterGrantKindV1::WireGuardPeer,
+                    AdapterGrantKindV1::MtlsClientCertificate,
+                ],
+            },
+            &crypto,
+        )
+        .expect("sign common revocation");
+        for adapter in [
+            AdapterGrantKindV1::WireGuardPeer,
+            AdapterGrantKindV1::MtlsClientCertificate,
+        ] {
+            verify_revocation_notice_v2_for_adapter(
+                &envelope,
+                &crypto,
+                "node_01",
+                adapter,
+                1_794_326_500,
+            )
+            .expect("adapter accepts common notice");
+        }
+        assert!(matches!(
+            verify_revocation_notice_v2_for_adapter(
+                &envelope,
+                &crypto,
+                "node_01",
+                AdapterGrantKindV1::SshCertificate,
+                1_794_326_500,
+            ),
+            Err(AuthorizationEnvelopeError::RevocationAdapterMismatch)
         ));
     }
 

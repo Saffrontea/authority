@@ -38,6 +38,7 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/ssh-key", get(get_ssh_key))
+        .route("/v1/mtls-key", get(get_mtls_key))
         .route("/v1/ssh-certificate", post(install_ssh_certificate))
         .route("/v1/ssh-terminal", get(open_ssh_terminal))
         .with_state(state)
@@ -108,7 +109,10 @@ async fn run_ssh_terminal(
     let destination = format!("deploy@{target}");
     let port = port.to_string();
     let child = Command::new("/usr/bin/ssh")
+        // Use only the explicit target, identity, and trust settings below.
         .args([
+            "-F",
+            "/dev/null",
             "-tt",
             "-o",
             "BatchMode=yes",
@@ -212,6 +216,33 @@ async fn get_ssh_key(State(state): State<AppState>) -> Result<Json<SshKeyRespons
     Ok(Json(SshKeyResponse {
         public_key: public_key.to_openssh().map_err(ApiError::internal)?,
         fingerprint: public_key.fingerprint(HashAlg::Sha256).to_string(),
+    }))
+}
+
+#[derive(Serialize)]
+struct MtlsKeyResponse {
+    public_key_pem: String,
+    fingerprint: String,
+}
+
+async fn get_mtls_key(State(state): State<AppState>) -> Result<Json<MtlsKeyResponse>, ApiError> {
+    let public_der = state
+        .mtls_private_key()
+        .public_key_to_der()
+        .map_err(ApiError::internal)?;
+    let fingerprint = format!(
+        "SHA256:{}",
+        openssl::base64::encode_block(&openssl::sha::sha256(&public_der)).trim_end_matches('=')
+    );
+    Ok(Json(MtlsKeyResponse {
+        public_key_pem: String::from_utf8(
+            state
+                .mtls_private_key()
+                .public_key_to_pem()
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+        fingerprint,
     }))
 }
 

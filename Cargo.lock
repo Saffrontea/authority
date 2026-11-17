@@ -155,6 +155,7 @@ dependencies = [
  "authority-device-auth-core",
  "authority-issuer-core",
  "authority-policy-core",
+ "authority-projection-core",
  "axum",
  "openssl",
  "serde",
@@ -176,6 +177,7 @@ dependencies = [
  "authority-device-auth-core",
  "authority-issuer-core",
  "openssl",
+ "serde_json",
 ]
 
 [[package]]
@@ -187,6 +189,7 @@ dependencies = [
  "authority-issuer-core",
  "authority-replay-ledger",
  "axum",
+ "openssl",
  "serde",
  "serde_json",
  "ssh-key",
@@ -256,6 +259,15 @@ dependencies = [
  "proptest",
  "thiserror 2.0.21",
  "uuid",
+]
+
+[[package]]
+name = "authority-projection-core"
+version = "0.1.0"
+dependencies = [
+ "authority-contracts-model",
+ "proptest",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

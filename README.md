@@ -6,11 +6,12 @@ This workspace demonstrates the initial end-to-end trust flow:
 2. evaluate an explicit user, device, target, and principal policy;
 3. verify proof of possession for both the browser device and the target
    node's LXC-held Ed25519 identity;
-4. make one policy decision and bind both the SSH authorization and WireGuard
-   grant to its shared signed decision nonce;
+4. make one policy decision and project it into independently scoped SSH,
+   WireGuard, and mTLS contracts;
 5. independently verify the scoped contracts in the Credential Issuer and
    target Network Agent, with durable replay ledgers;
-6. issue and install a short-lived OpenSSH user certificate, prove that the
+6. issue a short-lived X.509 client certificate bound to a SPIFFE identity,
+   issue and install a short-lived OpenSSH user certificate, prove that the
    target `sshd` rejects the bare key, accepts the CA-signed principal, and
    rejects it after expiry; then apply and revoke the WireGuard peer.
 
@@ -44,18 +45,87 @@ plane, so removing the target peer also denies terminal reconnection.
 
 ### Revocation distribution
 
-Revocation is a signed, target-scoped decision notice. The Control Plane
+Revocation is a signed, target-scoped, protocol-independent decision notice.
+Its affected adapter set can include SSH, WireGuard, and mTLS. The Control Plane
 commits each notice to `policy.revocation_notices` before distribution and
 assigns a monotonic sequence. The target Network Agent verifies the signature,
 audience, node binding, and lifetime before removing an active peer. A notice
 received before its Grant blocks that Grant from being installed later.
 
-Immediate delivery uses `POST /v1/revocations` (Push). Reconciliation reads
-`GET /v1/revocations?target_node_id=...&after=...` (Pull) and submits the same
+The Control Plane polls persisted, unexpired notices every second and delivers
+`POST /v1/revocations` directly to the configured Network Agent over the LXC
+underlay (`AUTHORITY_NETWORK_AGENT_ORIGIN`). Delivery does not pass through the
+browser or the WireGuard peer being revoked. Failed delivery is retried;
+restarting the Control Plane replays live notices, which the agent applies
+idempotently. The Control Plane runtime requires `curl`. This PoC has one
+configured target; distribution selects only notices for that target identity.
+The UI reports persistence, not an acknowledgement from the enforcement agent.
+
+Manual reconciliation can also read
+`GET /v1/revocations?target_node_id=...&after=...` (Pull) and submit the same
 signed envelope to the agent. Applying it twice is intentionally idempotent.
 The PoC UI exposes **Revoke current access**, and `mise run poc:e2e` proves
 Push removal, Pull reconciliation, late-Grant rejection, and SSH-over-WireGuard
-denial while the SSH certificate itself is still valid.
+denial while the SSH certificate itself is still valid. It also issues a
+longer-lived replacement network Grant and proves the inverse boundary: SSH
+expiry does not remove WireGuard access, which remains active until its own
+deadline.
+
+### Selective TCP admission
+
+TCP admission is a separate projection of the same policy decision, identified
+as `tcp.port`. `POST /v1/tcp-authorizations` accepts the authenticated device and
+target, sorted unique `destination_ports`, `ttl_seconds`, and `include_network`.
+With `include_network: false`, it emits only `tcp_grant`: no peer, SSH, or mTLS
+material is required or issued. With `true`, TCP and WireGuard grants share a
+decision id but keep independent deadlines. All selection fields are bound into
+the device proof (`access.authorize_tcp`).
+
+The policy engine plans `tcp.connect` separately; selecting mesh membership also
+requires `mesh.join` and `network.reach`. The winning TCP policy's `tcp_ports`
+limits which ports may be requested. Existing policies default to no TCP ports;
+the demo bootstrap explicitly permits 8080 and 8081. The signed TCP contract
+binds subject, device, node, source IPv4 address, destination IPv4 address,
+ports, audience, decision, and lifetime. Bootstrap reserves the configured
+`AUTHORITY_TARGET_MESH_ADDRESS` (default `10.77.0.2`) to match the provisioned
+PoC target; an address already owned by another identity is rejected.
+
+After signing in, the **TCP access** section lets you select ports, lifetime,
+and whether to also authorize WireGuard. The corresponding browser helpers are:
+
+```js
+const authorization = await authorityRequestTcpAuthorization([8080], true, 20);
+// The UI installs network_grant (when selected) and tcp_grant at the target.
+await authorityRevokeDecision(authorization.decision_id, ['tcp.port']);
+```
+
+The target Network Agent accepts `POST /v1/tcp-grants` and installs an atomic
+nftables admission set with kernel timeouts. `AUTHORITY_TCP_MANAGED_PORTS`
+(default `8080,8081`) defines the services governed by this adapter on `wg0`.
+These ports deny TCP traffic until explicitly granted; other ports retain the
+existing network/service policy. Filtering applies to both packet directions,
+including established streams, without an established-connection bypass.
+Overlapping grants for the same address/port tuple remain allowed until the
+last independent grant expires or is revoked. Only the adapter's own
+`inet authority_tcp` table is managed. The implementation uses the
+[nftables set timeouts and concatenations](https://www.netfilter.org/projects/nftables/manpage.html).
+
+`POST /v1/access-authorizations/{decision_id}/revocations` optionally selects
+`adapter_kinds`; the selection is included in the `access.revoke` device proof.
+Omitting it revokes all adapters issued by that decision. A `['tcp.port']`
+notice removes only that decision's TCP admission, retaining its WireGuard peer
+and grants from other decisions. Later `['wireguard.peer']` revocation has its
+own durable sequence; repeating a scope returns its original notice. The
+Control Plane delivers these notices directly over the management underlay.
+Adapter-specific durable tombstones reject late grants across agent restarts;
+restart clears active TCP admission, so it fails closed.
+
+`mise run poc:e2e` installs two echo services with `mesh:tcp-demo:install` and
+proves selected/unselected ports, TCP-only versus combined projection, proof
+and grant tampering rejection, replay, selective revocation of both new and
+established streams, late-grant denial, overlapping independent service access,
+and TCP expiry while WireGuard remains active. Linux targets require nftables;
+the LXC installer installs it before starting the Network Agent.
 
 ## Testing without Passkey hardware
 

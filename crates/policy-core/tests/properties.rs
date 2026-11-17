@@ -25,6 +25,12 @@ fn intent(outcomes: u8, mesh: bool) -> AccessIntent {
     if outcomes & 2 != 0 {
         selected.insert(Outcome::NetworkReachability);
     }
+    if outcomes & 4 != 0 {
+        selected.insert(Outcome::MtlsService);
+    }
+    if outcomes & 8 != 0 {
+        selected.insert(Outcome::TcpConnect);
+    }
     AccessIntent {
         outcomes: selected,
         route: if mesh {
@@ -45,6 +51,12 @@ fn capability_set(mask: u8) -> BTreeSet<Capability> {
     }
     if mask & 4 != 0 {
         capabilities.insert(Capability::SshIssue);
+    }
+    if mask & 8 != 0 {
+        capabilities.insert(Capability::MtlsIssue);
+    }
+    if mask & 16 != 0 {
+        capabilities.insert(Capability::TcpConnect);
     }
     capabilities
 }
@@ -103,7 +115,7 @@ fn rule_strategy() -> impl Strategy<Value = RuleSpec> {
         any::<bool>(),
         any::<i16>(),
         any::<u16>(),
-        0_u8..8,
+        0_u8..32,
         any::<bool>(),
         any::<bool>(),
     )
@@ -122,7 +134,7 @@ fn rule_strategy() -> impl Strategy<Value = RuleSpec> {
 proptest! {
     #[test]
     fn policy_result_is_invariant_under_rule_order(
-        outcomes in 0_u8..4,
+        outcomes in 0_u8..16,
         mesh in any::<bool>(),
         specs in prop::collection::vec(rule_strategy(), 0..40),
     ) {
@@ -148,7 +160,7 @@ proptest! {
 
     #[test]
     fn a_higher_priority_deny_rejects_its_required_capability(
-        outcomes in 1_u8..4,
+        outcomes in 1_u8..16,
         mesh in any::<bool>(),
         selected in any::<usize>(),
         priority in -10_000_i32..10_000,
@@ -185,7 +197,7 @@ proptest! {
 
     #[test]
     fn planned_capabilities_obey_dependency_closure(
-        outcomes in 0_u8..4,
+        outcomes in 0_u8..16,
         mesh in any::<bool>(),
     ) {
         let access_intent = intent(outcomes, mesh);
@@ -194,6 +206,11 @@ proptest! {
             required.contains(&Capability::SshIssue),
             access_intent.outcomes.contains(&Outcome::Ssh),
         );
+        prop_assert_eq!(
+            required.contains(&Capability::MtlsIssue),
+            access_intent.outcomes.contains(&Outcome::MtlsService),
+        );
+        prop_assert_eq!(required.contains(&Capability::TcpConnect), access_intent.outcomes.contains(&Outcome::TcpConnect));
         if required.contains(&Capability::NetworkReach) && access_intent.route == Route::MeshRequired {
             prop_assert!(required.contains(&Capability::MeshJoin));
         }
@@ -202,4 +219,20 @@ proptest! {
             prop_assert_eq!(access_intent.route, Route::MeshRequired);
         }
     }
+}
+
+#[test]
+fn tcp_can_be_selected_without_ssh_mtls_or_mesh_membership() {
+    assert_eq!(
+        plan(&AccessIntent::tcp(Route::Direct)),
+        BTreeSet::from([Capability::TcpConnect])
+    );
+    assert_eq!(
+        plan(&AccessIntent::tcp(Route::MeshRequired)),
+        BTreeSet::from([
+            Capability::TcpConnect,
+            Capability::MeshJoin,
+            Capability::NetworkReach,
+        ])
+    );
 }

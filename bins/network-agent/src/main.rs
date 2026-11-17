@@ -1,3 +1,5 @@
+mod tcp;
+
 use std::{
     collections::HashMap,
     env,
@@ -11,11 +13,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use authority_contracts_model::{SignedDecisionRevocationNoticeV1, SignedNetworkAccessGrantV1};
+use authority_contracts_model::{
+    AdapterGrantKindV1, SignedDecisionRevocationNoticeV2, SignedNetworkAccessGrantV1,
+};
 use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
 use authority_device_auth_core::{encode_base64url, node_enrollment_preimage};
 use authority_issuer_core::{
-    AuthorizationSigner, verify_network_grant_for_node, verify_revocation_notice_for_node,
+    AuthorizationSigner, verify_network_grant_for_node, verify_revocation_notice_v2_for_adapter,
 };
 use authority_replay_ledger::ReplayLedger;
 use axum::{
@@ -42,12 +46,14 @@ struct Inner {
     replay_ledger: Mutex<ReplayLedger>,
     policy_state: Mutex<PolicyState>,
     identity: NodeIdentity,
+    revocations: Mutex<ReplayLedger>,
 }
 
 #[derive(Default)]
 struct PolicyState {
     active_peers: HashMap<String, ActivePeer>,
     revoked_decisions: HashMap<String, i64>,
+    tcp: Option<tcp::TcpAdmission>,
 }
 
 struct ActivePeer {
@@ -81,6 +87,17 @@ impl PolicyState {
             .iter()
             .find_map(|(peer, active)| (active.decision_id == decision_id).then(|| peer.clone()))
     }
+
+    fn remove_if_current(&mut self, peer: &str, decision_id: &str, expires_at: i64) -> bool {
+        if self.active_peers.get(peer).is_some_and(|active| {
+            active.decision_id == decision_id && active.expires_at == expires_at
+        }) {
+            self.active_peers.remove(peer);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 struct NodeIdentity {
@@ -100,6 +117,7 @@ struct RevokeResponse {
     decision_id: String,
     sequence: i64,
     peer_removed: bool,
+    tcp_removed: bool,
 }
 
 const MAX_ACTIVE_PEERS: usize = 1024;
@@ -126,6 +144,21 @@ mod revocation_tests {
         assert_eq!(state.record_revocation("decision", 200, 100), None);
         assert!(state.is_revoked("decision", 101));
         assert!(!state.is_revoked("decision", 200));
+    }
+
+    #[test]
+    fn old_expiry_cannot_remove_a_replacement_grant_with_the_same_deadline() {
+        let mut state = PolicyState::default();
+        state.active_peers.insert(
+            "peer".to_owned(),
+            ActivePeer {
+                decision_id: "new-decision".to_owned(),
+                expires_at: 200,
+            },
+        );
+        assert!(!state.remove_if_current("peer", "old-decision", 200));
+        assert!(state.active_peers.contains_key("peer"));
+        assert!(state.remove_if_current("peer", "new-decision", 200));
     }
 }
 
@@ -176,19 +209,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?),
         now,
     )?;
+    let revocations = ReplayLedger::open(
+        PathBuf::from(value(
+            "AUTHORITY_NETWORK_AGENT_REVOCATION_LEDGER_FILE",
+            "/var/lib/authority/network-agent-revocations",
+        )?),
+        now,
+    )?;
+    let tcp_ports = value("AUTHORITY_TCP_MANAGED_PORTS", "8080,8081")?
+        .split(',')
+        .map(|port| port.parse::<u16>().map_err(|e| e.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    if tcp_ports.is_empty() || tcp_ports.contains(&0) {
+        return Err("invalid managed TCP ports".into());
+    }
+    let tcp = tcp::TcpAdmission::initialize(&interface, tcp_ports)?;
     clear_all_peers(&interface)?;
     let state = AppState(Arc::new(Inner {
         verifier,
         node_id,
         interface,
         replay_ledger: Mutex::new(replay_ledger),
-        policy_state: Mutex::new(PolicyState::default()),
+        policy_state: Mutex::new(PolicyState {
+            tcp: Some(tcp),
+            ..PolicyState::default()
+        }),
+        revocations: Mutex::new(revocations),
         identity: NodeIdentity { public_key, proof },
     }));
     let router = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/v1/identity", get(identity))
         .route("/v1/network-grants", post(apply_grant))
+        .route("/v1/tcp-grants", post(apply_tcp_grant))
         .route("/v1/revocations", post(apply_revocation))
         .with_state(state)
         .layer(
@@ -261,7 +314,14 @@ async fn apply_grant(
     // successful kernel update and insertion. Otherwise concurrent grants can
     // both observe a free slot and exceed the configured bound.
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
-    if policy.is_revoked(&envelope.grant.nonce, now) {
+    if policy.is_revoked(&envelope.grant.nonce, now)
+        || state
+            .0
+            .revocations
+            .lock()
+            .map_err(ApiError::internal)?
+            .contains(&format!("wg_{}", envelope.grant.nonce), now)
+    {
         return Err(ApiError::conflict("network_grant_revoked"));
     }
     if policy.active_peers.len() >= MAX_ACTIVE_PEERS && !policy.active_peers.contains_key(&peer) {
@@ -289,10 +349,11 @@ async fn apply_grant(
     .map_err(ApiError::internal)?;
 
     let expires_at = envelope.grant.expires_at;
+    let decision_id = envelope.grant.nonce.clone();
     policy.active_peers.insert(
         peer.clone(),
         ActivePeer {
-            decision_id: envelope.grant.nonce.clone(),
+            decision_id: decision_id.clone(),
             expires_at,
         },
     );
@@ -307,16 +368,7 @@ async fn apply_grant(
             .policy_state
             .lock()
             .map_or(true, |mut policy| {
-                if policy
-                    .active_peers
-                    .get(&peer)
-                    .is_some_and(|active| active.expires_at == expires_at)
-                {
-                    policy.active_peers.remove(&peer);
-                    true
-                } else {
-                    false
-                }
+                policy.remove_if_current(&peer, &decision_id, expires_at)
             });
         if !should_remove {
             return;
@@ -337,15 +389,68 @@ async fn apply_grant(
 
 async fn apply_revocation(
     State(state): State<AppState>,
-    Json(envelope): Json<SignedDecisionRevocationNoticeV1>,
+    Json(envelope): Json<SignedDecisionRevocationNoticeV2>,
 ) -> Result<Json<RevokeResponse>, ApiError> {
     let now = unix_timestamp().map_err(ApiError::internal)?;
-    verify_revocation_notice_for_node(&envelope, &state.0.verifier, &state.0.node_id, now)
-        .map_err(|cause| ApiError::unauthorized("invalid_revocation_notice", cause))?;
+    let affects_wg = envelope
+        .notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::WireGuardPeer);
+    let affects_tcp = envelope
+        .notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::TcpPort);
+    if !affects_wg && !affects_tcp {
+        return Err(ApiError::conflict("unsupported_revocation_adapter"));
+    }
+    for (affected, kind) in [
+        (affects_wg, AdapterGrantKindV1::WireGuardPeer),
+        (affects_tcp, AdapterGrantKindV1::TcpPort),
+    ] {
+        if affected {
+            verify_revocation_notice_v2_for_adapter(
+                &envelope,
+                &state.0.verifier,
+                &state.0.node_id,
+                kind,
+                now,
+            )
+            .map_err(|cause| ApiError::unauthorized("invalid_revocation_notice", cause))?;
+        }
+    }
     let decision_id = envelope.notice.decision_id.clone();
     let sequence = envelope.notice.sequence;
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
-    let peer = policy.record_revocation(&decision_id, envelope.notice.expires_at, now);
+    // Persist adapter-specific tombstones before changing kernel state. Retry
+    // still reapplies the revocation if a kernel update fails after persistence.
+    let mut ledger = state.0.revocations.lock().map_err(ApiError::internal)?;
+    for (affected, prefix) in [(affects_wg, "wg"), (affects_tcp, "tcp")] {
+        if affected {
+            ledger
+                .consume(
+                    &format!("{prefix}_{decision_id}"),
+                    envelope.notice.expires_at,
+                    now,
+                )
+                .map_err(ApiError::internal)?;
+        }
+    }
+    drop(ledger);
+    let tcp_removed = if affects_tcp {
+        policy
+            .tcp
+            .as_mut()
+            .ok_or_else(|| ApiError::unavailable("tcp_not_configured"))?
+            .revoke(&decision_id)
+            .map_err(ApiError::internal)?
+    } else {
+        false
+    };
+    let peer = if affects_wg {
+        policy.record_revocation(&decision_id, envelope.notice.expires_at, now)
+    } else {
+        None
+    };
     let peer_removed = if let Some(peer) = peer {
         run_wg(&["set", &state.0.interface, "peer", &peer, "remove"])
             .map_err(ApiError::internal)?;
@@ -359,6 +464,7 @@ async fn apply_revocation(
         decision_id,
         sequence,
         peer_removed,
+        tcp_removed,
     }))
 }
 
@@ -474,4 +580,51 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.code }))).into_response()
     }
+}
+
+async fn apply_tcp_grant(
+    State(state): State<AppState>,
+    Json(envelope): Json<authority_contracts_model::SignedTcpAccessGrantV1>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let now = unix_timestamp().map_err(ApiError::internal)?;
+    authority_issuer_core::verify_tcp_grant_for_node(
+        &envelope,
+        &state.0.verifier,
+        &state.0.node_id,
+        now,
+    )
+    .map_err(|cause| ApiError::unauthorized("invalid_tcp_grant", cause))?;
+    let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
+    if state
+        .0
+        .revocations
+        .lock()
+        .map_err(ApiError::internal)?
+        .contains(&format!("tcp_{}", envelope.grant.decision_id), now)
+    {
+        return Err(ApiError::conflict("tcp_grant_revoked"));
+    }
+    if !state
+        .0
+        .replay_ledger
+        .lock()
+        .map_err(ApiError::internal)?
+        .consume(
+            &format!("tcp_{}", envelope.grant.decision_id),
+            envelope.grant.expires_at,
+            now,
+        )
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::conflict("tcp_grant_replayed"));
+    }
+    let response = json!({ "decision_id": envelope.grant.decision_id, "expires_at": envelope.grant.expires_at,
+        "destination_ports": envelope.grant.destination_ports });
+    policy
+        .tcp
+        .as_mut()
+        .ok_or_else(|| ApiError::unavailable("tcp_not_configured"))?
+        .apply(envelope.grant, now)
+        .map_err(ApiError::internal)?;
+    Ok(Json(response))
 }

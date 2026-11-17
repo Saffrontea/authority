@@ -3,12 +3,17 @@ mod config;
 mod ssh_key;
 mod state;
 
-use std::{fs, path::Path};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 use ::ssh_key::{HashAlg, PublicKey};
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use config::Config;
-use state::{AgentPaths, AppState};
+use openssl::{
+    ec::{EcGroup, EcKey},
+    nid::Nid,
+    pkey::PKey,
+};
+use state::{AgentCredentials, AgentPaths, AppState};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -26,8 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.control_plane_key_id,
         config.control_plane_public_key_file,
     )?;
+    let mtls_private_key = load_or_generate_mtls_key(&config.mtls_private_key_file)?;
     let state = AppState::new(
-        private_key,
+        AgentCredentials {
+            ssh_private_key: private_key,
+            mtls_private_key,
+        },
         trusted_cas,
         AgentPaths {
             private_key: config.ssh_private_key_file,
@@ -46,6 +55,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+fn load_or_generate_mtls_key(
+    path: &Path,
+) -> Result<PKey<openssl::pkey::Private>, Box<dyn std::error::Error>> {
+    if path.exists() {
+        return Ok(PKey::private_key_from_pem(&fs::read(path)?)?);
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1)?;
+    let key = PKey::from_ec_key(EcKey::generate(&group)?)?;
+    fs::write(path, key.private_key_to_pem_pkcs8()?)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(key)
 }
 
 fn load_trusted_cas(path: &Path) -> Result<Vec<PublicKey>, Box<dyn std::error::Error>> {
