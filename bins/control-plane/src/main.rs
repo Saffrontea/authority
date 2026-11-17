@@ -52,7 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.ssh_authorization_ttl_seconds,
         ),
     );
-    let delivery = tokio::spawn(revocation_delivery::run(state.clone()));
+    let delivery_client = revocation_delivery::client()?;
+    let delivery = tokio::spawn(revocation_delivery::run(state.clone(), delivery_client));
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 
     info!(address = %config.bind, origin = %config.rp_origin, "control plane listening");

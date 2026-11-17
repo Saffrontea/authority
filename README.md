@@ -57,8 +57,10 @@ The Control Plane polls persisted, unexpired notices every second and delivers
 underlay (`AUTHORITY_NETWORK_AGENT_ORIGIN`). Delivery does not pass through the
 browser or the WireGuard peer being revoked. Failed delivery is retried;
 restarting the Control Plane replays live notices, which the agent applies
-idempotently. The Control Plane runtime requires `curl`. This PoC has one
-configured target; distribution selects only notices for that target identity.
+idempotently. Delivery uses a shared asynchronous HTTP client with a two-second
+connection timeout and a five-second request deadline; proxies and redirects are
+disabled. This PoC has one configured target; distribution selects only notices
+for that target identity.
 The UI reports persistence, not an acknowledgement from the enforcement agent.
 
 Manual reconciliation can also read

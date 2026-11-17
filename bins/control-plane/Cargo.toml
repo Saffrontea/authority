@@ -14,6 +14,7 @@ authority-policy-core.workspace = true
 authority-projection-core.workspace = true
 axum.workspace = true
 openssl.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
