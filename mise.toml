@@ -298,5 +298,17 @@ description = "Model-check revocation and require counterexamples for unsafe mut
 run = "python3 ./scripts/check-tla.py --mutations"
 
 [tasks."verification:check"]
-description = "Run property tests and the revocation model with mutation checks"
-depends = ["verification:pbt", "verification:tla:mutations"]
+description = "Run Verus proofs, property tests and the revocation model with mutation checks"
+depends = ["verification:verus:mutations", "verification:pbt", "verification:tla:mutations"]
+
+[tasks."verification:verus:setup"]
+description = "Install pinned Verus and its private Rust toolchain, then verify proofs"
+run = "python3 ./scripts/check-verus.py --install"
+
+[tasks."verification:verus"]
+description = "Prove the solver model and production TTL containment with pinned Verus"
+run = "python3 ./scripts/check-verus.py"
+
+[tasks."verification:verus:mutations"]
+description = "Prove the Verus obligations and reject unsafe source/model mutations"
+run = "python3 ./scripts/check-verus.py --mutations"

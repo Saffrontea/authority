@@ -1,22 +1,25 @@
 # Verification obligations and evidence
 
 This work tracks the full verification target; a passing model is not a proof of
-all production code. No Verus/Kani proof of the Rust implementation has been
-established yet. Each row below identifies both current evidence and the remaining
-obligation. Protocol schemas and signed bytes remain unchanged.
+all production code. Verus now proves the abstract solver and directly checks the
+production TTL containment predicate. It does not yet prove the concrete Rust BFS
+or all scope/projection implementations. Each row identifies both current evidence
+and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
-| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Independent execution-order oracle in `crates/planning-core/tests/reference.rs`, checked against the real `solve` | Machine-checked Verus proof, including closure termination, selected-set deduplication and BFS frontier ordering; implementation refinement |
-| Scope containment (Verus / Kani) | No authority expansion, interval containment | Scope PBT, including all `i64` interval endpoints, constructive transitivity and identity rebinding | Machine-checked containment and arithmetic proofs for every scope variant |
+| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Verus least-closure, selected-set equivalence, execution/layer correspondence and shortest-search theorems; independent PBT oracle against real `solve` | Concrete closure-loop termination, BFS queue/visited/budget refinement and deterministic tie-breaking proof |
+| Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus checks actual `Validity::contains` body for exact interval containment and TTL non-expansion; transitivity/rejection lemmas; scope PBT | Machine-checked containment and binding proofs for every non-TTL scope variant |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Production `evaluate_scoped` → `project_authorized` PBT, independent contract field assertions and rebinding rejection | Proof of all adapter projections, overflow/failure paths and encoding correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters, plus safety and liveness mutations | Expiry, receiver restart and kernel failure/recovery model; trace correspondence with actual HTTP/DB/adapters |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | Existing LXC E2E and DB concurrency/rollback regressions; new durable ledger state-machine PBT | Generated end-to-end action traces compared with the formal transition model |
 
 ## Reproducible checks
 
-Run `mise run verification:check` for the current combined gate (Java 11+
-required), or `mise run verification:pbt` for the Rust property suites. `PROPTEST_CASES`
+First run `mise run verification:verus:setup` to install the pinned verifier and
+its private Rust toolchain. Then run `mise run verification:check` for the combined
+gate (Java 11+ also required), or `mise run verification:pbt` for the Rust property
+suites. `PROPTEST_CASES`
 can raise the case count, for example `PROPTEST_CASES=4096 mise run verification:pbt`.
 Proptest minimizes failures and reports regression seeds. The oracle uses bitsets
 and execution-order enumeration, rather than production's sets, BFS queue and
@@ -30,8 +33,8 @@ Java executable; `TLA_JAR` can select a predownloaded jar. The checker is pinned
 is checked even when supplied locally. Otherwise the script downloads the jar to
 `.cache/formal`. Missing tools fail the task rather than silently skipping it.
 Run `mise run verification:tla:mutations` to additionally require counterexamples
-for accepting a grant after a tombstone and acknowledging without adapter cleanup. A third mutation removes delivery/cleanup
-fairness and must violate eventual revocation.
+for accepting a grant after a tombstone and acknowledging without adapter cleanup. A third mutation removes
+delivery/cleanup fairness and must violate eventual revocation.
 The Python runner keeps TLC state in temporary directories.
 
 Existing system checks remain `mise run poc:e2e` for the default WireGuard route,
@@ -44,6 +47,60 @@ AUTHORITY_DB_HOST=<lxc-db-address> cargo test -p authority-control-plane \
 ```
 
 These existing E2E scenarios do not yet constitute model-based generated traces.
+
+## Verus proofs and source correspondence
+
+`mise run verification:verus` checks 20 solver-model obligations and four TTL
+obligations. `mise run verification:verus:mutations` also requires proof failures
+when the production deadline bound is reversed, unauthorized mechanism effects
+are allowed, or a shorter successful search is replaced with the current bound.
+These mutations must produce verifier errors, rather than merely parse failures.
+The combined gate includes these checks. Own proof files may not introduce
+`assume`, `admit`, or unchecked external bodies/specifications.
+
+The verifier is pinned to
+[Verus 0.2026.11.02.8bf68ee](https://github.com/verus-lang/verus/releases/tag/release/0.2026.11.02.8bf68ee)
+(commit `8bf68ee741df833ea5d0fe6a2255126fdea87e47`) with Rust 1.99.1. The setup script
+supports Linux aarch64 and x86_64, verifies the release archive SHA-256 and checks
+installed files against that archive on every run. The Rust toolchain lives in
+`.cache/formal/rustup`; setup uses `--no-self-update` and does not change the user's
+Rust installation, Cargo cache or workspace compiler. A missing toolchain, changed
+source shape, lost proof obligation, checksum mismatch or verifier failure fails
+the task. It never silently skips a proof.
+
+`formal/verus/validity.rs` is a proof template. The checker extracts the exact
+`Validity` fields/types and the complete `Validity::contains` expression from
+`crates/policy-core/src/scoped.rs`, then injects both into the proof. It checks the
+expression for equality with the mathematical integer interval predicate and
+proves that a contained interval cannot have a longer duration. This covers all
+`i64` endpoints, including invalid/negative/overflow-edge intervals, without
+replacing the implementation with a separately maintained predicate. Signature or
+field-shape changes require updating the extractor explicitly. The template alone
+is not the production-source proof; use the task rather than checking its empty
+injection placeholders directly.
+
+`formal/verus/solver.rs` is an unbounded mathematical model, using arbitrary
+scoped-ability labels and a finite catalog with unique positional IDs. It proves:
+
+* The intersection-defined Horn closure is extensive, closed, least and monotone.
+* Incremental mandatory closure equals closure over accumulated effects.
+* Any catalog-valid execution has the same abilities as its selected mechanism
+  set, establishing the semantic basis for selected-set deduplication.
+* Valid distinct-mechanism execution sequences correspond in both directions to
+  reachable search layers. Reachable states have authorized abilities, no
+  forbidden/invalid IDs, and mechanism count equal to layer depth.
+* Layer search returns an executable, goal-satisfying, constraint-satisfying
+  minimum-length witness, or establishes absence of any valid execution within
+  its mechanism bound. The final predicate may require extending a goal-reaching
+  state, provided it depends only on the selected set and final abilities.
+
+These are universal Verus theorems about that model, not bounded PBT results. They
+are **not yet a proof of production's concrete BFS**: translating arbitrary Rust
+IDs to positional IDs, the iterative closure implementation, queue/frontier order,
+visited-set admission, search-budget accounting and lexicographic tie-breaking
+still require implementation refinement. The PBT reference currently checks the
+concrete implementation against an independent execution model with those runtime
+behaviors; it is evidence of correspondence, not a universal refinement proof.
 
 ## Solver specification boundary
 

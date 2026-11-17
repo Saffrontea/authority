@@ -233,4 +233,6 @@ mise run poc:e2e
 
 Formal verification obligations, property tests and the revocation model are
 tracked in [Verification](docs/verification.md). Run `mise run verification:pbt`
-and `mise run verification:tla:mutations` (Java 11+).
+and `mise run verification:tla:mutations` (Java 11+). For the Verus proofs, run
+`mise run verification:verus:setup` once, then `mise run verification:check`
+for the combined proof/model/property gate.
