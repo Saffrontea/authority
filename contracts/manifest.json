@@ -43,6 +43,10 @@
     "artifacts/tcp-access-grant-v1.schema.json": {
       "version": 1,
       "sha256": "0c59b6d644abc2ac4405207f734bec736a514a07a643ae7ab9c3a71892397435"
+    },
+    "artifacts/policy-plan-evaluated-v1.schema.json": {
+      "version": 1,
+      "sha256": "d0cbcb059c511dd9f98c5a51f3e72c42782e7c8268d540529a6df3b46594a439"
     }
   }
 }

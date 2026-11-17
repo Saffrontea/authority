@@ -31,6 +31,7 @@ Commands:
   status          Show container and PostgreSQL status
   verify          Verify database, role, SCRAM, and network settings
   verify-schema   Verify applied migration checksums and module schemas
+  verify-planning Verify planning audit/outbox and issued scopes after E2E
   diagnose        Collect detailed LXC startup diagnostics
   shell           Open psql as the postgres administrator
   reset-password  Apply AUTHORITY_DB_PASSWORD to the authority role
@@ -393,6 +394,70 @@ SQL
   ' sh "$(host_bridge_rule)"
 }
 
+verify_planning() {
+  [[ "$(container_state)" == "RUNNING" ]] || die "container is not running"
+  as_root lxc-attach -P "${LXC_PATH}" -n "${CONTAINER_NAME}" -- \
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d authority -At <<'SQL'
+BEGIN READ ONLY;
+DO $checks$
+DECLARE actor text;
+BEGIN
+  SELECT actor_id INTO actor FROM audit.events WHERE action = 'access.plan'
+    ORDER BY sequence DESC LIMIT 1;
+  IF actor IS NULL THEN RAISE EXCEPTION 'no planning audit records'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM audit.events WHERE action = 'access.plan' AND actor_id = actor AND decision = 'allow')
+     OR NOT EXISTS (SELECT 1 FROM audit.events WHERE action = 'access.plan' AND actor_id = actor AND decision = 'deny')
+     OR NOT EXISTS (SELECT 1 FROM audit.events WHERE action = 'access.plan' AND actor_id = actor
+       AND payload #>> '{planning,route_choice,mode}' = 'automatic' AND decision = 'allow')
+  THEN RAISE EXCEPTION 'missing allow/deny/automatic planning coverage'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM outbox.events p
+    WHERE p.event_type = 'policy.plan.evaluated'
+      AND p.payload #>> '{planning,binding,subject_user_id}' = actor
+      AND (p.contract_version <> 1 OR p.payload #>> '{planning,version}' IS DISTINCT FROM '1'
+        OR NOT EXISTS (SELECT 1 FROM audit.events a WHERE a.action = 'access.plan'
+          AND a.actor_id = actor AND a.payload = p.payload))
+  ) OR EXISTS (
+    SELECT 1 FROM audit.events a WHERE a.action = 'access.plan' AND a.actor_id = actor
+      AND NOT EXISTS (SELECT 1 FROM outbox.events p WHERE p.event_type = 'policy.plan.evaluated'
+        AND p.aggregate_id = a.payload ->> 'decision_id' AND p.payload = a.payload)
+  ) THEN RAISE EXCEPTION 'planning audit/outbox mismatch'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM outbox.events p WHERE p.event_type = 'policy.plan.evaluated'
+      AND p.payload #>> '{planning,binding,subject_user_id}' = actor
+      AND ((p.payload #>> '{planning,selected}' IS NOT NULL) IS DISTINCT FROM EXISTS (
+        SELECT 1 FROM outbox.events issued WHERE issued.aggregate_id = p.aggregate_id
+          AND issued.event_type IN ('access.authorization.issued', 'access.tcp_authorization.issued')))
+  ) THEN RAISE EXCEPTION 'planning selection/issuance mismatch'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM outbox.events issued
+    JOIN outbox.events p ON p.aggregate_id = issued.aggregate_id AND p.event_type = 'policy.plan.evaluated'
+    LEFT JOIN LATERAL (
+      SELECT entry -> 'ability' AS ability
+      FROM jsonb_array_elements(p.payload #> '{planning,plan,abilities}') AS scopes(entry)
+      WHERE entry #>> '{ability,scope,kind}' = 'tcp_connection'
+    ) scoped ON true
+    WHERE issued.event_type = 'access.tcp_authorization.issued'
+      AND p.payload #>> '{planning,binding,subject_user_id}' = actor
+      AND (scoped.ability IS NULL
+        OR scoped.ability #> '{scope,ports}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,destination_ports}'
+        OR scoped.ability #> '{scope,source}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,source_address}'
+        OR scoped.ability #> '{scope,destination}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,destination_address}'
+        OR scoped.ability #> '{validity,expires_at}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,expires_at}')
+  ) THEN RAISE EXCEPTION 'issued TCP grant differs from scoped plan'; END IF;
+END
+$checks$;
+WITH latest AS (
+  SELECT actor_id FROM audit.events WHERE action = 'access.plan' ORDER BY sequence DESC LIMIT 1
+)
+SELECT 'planning audit=' || count(*) || ',allow=' || count(*) FILTER (WHERE decision = 'allow')
+  || ',deny=' || count(*) FILTER (WHERE decision = 'deny')
+  || ',automatic=' || count(*) FILTER (WHERE payload #>> '{planning,route_choice,mode}' = 'automatic')
+FROM audit.events WHERE action = 'access.plan' AND actor_id = (SELECT actor_id FROM latest);
+COMMIT;
+SQL
+}
+
 verify_schema() {
   local expected actual
 
@@ -483,6 +548,7 @@ main() {
     status) show_status ;;
     verify) verify_postgres ;;
     verify-schema) verify_schema ;;
+    verify-planning) verify_planning ;;
     diagnose) diagnose_container ;;
     shell) open_shell ;;
     reset-password) reset_password ;;

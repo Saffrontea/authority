@@ -95,3 +95,5 @@ if [[ "${grant_probe_status}" != "401" ]]; then
 fi
 
 "${SCRIPT_DIR}/poc-browser-e2e.sh"
+
+mise run db:verify-planning

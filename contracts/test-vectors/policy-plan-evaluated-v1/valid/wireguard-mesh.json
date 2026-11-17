@@ -1,0 +1,209 @@
+{
+  "decision_id": "scoped-plan-example",
+  "planning": {
+    "version": 1,
+    "binding": {
+      "domain_id": "00000000-0000-0000-0000-000000000001",
+      "subject_user_id": "00000000-0000-0000-0000-000000000002",
+      "device_id": "00000000-0000-0000-0000-000000000003",
+      "target_node_id": "00000000-0000-0000-0000-000000000004"
+    },
+    "evaluated_at": 1700000000,
+    "outcomes": [
+      "tcp.connect"
+    ],
+    "route_choice": {
+      "mode": "automatic"
+    },
+    "selection_rule": "fewest_mechanisms_then_candidate_id",
+    "candidates": [
+      {
+        "candidate": "existing_route",
+        "result": {
+          "status": "rejected",
+          "reason": "no_available_implementation",
+          "capability": null
+        }
+      },
+      {
+        "candidate": "wireguard_mesh",
+        "result": {
+          "status": "authorized",
+          "mechanism_count": 3
+        }
+      }
+    ],
+    "selected": "wireguard_mesh",
+    "plan": {
+      "abilities": [
+        {
+          "ability": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000020
+            },
+            "scope": {
+              "kind": "tcp_connection",
+              "source": "10.77.0.1",
+              "destination": "10.77.0.2",
+              "ports": [
+                8080
+              ]
+            }
+          },
+          "permitted": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000300
+            },
+            "scope": {
+              "kind": "tcp_connection",
+              "source": "10.77.0.1",
+              "destination": "10.77.0.2",
+              "ports": [
+                8080,
+                8081
+              ]
+            }
+          },
+          "policy": {
+            "policy_id": "00000000-0000-0000-0000-000000000005",
+            "revision": 1
+          }
+        },
+        {
+          "ability": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000300
+            },
+            "scope": {
+              "kind": "mesh_membership",
+              "wireguard_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+              "address": "10.77.0.1"
+            }
+          },
+          "permitted": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000300
+            },
+            "scope": {
+              "kind": "mesh_membership",
+              "wireguard_public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+              "address": "10.77.0.1"
+            }
+          },
+          "policy": {
+            "policy_id": "00000000-0000-0000-0000-000000000005",
+            "revision": 1
+          }
+        },
+        {
+          "ability": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000300
+            },
+            "scope": {
+              "kind": "network_reachability",
+              "source": "10.77.0.1",
+              "destination": "10.77.0.2"
+            }
+          },
+          "permitted": {
+            "binding": {
+              "domain_id": "00000000-0000-0000-0000-000000000001",
+              "subject_user_id": "00000000-0000-0000-0000-000000000002",
+              "device_id": "00000000-0000-0000-0000-000000000003",
+              "target_node_id": "00000000-0000-0000-0000-000000000004"
+            },
+            "validity": {
+              "not_before": 1700000000,
+              "expires_at": 1700000300
+            },
+            "scope": {
+              "kind": "network_reachability",
+              "source": "10.77.0.1",
+              "destination": "10.77.0.2"
+            }
+          },
+          "policy": {
+            "policy_id": "00000000-0000-0000-0000-000000000005",
+            "revision": 1
+          }
+        }
+      ],
+      "goals": [
+        0
+      ],
+      "steps": [
+        {
+          "mechanism": "wireguard_peer",
+          "requires": [],
+          "provides": [
+            1
+          ]
+        },
+        {
+          "mechanism": "network_route",
+          "requires": [
+            1
+          ],
+          "provides": [
+            2
+          ]
+        },
+        {
+          "mechanism": "tcp_admission",
+          "requires": [
+            2
+          ],
+          "provides": [
+            0
+          ]
+        }
+      ]
+    },
+    "resources": {
+      "source_address": "10.77.0.1",
+      "target_address": "10.77.0.2",
+      "registered_wireguard_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "service_audience": "demo-api"
+    },
+    "deployment": {
+      "existing_route": null,
+      "wireguard_target": "10.77.0.2"
+    }
+  }
+}

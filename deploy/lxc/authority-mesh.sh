@@ -41,6 +41,8 @@ Commands:
   verify    Ping the target over WireGuard and require a handshake
   agent-install Install and start the network-agent in authority-target
   agent-status  Show network-agent service status and endpoint
+  tcp-demo-install Install the two TCP admission E2E services
+  client-reconnect Reset only the client cached WireGuard transport
   stop      Gracefully stop both containers
   destroy   Permanently delete both containers (asks first)
 
@@ -403,10 +405,7 @@ CONTAINER_SCRIPT
   # The agent clears target peers on startup. Reset the PoC client's cached
   # WireGuard session as well so its next authorized connection handshakes
   # immediately instead of reusing keys that the target has discarded.
-  attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
-wg-quick down wg0
-wg-quick up wg0
-CONTAINER_SCRIPT
+  reconnect_client
   client_underlay="$(container_ip "${CLIENT_NAME}")"
   target_underlay="$(container_ip "${TARGET_NAME}")"
   target_host_key="$(attach "${TARGET_NAME}" cat /etc/ssh/ssh_host_ed25519_key.pub)"
@@ -417,6 +416,15 @@ CONTAINER_SCRIPT
   } >"${SSH_KNOWN_HOSTS_FILE}"
   chmod 0644 "${SSH_KNOWN_HOSTS_FILE}"
   log "network-agent=http://${target_underlay}:3003 ssh-mesh-proxy=${client_underlay}:2222"
+}
+
+reconnect_client() {
+  # Reset only the client's cached WireGuard session. Target-side membership
+  # remains governed by the network agent's independently verified grant.
+  attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+wg-quick down wg0
+wg-quick up wg0
+CONTAINER_SCRIPT
 }
 
 install_tcp_demo() {
@@ -499,6 +507,8 @@ network_agent_status() {
   attach "${CLIENT_NAME}" journalctl --no-pager -n 20 -u authority-ssh-mesh-proxy.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status authority-network-agent.service || true
   attach "${TARGET_NAME}" systemctl --no-pager --full status ssh.service || true
+  attach "${CLIENT_NAME}" wg show wg0 || true
+  attach "${TARGET_NAME}" wg show wg0 || true
   attach "${TARGET_NAME}" nft list table inet authority_tcp || true
   attach "${TARGET_NAME}" ss -lnt || true
   attach "${CLIENT_NAME}" ip route get 10.77.0.2 || true
@@ -558,6 +568,7 @@ main() {
     agent-install) install_network_agent ;;
     agent-status) network_agent_status ;;
     tcp-demo-install) install_tcp_demo ;;
+    client-reconnect) reconnect_client ;;
     stop) stop_containers ;;
     destroy) destroy_containers ;;
     help | --help | -h) usage ;;

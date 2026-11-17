@@ -195,7 +195,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh stop"
 
 [tasks."contracts:check"]
 description = "Validate contract inventory, locked digests, and conformance vectors"
-run = "python3 ./scripts/check-contracts.py && cargo test -p authority-contracts-model"
+run = "python3 ./scripts/check-contracts.py && cargo test -p authority-contracts-model && cargo test -p authority-policy-core --test planning_vectors"
 
 [tasks."migrations:check"]
 description = "Validate immutable migrations and module boundaries"
@@ -268,3 +268,19 @@ run = "./scripts/authority-agent.sh run _mesh:tcp-demo-install"
 [tasks."_mesh:tcp-demo-install"]
 description = "Internal: install TCP admission E2E services"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh tcp-demo-install"
+
+[tasks."db:verify-planning"]
+description = "Verify planning audit/outbox and issued TCP scopes in LXC PostgreSQL"
+run = "./scripts/authority-agent.sh run _db:verify-planning"
+
+[tasks."_db:verify-planning"]
+description = "Internal: verify planning persistence and issued scopes"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh verify-planning"
+
+[tasks."mesh:client:reconnect"]
+description = "Reset the PoC client's cached WireGuard session"
+run = "./scripts/authority-agent.sh run _mesh:client-reconnect"
+
+[tasks."_mesh:client-reconnect"]
+description = "Internal: reconnect the WireGuard client without changing target grants"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh client-reconnect"

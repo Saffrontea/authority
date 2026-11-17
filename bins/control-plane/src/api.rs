@@ -20,6 +20,10 @@ use authority_policy_core::{
         AuthorizedPlan, LifetimeLimits, RequestedAccess, RequestedMtls, RequestedNetwork,
         RequestedSsh, RequestedTcp, ScopeError,
     },
+    selection::{
+        DeploymentAvailability, ExistingRouteAvailability, PlanningEvidence, RouteChoice,
+        SelectionOptions,
+    },
 };
 use authority_projection_core::{CommonDecisionClaims, project_authorized};
 use axum::{
@@ -914,6 +918,7 @@ async fn issue_access_authorization(
             ..RequestedAccess::default()
         },
         lifetime_limits(&state),
+        &SelectionOptions::exact(Route::MeshRequired),
     )
     .await
     .map_err(ApiError::internal)?;
@@ -932,10 +937,11 @@ async fn issue_access_authorization(
                         .map(authority_policy_core::Capability::as_str),
                     evaluated: None,
                     authorization: None,
+                    planning: Some(&reason.evidence),
                 },
             )
             .await?;
-            return Err(authorization_denial(&reason));
+            return Err(authorization_denial(&reason.reason));
         }
     };
     let response = build_access_bundle(&state, &decision)?;
@@ -949,6 +955,7 @@ async fn issue_access_authorization(
             denied_capability: None,
             evaluated: Some(&decision),
             authorization: Some(&response),
+            planning: None,
         },
     )
     .await?;
@@ -1275,6 +1282,7 @@ struct DecisionAudit<'a> {
     denied_capability: Option<&'a str>,
     evaluated: Option<&'a access_policy::AuthorizedAccess>,
     authorization: Option<&'a AccessAuthorizationResponse>,
+    planning: Option<&'a PlanningEvidence>,
 }
 
 async fn record_access_decision(
@@ -1354,13 +1362,39 @@ async fn record_access_decision(
     .map_err(ApiError::internal)?;
     if let Some(bundle) = audit.authorization {
         insert_decision_outbox(&mut transaction, &bundle.decision_id, &payload).await?;
-        let signed_bundle = AccessAuthorizationBundleV1 {
-            version: bundle.version.clone(),
-            decision_id: bundle.decision_id.clone(),
-            ssh_authorization: bundle.ssh_authorization.clone(),
-            network_grant: bundle.network_grant.clone(),
-        };
-        sqlx::query(
+        insert_access_bundle(&mut transaction, bundle).await?;
+    }
+    if let Some(evidence) = audit
+        .planning
+        .or_else(|| audit.evaluated.map(|value| value.plan.evidence()))
+    {
+        let decision_id = audit.authorization.map_or_else(
+            || Uuid::new_v4().simple().to_string(),
+            |bundle| bundle.decision_id.clone(),
+        );
+        crate::planning_audit::insert(
+            &mut transaction,
+            &decision_id,
+            evidence,
+            audit.denial_reason,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+    transaction.commit().await.map_err(ApiError::internal)
+}
+
+async fn insert_access_bundle(
+    transaction: &mut Transaction<'_, Postgres>,
+    bundle: &AccessAuthorizationResponse,
+) -> Result<(), ApiError> {
+    let signed_bundle = AccessAuthorizationBundleV1 {
+        version: bundle.version.clone(),
+        decision_id: bundle.decision_id.clone(),
+        ssh_authorization: bundle.ssh_authorization.clone(),
+        network_grant: bundle.network_grant.clone(),
+    };
+    sqlx::query(
             "INSERT INTO outbox.events \
              (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
              VALUES ($1, 'policy', 'access_decision', $2, \
@@ -1369,11 +1403,10 @@ async fn record_access_decision(
         .bind(Uuid::new_v4())
         .bind(&bundle.decision_id)
         .bind(serde_json::to_value(signed_bundle).map_err(ApiError::internal)?)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
         .map_err(ApiError::internal)?;
-    }
-    transaction.commit().await.map_err(ApiError::internal)
+    Ok(())
 }
 
 fn policy_decision_payload(
@@ -1605,6 +1638,7 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -1749,6 +1783,39 @@ mod tests {
         assert_eq!(payload["policy_sources"].as_array().map(Vec::len), Some(3));
         assert_eq!(payload["adapter_grants"].as_array().map(Vec::len), Some(2));
     }
+    #[test]
+    fn automatic_route_selection_is_bound_into_the_device_proof() {
+        let mut request: IssueTcpAuthorizationRequest = serde_json::from_value(json!({
+            "device_id": Uuid::from_u128(1), "target_node_id": Uuid::from_u128(2),
+            "destination_ports": [8080], "include_network": false, "ttl_seconds": 20,
+        }))
+        .unwrap();
+        let legacy = tcp_authorization_bindings(&request).unwrap();
+        assert_eq!(
+            legacy,
+            vec![
+                request.device_id.to_string(),
+                request.target_node_id.to_string(),
+                "[8080]".to_owned(),
+                "false".to_owned(),
+                "20".to_owned()
+            ]
+        );
+        request.automatic_route = true;
+        let automatic = tcp_authorization_bindings(&request).unwrap();
+        assert_eq!(&automatic[..5], legacy);
+        assert_eq!(automatic[5], "automatic");
+        assert_ne!(
+            session_request_preimage("session", "access.authorize_tcp", &legacy, "100", "nonce"),
+            session_request_preimage(
+                "session",
+                "access.authorize_tcp",
+                &automatic,
+                "100",
+                "nonce"
+            ),
+        );
+    }
 }
 
 fn revocation_scope(kinds: &[AdapterGrantKindV1]) -> String {
@@ -1766,6 +1833,8 @@ struct IssueTcpAuthorizationRequest {
     #[serde(default)]
     include_network: bool,
     ttl_seconds: i64,
+    #[serde(default)]
+    automatic_route: bool,
 }
 
 #[derive(Serialize)]
@@ -1776,23 +1845,58 @@ struct TcpAuthorizationResponse {
     network_grant: Option<SignedNetworkAccessGrantV1>,
 }
 
-async fn issue_tcp_authorization(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<IssueTcpAuthorizationRequest>,
-) -> Result<Json<TcpAuthorizationResponse>, ApiError> {
-    let bindings = vec![
+fn tcp_authorization_bindings(
+    request: &IssueTcpAuthorizationRequest,
+) -> Result<Vec<String>, ApiError> {
+    let mut bindings = vec![
         request.device_id.to_string(),
         request.target_node_id.to_string(),
         serde_json::to_string(&request.destination_ports).map_err(ApiError::internal)?,
         request.include_network.to_string(),
         request.ttl_seconds.to_string(),
     ];
+    if request.automatic_route {
+        bindings.push("automatic".to_owned());
+    }
+    Ok(bindings)
+}
+
+fn tcp_selection(state: &AppState, request: &IssueTcpAuthorizationRequest) -> SelectionOptions {
+    if !request.automatic_route {
+        return SelectionOptions::exact(if request.include_network {
+            Route::MeshRequired
+        } else {
+            Route::Direct
+        });
+    }
+    let target = state.target_mesh_address().parse().ok();
+    SelectionOptions {
+        choice: RouteChoice::Automatic,
+        availability: DeploymentAvailability {
+            existing_route: state.existing_route_source_address().zip(target).map(
+                |(source, destination)| ExistingRouteAvailability {
+                    source,
+                    destination,
+                    registered_wireguard_key: state.client_wireguard_public_key().to_owned(),
+                },
+            ),
+            wireguard_target: target,
+        },
+    }
+}
+
+async fn issue_tcp_authorization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<IssueTcpAuthorizationRequest>,
+) -> Result<Json<TcpAuthorizationResponse>, ApiError> {
+    let bindings = tcp_authorization_bindings(&request)?;
     let session = authenticated_session(&state, &headers, "access.authorize_tcp", &bindings)?;
     if session.device_id != request.device_id {
         return Err(ApiError::forbidden("session_device_mismatch"));
     }
-    if !(1..=state.network_grant_ttl_seconds()).contains(&request.ttl_seconds)
+    if (request.automatic_route && request.include_network)
+        || !(1..=state.network_grant_ttl_seconds()).contains(&request.ttl_seconds)
         || request.destination_ports.is_empty()
         || request.destination_ports.len() > 64
         || request.destination_ports.contains(&0)
@@ -1823,13 +1927,16 @@ async fn issue_tcp_authorization(
                 ports: request.destination_ports.iter().copied().collect(),
                 ttl_seconds: request.ttl_seconds,
             }),
-            network: request.include_network.then(|| RequestedNetwork {
-                wireguard_public_key: None,
-                ttl_seconds: state.network_grant_ttl_seconds(),
+            network: (request.include_network || request.automatic_route).then(|| {
+                RequestedNetwork {
+                    wireguard_public_key: None,
+                    ttl_seconds: state.network_grant_ttl_seconds(),
+                }
             }),
             ..RequestedAccess::default()
         },
         lifetime_limits(&state),
+        &tcp_selection(&state, &request),
     )
     .await
     .map_err(ApiError::internal)?;
@@ -1848,15 +1955,24 @@ async fn issue_tcp_authorization(
                         .map(authority_policy_core::Capability::as_str),
                     evaluated: None,
                     authorization: None,
+                    planning: Some(&reason.evidence),
                 },
             )
             .await?;
-            return Err(authorization_denial(&reason));
+            return Err(authorization_denial(&reason.reason));
         }
     };
     let (response, adapters) = build_tcp_response(&state, &evaluated)?;
     let trace = policy_decision_payload(&evaluated.decision, &response.decision_id, adapters)?;
-    persist_tcp_authorization(&state, &session, request.target_node_id, &response, &trace).await?;
+    persist_tcp_authorization(
+        &state,
+        &session,
+        request.target_node_id,
+        &response,
+        &trace,
+        evaluated.plan.evidence(),
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1902,6 +2018,7 @@ async fn persist_tcp_authorization(
     target_node_id: Uuid,
     response: &TcpAuthorizationResponse,
     trace: &Value,
+    planning: &PlanningEvidence,
 ) -> Result<(), ApiError> {
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     insert_decision_outbox(&mut transaction, &response.decision_id, trace).await?;
@@ -1922,6 +2039,9 @@ async fn persist_tcp_authorization(
         VALUES ($1, 'policy', 'access_decision', $2, 'access.tcp_authorization.issued', 1, $3, now())")
         .bind(Uuid::new_v4()).bind(&response.decision_id).bind(serde_json::to_value(response).map_err(ApiError::internal)?)
         .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    crate::planning_audit::insert(&mut transaction, &response.decision_id, planning, None)
+        .await
+        .map_err(ApiError::internal)?;
     transaction.commit().await.map_err(ApiError::internal)?;
     Ok(())
 }

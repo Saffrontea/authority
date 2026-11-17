@@ -41,7 +41,8 @@ allowed plan may use fewer mechanisms. Final constraint predicates may depend on
 the selected mechanism set and abilities, but not their execution order. Mechanism
 exclusions and maximum plan size are also supported. Exhausting the explicit search
 budget returns an error, never an allow decision. Search is exponential in the
-worst case; the current access catalog has five mechanisms, hence at most 32 states.
+worst case; each solve over the current five-mechanism access catalog has a
+32-state budget. Deployment selection evaluates at most two candidate catalogs.
 
 Models must declare complete effects. The solver proves properties of that model;
 it cannot discover capabilities an adapter exposes but its catalog omits. Models
@@ -69,8 +70,9 @@ metadata; sharing a layer never creates an implication between abilities.
 Mesh-required service mechanisms depend on network reachability, which depends
 on mesh membership. Direct requests retain the existing API assumption that the
 route is externally available. A TCP-only request does not create mesh membership.
-This catalog preserves the current intent semantics; it does not yet model every
-network or service deployment as a choice of interchangeable routes.
+This catalog preserves the current intent semantics. Deployment selection can
+compare the existing-route and WireGuard implementations; other protocols are
+not assumed to be interchangeable.
 
 `policy-core::scoped::evaluate_scoped` first resolves existing policy precedence
 and identity checks, then instantiates scoped abilities and the access catalog.
@@ -120,16 +122,86 @@ response codes are preserved. The unscoped `evaluate`/`realize` and low-level
 `project`/`project_plan` APIs remain for compatibility and model tests; they are not
 the production signing path.
 
+## Deployment selection
+
+`policy-core::selection::evaluate_selection` evaluates each available deployment
+implementation against the same immutable policy snapshot and scoped inputs. It
+then chooses the authorized plan with the fewest mechanisms, breaking ties by
+candidate ID. An unavailable or rejected implementation cannot abort another
+valid candidate. Availability is a deployment fact, never an authorization grant;
+all selected abilities still have to pass scoped policy evaluation.
+
+The initial implementations are:
+
+- `existing_route`: issue the selected service admission/credentials and reuse an
+  externally provided transport. No mesh membership is granted.
+- `wireguard_mesh`: explicitly authorize and project a WireGuard peer plus the
+  requested service admission/credentials and their dependency closure.
+
+These are complete alternative implementations using the existing adapters. This
+version does not combine different transport choices per service in a hybrid plan.
+It also does not infer that a network path exists from a client's request. Exact
+route selections retain the existing externally-provided-route assumption and
+never fall back. An exact choice that contradicts the request is rejected.
+
+The TCP endpoint supports explicit opt-in with `automatic_route: true`. It cannot
+be combined with `include_network: true`, which remains a mandatory mesh request.
+Absent/false `automatic_route` preserves the legacy request and device-proof format.
+True adds an `automatic` binding to the signed device proof, so changing the mode
+invalidates that proof. The browser helper's optional fourth argument selects it:
+
+```js
+await authorityRequestTcpAuthorization([8080], false, 20, true);
+```
+
+By default automatic selection considers the configured target's mesh route only.
+Setting `AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS` declares an existing route from
+that IPv4 source to `AUTHORITY_TARGET_MESH_ADDRESS`, for the configured client
+WireGuard public key. The declaration must match the requesting device's assigned
+source, registered key and target address. A mesh candidate must match the
+configured mesh target. These are trusted deployment declarations, not live
+reachability probes, discoveries of active peers, or mechanisms for bypassing
+network policy. Explicit legacy TCP-only requests are unchanged.
+
+## Planning audit
+
+Completed authorizations and policy-planning denials write an `access.plan` audit record and a
+`policy.plan.evaluated` v1 outbox event inside the same authorization transaction.
+A storage or evidence-validation failure aborts that transaction. The existing
+`policy.decision.evaluated` v1 event and signed adapter contracts are unchanged.
+Its concrete evaluated intent describes the selected candidate; the new planning
+event separately records the original exact/automatic selection mode.
+
+The new [contract artifact](../contracts/artifacts/policy-plan-evaluated-v1.schema.json)
+contains the decision/attempt ID and versioned planning evidence:
+
+- Authenticated domain, subject, device, target, evaluation time and outcomes.
+- Concrete resource bindings and the deployment declarations evaluated at that time.
+- Each candidate's mechanism count or stable rejection reason and capability.
+- The selected candidate and deterministic selection rule.
+- The selected scoped abilities, their containing effective permissions and the
+  winning policy IDs/revisions.
+- Goal indices and executable steps with prerequisite/provided ability indices.
+
+Successful events use the signed authorization's decision ID. Denials receive an
+attempt ID and contain candidate reasons without a fabricated successful plan.
+`PlanningEvidence::is_consistent` replays the recorded dependencies, checks scope
+containment and resource bindings, and verifies candidate availability and the
+selection rule before persistence. This checks the record's structural consistency;
+it does not reauthorize against current policy, prove the historical winner from
+an entire policy snapshot, or guarantee runtime transport availability. Deserializing
+planning evidence cannot construct the immutable `AuthorizedPlan` accepted by
+production projection.
+
 ## Next extension
 
-Add alternative deployment mechanisms with complete scoped effects and persist
-the selected mechanism/dependency trace with policy provenance. Stored policies
-still use the compatibility capability vocabulary and one SSH principal per row;
-scoped containment is explicit in the core, but policies do not yet expose a general
-ability-expression language or scope-specific deny precedence. The mTLS service
-audience remains trusted deployment configuration, not a client-selectable policy
-field. Wildcard resources, CIDR containment and dynamic discovery are not modeled.
-Runtime enforcement and revocation continue to enforce the signed scopes.
+Add further implemented adapters and deployment candidates with complete scoped
+effects. Stored policies still use the compatibility capability vocabulary and
+one SSH principal per row; policies do not yet expose a general ability-expression
+language or scope-specific deny precedence. The mTLS service audience remains
+trusted deployment configuration. Wildcard resources, CIDR containment, dynamic
+route discovery and mixed per-service routing are not modeled. Runtime enforcement
+and revocation continue to enforce the signed scopes.
 
 ## Validation
 
@@ -145,3 +217,25 @@ port/principal containment, policy expiry, configured limits, invalid lifetimes,
 identity/resource separation and independent adapter deadlines. Projection tests
 verify that mutation of the original request cannot change the authorized output
 and that claim rebinding is rejected.
+
+Selection tests cover authorization-independent availability, binding mismatches,
+policy/TTL rejection of one candidate, exact-route constraints and automatic
+fallback. Provider conformance tests replay the new event vectors and reject scope
+expansion, invalid dependency order and inconsistent selection. API tests verify
+that automatic mode changes the device proof, and projection tests verify that
+only the chosen implementation's material is emitted.
+
+The LXC/browser suite exercises automatic planning with real nftables admission,
+mode-proof tampering and selective revocation. Run both deployment configurations:
+
+```sh
+mise run poc:e2e
+AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS=10.77.0.1 mise run poc:e2e
+```
+
+Each run finishes with `db:verify-planning`: a read-only PostgreSQL check of the
+latest test actor's allow/deny/automatic audit coverage, identical audit/outbox
+payloads, selected-plan/issuance correlation and exact TCP port/address/expiry
+agreement. It can also be invoked separately after the suite. The reconnect fixture
+resets only the PoC client's cached WireGuard transport after a revoked peer is
+re-authorized; it does not alter the target agent's granted membership or TCP rules.

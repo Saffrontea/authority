@@ -4,16 +4,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod realization;
 pub mod scoped;
+pub mod selection;
 
 use realization::{AccessPlan, all_abilities, realize};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Ssh,
+    #[serde(rename = "network.reachability")]
     NetworkReachability,
+    #[serde(rename = "mtls.service")]
     MtlsService,
+    #[serde(rename = "tcp.connect")]
     TcpConnect,
 }
 
@@ -29,7 +35,8 @@ impl Outcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Route {
     Direct,
     MeshRequired,
@@ -170,7 +177,8 @@ pub enum Effect {
     Deny,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyRef {
     pub policy_id: Uuid,
     pub revision: i64,

@@ -9,6 +9,7 @@ use std::{
 };
 
 use authority_planning_core::{Mechanism, Model, Plan, Request, solve};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -18,7 +19,8 @@ use crate::{
     realization::{Ability, AccessMechanism, catalog},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessBinding {
     pub domain_id: Uuid,
     pub subject_user_id: Uuid,
@@ -26,7 +28,8 @@ pub struct AccessBinding {
     pub target_node_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Validity {
     pub not_before: i64,
     pub expires_at: i64,
@@ -43,7 +46,8 @@ impl Validity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AbilityScope {
     MeshMembership {
         wireguard_public_key: String,
@@ -126,7 +130,8 @@ impl AbilityScope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScopedAbility {
     pub binding: AccessBinding,
     pub validity: Validity,
@@ -142,7 +147,8 @@ impl ScopedAbility {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NetworkResources {
     pub source_address: Ipv4Addr,
     pub target_address: Ipv4Addr,
@@ -217,9 +223,26 @@ pub struct AuthorizedPlan {
     issued_at: i64,
     policy_reference: String,
     realization: Plan<ScopedAbility, AccessMechanism>,
+    evidence: crate::selection::PlanningEvidence,
 }
 
 impl AuthorizedPlan {
+    #[must_use]
+    pub const fn evidence(&self) -> &crate::selection::PlanningEvidence {
+        &self.evidence
+    }
+
+    pub(crate) fn set_selection(
+        &mut self,
+        options: &crate::selection::SelectionOptions,
+        candidates: Vec<crate::selection::CandidateEvaluation>,
+    ) {
+        self.evidence.route_choice = options.choice;
+        self.evidence.deployment = (options.choice == crate::selection::RouteChoice::Automatic)
+            .then(|| options.availability.clone());
+        self.evidence.candidates = candidates;
+    }
+
     #[must_use]
     pub const fn binding(&self) -> AccessBinding {
         self.binding
@@ -240,6 +263,10 @@ impl AuthorizedPlan {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ScopeError {
+    #[error("no deployment implementation is available")]
+    NoAvailableImplementation,
+    #[error("no available implementation satisfies policy and scope constraints")]
+    NoAuthorizedImplementation,
     #[error(transparent)]
     Policy(#[from] DenialReason),
     #[error("requested scopes do not match the intent")]
@@ -258,6 +285,8 @@ impl ScopeError {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::NoAvailableImplementation => "no_available_implementation",
+            Self::NoAuthorizedImplementation => "no_authorized_implementation",
             Self::Policy(reason) => reason.code(),
             Self::InvalidRequest => "invalid_access_scope",
             Self::InvalidLifetime => "invalid_authorization_lifetime",
@@ -277,7 +306,10 @@ impl ScopeError {
                 Some(ability.permission())
             }
             Self::WireGuardKeyMismatch => Some(Capability::MeshJoin),
-            Self::InvalidRequest | Self::InvalidLifetime => None,
+            Self::InvalidRequest
+            | Self::InvalidLifetime
+            | Self::NoAvailableImplementation
+            | Self::NoAuthorizedImplementation => None,
         }
     }
 }
@@ -292,7 +324,7 @@ fn validity(now: i64, ttl: i64) -> Result<Validity, ScopeError> {
     })
 }
 
-fn binding(request: &AccessRequest) -> AccessBinding {
+pub(crate) fn binding(request: &AccessRequest) -> AccessBinding {
     AccessBinding {
         domain_id: request.domain_id,
         subject_user_id: request.subject_user_id,
@@ -306,7 +338,8 @@ fn validate_selection(
     requested: &RequestedAccess,
 ) -> Result<(), ScopeError> {
     let required = &decision.required;
-    if requested.ssh.is_some() != required.contains(&Capability::SshIssue)
+    if decision.intent.outcomes.is_empty()
+        || requested.ssh.is_some() != required.contains(&Capability::SshIssue)
         || requested.mtls.is_some() != required.contains(&Capability::MtlsIssue)
         || requested.tcp.is_some() != required.contains(&Capability::TcpConnect)
         || requested.network.is_some() != required.contains(&Capability::NetworkReach)
@@ -411,6 +444,11 @@ fn permission(
     grant
 }
 
+struct ScopeInstantiation {
+    abilities: BTreeMap<Ability, ScopedAbility>,
+    permissions: BTreeMap<Ability, (ScopedAbility, PolicyRef)>,
+}
+
 fn scoped_abilities(
     request: &AccessRequest,
     snapshot: &PolicySnapshot,
@@ -419,8 +457,9 @@ fn scoped_abilities(
     requested: &RequestedAccess,
     resources: &NetworkResources,
     limits: LifetimeLimits,
-) -> Result<BTreeMap<Ability, ScopedAbility>, ScopeError> {
+) -> Result<ScopeInstantiation, ScopeError> {
     let mut abilities = BTreeMap::new();
+    let mut permissions = BTreeMap::new();
     for kind in crate::realization::all_abilities() {
         let Some(source) = decision.sources.get(&kind.permission()) else {
             continue;
@@ -456,9 +495,13 @@ fn scoped_abilities(
                 ScopeError::ScopeDenied(kind)
             });
         }
+        permissions.insert(kind, (grant, *source));
         abilities.insert(kind, ability);
     }
-    Ok(abilities)
+    Ok(ScopeInstantiation {
+        abilities,
+        permissions,
+    })
 }
 
 fn instantiate(
@@ -506,7 +549,10 @@ pub fn evaluate_scoped(
 ) -> Result<(AccessDecision, AuthorizedPlan), ScopeError> {
     let decision = evaluate(request, snapshot)?;
     validate_selection(&decision, requested)?;
-    let abilities = scoped_abilities(
+    let ScopeInstantiation {
+        abilities,
+        permissions,
+    } = scoped_abilities(
         request, snapshot, &decision, scopes, requested, resources, limits,
     )?;
     let goals = request
@@ -525,11 +571,12 @@ pub fn evaluate_scoped(
                 .cloned()
                 .ok_or(ScopeError::InvalidRequest)
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let model = instantiate(request, &abilities);
     let realization = solve(
-        &instantiate(request, &abilities),
+        &model,
         &Request {
-            goals,
+            goals: goals.clone(),
             available: BTreeSet::new(),
             permitted: abilities.values().cloned().collect(),
             forbidden_mechanisms: BTreeSet::new(),
@@ -539,7 +586,9 @@ pub fn evaluate_scoped(
         |_| true,
     )
     .map_err(|_| ScopeError::Policy(DenialReason::NoRealization))?;
+    let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
     let plan = AuthorizedPlan {
+        evidence: crate::selection::PlanningEvidence::authorized(request, proof, resources),
         binding: binding(request),
         issued_at: request.evaluated_at,
         policy_reference: decision

@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use authority_policy_core::selection::{
+    CandidateId, CandidateResult, DeploymentAvailability, ExistingRouteAvailability,
+    PlanningEvidence, RouteChoice, SelectionOptions, evaluate_selection,
+};
 use authority_policy_core::{
     AccessDecision, AccessIntent, AccessRequest, Capability, Effect, IdentityFacts, PolicyRef,
     PolicyRule, PolicySnapshot, Route,
@@ -23,6 +27,36 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn automatic(&self) -> SelectionOptions {
+        SelectionOptions {
+            choice: RouteChoice::Automatic,
+            availability: DeploymentAvailability {
+                existing_route: Some(ExistingRouteAvailability {
+                    source: self.resources.source_address,
+                    destination: self.resources.target_address,
+                    registered_wireguard_key: self.resources.registered_wireguard_key.clone(),
+                }),
+                wireguard_target: Some(self.resources.target_address),
+            },
+        }
+    }
+
+    fn alternatives(
+        &self,
+        options: &SelectionOptions,
+    ) -> Result<(AccessDecision, AuthorizedPlan), authority_policy_core::selection::SelectionFailure>
+    {
+        evaluate_selection(
+            &self.request,
+            &self.snapshot,
+            &self.scopes,
+            &self.requested,
+            &self.resources,
+            self.limits,
+            options,
+        )
+    }
+
     fn tcp() -> Self {
         let request = AccessRequest {
             domain_id: Uuid::from_u128(1),
@@ -105,6 +139,134 @@ impl Fixture {
             self.limits,
         )
     }
+}
+
+#[test]
+fn automatic_selection_chooses_the_smallest_authorized_implementation() {
+    let mut fixture = Fixture::tcp();
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 300,
+    });
+    let (decision, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
+    assert_eq!(decision.intent.route, Route::Direct);
+    assert_eq!(plan.evidence().selected, Some(CandidateId::ExistingRoute));
+    assert_eq!(
+        plan.evidence().candidates[0].result,
+        CandidateResult::Authorized { mechanism_count: 1 }
+    );
+    assert_eq!(
+        plan.evidence().candidates[1].result,
+        CandidateResult::Authorized { mechanism_count: 3 }
+    );
+    assert!(plan.evidence().is_consistent());
+    let serialized = serde_json::to_vec(plan.evidence()).unwrap();
+    let restored: PlanningEvidence = serde_json::from_slice(&serialized).unwrap();
+    assert_eq!(&restored, plan.evidence());
+    assert!(restored.is_consistent());
+}
+
+#[test]
+fn automatic_selection_falls_back_when_the_existing_route_is_not_declared() {
+    let mut fixture = Fixture::tcp();
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 300,
+    });
+    let mut options = fixture.automatic();
+    options.availability.existing_route = None;
+    let (_, plan) = fixture.alternatives(&options).unwrap();
+    assert_eq!(plan.evidence().selected, Some(CandidateId::WireGuardMesh));
+    assert!(plan.evidence().is_consistent());
+    assert!(
+        matches!(&plan.evidence().candidates[0].result, CandidateResult::Rejected { reason, .. } if reason == "no_available_implementation")
+    );
+    let proof = plan.evidence().plan.as_ref().unwrap();
+    assert_eq!(proof.steps[0].mechanism, AccessMechanism::WireGuardPeer);
+    assert!(!proof.steps[1].requires.is_empty());
+    assert_eq!(proof.steps[2].mechanism, AccessMechanism::TcpAdmission);
+}
+
+#[test]
+fn a_rejected_candidate_does_not_abort_other_authorized_choices() {
+    let mut fixture = Fixture::tcp();
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 300,
+    });
+    fixture.snapshot.rules[0].valid_until = Some(120); // TCP fits; a 300s peer does not.
+    let (_, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
+    assert_eq!(plan.evidence().selected, Some(CandidateId::ExistingRoute));
+    assert!(matches!(&plan.evidence().candidates[1].result,
+        CandidateResult::Rejected { reason, capability } if reason == "policy_lifetime_exceeded" && capability.as_deref() == Some("mesh.join")));
+    assert!(plan.evidence().is_consistent());
+}
+
+#[test]
+fn declared_availability_must_match_the_source_target_and_registered_key() {
+    let fixture = Fixture::tcp(); // No peer input: a matching existing route is required.
+    for field in 0..3 {
+        let mut options = fixture.automatic();
+        let route = options.availability.existing_route.as_mut().unwrap();
+        match field {
+            0 => route.source = "10.77.0.99".parse().unwrap(),
+            1 => route.destination = "10.77.0.99".parse().unwrap(),
+            _ => route.registered_wireguard_key = "different-device".into(),
+        }
+        options.availability.wireguard_target = None;
+        let failure = fixture.alternatives(&options).unwrap_err();
+        assert_eq!(failure.reason, ScopeError::NoAvailableImplementation);
+        assert!(failure.evidence.is_consistent());
+        assert!(failure.evidence.plan.is_none());
+    }
+}
+
+#[test]
+fn explicit_mesh_constraint_never_falls_back_to_an_existing_route() {
+    let mut fixture = Fixture::tcp();
+    fixture.request.intent.route = Route::MeshRequired;
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 300,
+    });
+    fixture.snapshot.rules[0]
+        .grants
+        .remove(&Capability::MeshJoin);
+    let options = SelectionOptions {
+        choice: RouteChoice::Exact(Route::MeshRequired),
+        ..fixture.automatic()
+    };
+    let failure = fixture.alternatives(&options).unwrap_err();
+    assert_eq!(failure.capability(), Some(Capability::MeshJoin));
+    assert_eq!(failure.evidence.candidates.len(), 1);
+    assert!(failure.evidence.is_consistent());
+    let (_, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
+    assert_eq!(plan.evidence().selected, Some(CandidateId::ExistingRoute));
+}
+
+#[test]
+fn audit_replay_rejects_scope_expansion_forward_dependencies_and_wrong_selection() {
+    let fixture = Fixture::tcp();
+    let (_, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
+    let mut expanded = plan.evidence().clone();
+    if let AbilityScope::TcpConnection { ports, .. } =
+        &mut expanded.plan.as_mut().unwrap().abilities[0].ability.scope
+    {
+        ports.insert(8082);
+    }
+    assert!(!expanded.is_consistent());
+    let mut forward = plan.evidence().clone();
+    forward.plan.as_mut().unwrap().steps[0].requires.push(0);
+    assert!(!forward.is_consistent());
+    let mut unavailable = plan.evidence().clone();
+    unavailable.deployment.as_mut().unwrap().existing_route = None;
+    assert!(!unavailable.is_consistent());
+    let mut rebound = plan.evidence().clone();
+    rebound.resources.as_mut().unwrap().target_address = "10.77.0.99".parse().unwrap();
+    assert!(!rebound.is_consistent());
+    let mut wrong = plan.evidence().clone();
+    wrong.selected = Some(CandidateId::WireGuardMesh);
+    assert!(!wrong.is_consistent());
 }
 
 #[test]
@@ -313,4 +475,25 @@ proptest! {
         prop_assert_eq!(grant.contains(&request), !selected.is_empty() && selected.is_subset(&allowed)
             && start >= 100 && start < end && end <= 1000);
     }
+}
+
+#[test]
+fn available_routes_never_override_policy_and_mismatched_exact_constraints_are_rejected() {
+    let mut fixture = Fixture::tcp();
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 300,
+    });
+    fixture.snapshot.rules[0].grants.clear();
+    let failure = fixture.alternatives(&fixture.automatic()).unwrap_err();
+    assert!(failure.evidence.selected.is_none());
+    assert!(failure.evidence.is_consistent());
+    fixture.request.intent.route = Route::MeshRequired;
+    assert_eq!(
+        fixture
+            .alternatives(&SelectionOptions::exact(Route::Direct))
+            .unwrap_err()
+            .reason,
+        ScopeError::InvalidRequest
+    );
 }

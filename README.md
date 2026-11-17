@@ -136,6 +136,12 @@ inside the effective policy envelope, then projects only its selected adapters.
 The authorized plan binds identity, target, keys, ports, principals and independent
 validity intervals; projection consumes these immutable scopes directly. Requested
 leases cannot outlive their winning policies or configured TTL limits.
+TCP requests can opt into automatic existing-route/mesh selection with
+`automatic_route: true`; the browser helper accepts it as its fourth argument.
+Existing-route availability requires the server's optional
+`AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS` declaration. Planning choices, rejected
+candidates, scoped permissions and dependencies are recorded in `access.plan`
+and `policy.plan.evaluated` v1 within the authorization transaction.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 

@@ -2,6 +2,7 @@
 """Exercise signed TCP derivation and real kernel enforcement over the mesh."""
 import copy
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -33,10 +34,10 @@ def browser(script, args):
     return value
 
 
-def issue(ports, ttl=20, network=False):
-    return browser('window.authorityRequestTcpAuthorization(arguments[0],arguments[1],arguments[2])'
+def issue(ports, ttl=20, network=False, automatic=False):
+    return browser('window.authorityRequestTcpAuthorization(arguments[0],arguments[1],arguments[2],arguments[3])'
                    '.then(value=>done({value})).catch(error=>done({error:error.message}));',
-                   [ports, network, ttl])['value']
+                   [ports, network, ttl, automatic])['value']
 
 
 def revoke(decision, kinds):
@@ -155,6 +156,10 @@ assert allowed(2224), 'one TCP grant expiry removed another grant'
 assert subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
                       stderr=subprocess.DEVNULL).returncode == 0
 
+# Retire the independent service grant before later tests restore mesh transport.
+revoke(other['decision_id'], ['tcp.port'])
+wait(lambda: not allowed(2224))
+
 # A second scope on the same decision is a separate durable notice.
 network_notice = revoke(combined['decision_id'], ['wireguard.peer'])
 assert network_notice['notice']['sequence'] > notice['notice']['sequence']
@@ -174,7 +179,10 @@ def page(script):
     })['value']
 
 
-page("document.querySelector('#tcp-ports').value='8080';"
+page("const issue=window.authorityRequestTcpAuthorization;"
+     "window.authorityRequestTcpAuthorization=async(...args)=>{const value=await issue(...args);"
+     "window.__e2eTcpUiDecisionId=value.decision_id;return value;};"
+     "document.querySelector('#tcp-ports').value='8080';"
      "document.querySelector('#tcp-ttl').value='10';"
      "document.querySelector('#tcp-network').checked=true;"
      "document.querySelector('#tcp-form').requestSubmit(); return true;")
@@ -182,3 +190,44 @@ wait(lambda: page("return document.querySelector('#tcp-result').textContent;").s
 page("document.querySelector('#tcp-revoke').click(); return true;")
 wait(lambda: page("return document.querySelector('#tcp-result').textContent;").startswith('TCP revocation recorded.'))
 print('TCP UI: port/lifetime/network selection and TCP-only revocation succeeded', flush=True)
+
+ui_decision = page("return window.__e2eTcpUiDecisionId;")
+# A fresh target peer after revocation needs the client's old transport session
+# reset as well. This does not install or alter any target-side peer or TCP grant.
+subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True)
+wait(lambda: subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL).returncode == 0)
+
+# Flip automatic mode after the browser signed its proof: the server must reject it.
+mode_tamper = browser(
+    "const original=window.fetch;"
+    "window.fetch=(url,options)=>{if(String(url).endsWith('/v1/tcp-authorizations')){"
+    "window.fetch=original;const body=JSON.parse(options.body);body.automatic_route=false;"
+    "return original(url,{...options,body:JSON.stringify(body)});}return original(url,options);};"
+    "window.authorityRequestTcpAuthorization([8080],false,10,true)"
+    ".then(value=>done({unexpected:true})).catch(error=>done({denial:error.message}))"
+    ".finally(()=>{window.fetch=original;});", [])
+assert 'invalid_device_proof' in mode_tamper.get('denial', ''), mode_tamper
+
+# The same browser API selects either the declared existing route or a mesh grant.
+automatic = issue([8080], ttl=10, automatic=True)
+expect_network = (os.environ.get('AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS')
+                  != automatic['tcp_grant']['grant']['source_address'])
+assert ('network_grant' in automatic) == expect_network, automatic
+assert automatic['tcp_grant']['grant']['destination_ports'] == [8080]
+if expect_network:
+    http(f'{agent}/v1/network-grants', automatic['network_grant'])
+http(f'{agent}/v1/tcp-grants', automatic['tcp_grant'])
+wait(lambda: allowed(2223))
+assert not allowed(2224), 'automatic planning admitted an unselected service'
+revoke(automatic['decision_id'], ['tcp.port'])
+wait(lambda: not allowed(2223))
+if expect_network:
+    revoke(automatic['decision_id'], ['wireguard.peer'])
+# Cancel the UI test's independent peer lease before restoring static mesh state.
+revoke(ui_decision, ['wireguard.peer'])
+wait(lambda: subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL).returncode != 0)
+print('Automatic TCP planning: proof-bound mode, '
+      + ('WireGuard fallback' if expect_network else 'declared existing route')
+      + ', selected-port enforcement and revocation verified', flush=True)

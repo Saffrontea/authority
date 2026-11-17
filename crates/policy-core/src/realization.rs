@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 
 use authority_planning_core::{Mechanism, Model, Plan, PlanningError, Request, solve};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{AccessIntent, Capability, Outcome, Route};
 
 /// OSI layers describe reachability; identity and application access are distinct
@@ -54,8 +56,10 @@ impl Ability {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AccessMechanism {
+    #[serde(rename = "wireguard_peer")]
     WireGuardPeer,
     NetworkRoute,
     SshCertificate,

@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use authority_policy_core::selection::{
+    DeploymentAvailability, ExistingRouteAvailability, RouteChoice, SelectionOptions,
+    evaluate_selection,
+};
 use authority_policy_core::{
     AccessIntent, AccessRequest, Capability, Effect, IdentityFacts, PolicyRef, PolicyRule,
     PolicySnapshot, Route,
@@ -14,6 +18,14 @@ use uuid::Uuid;
 fn authorize(
     intent: AccessIntent,
     requested: &RequestedAccess,
+) -> (AuthorizedPlan, CommonDecisionClaims) {
+    authorize_selected(intent, requested, None)
+}
+
+fn authorize_selected(
+    intent: AccessIntent,
+    requested: &RequestedAccess,
+    options: Option<&SelectionOptions>,
 ) -> (AuthorizedPlan, CommonDecisionClaims) {
     let request = AccessRequest {
         domain_id: Uuid::from_u128(1),
@@ -63,23 +75,24 @@ fn authorize(
             tcp_ports: BTreeSet::from([8080, 8081]),
         },
     )]);
-    let (_, plan) = evaluate_scoped(
-        &request,
-        &snapshot,
-        &scopes,
-        requested,
-        &NetworkResources {
-            source_address: "10.77.0.1".parse().unwrap(),
-            target_address: "10.77.0.2".parse().unwrap(),
-            registered_wireguard_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
-            service_audience: "demo-api".into(),
-        },
-        LifetimeLimits {
-            ssh_seconds: 60,
-            network_seconds: 300,
-        },
-    )
-    .unwrap();
+    let resources = NetworkResources {
+        source_address: "10.77.0.1".parse().unwrap(),
+        target_address: "10.77.0.2".parse().unwrap(),
+        registered_wireguard_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+        service_audience: "demo-api".into(),
+    };
+    let limits = LifetimeLimits {
+        ssh_seconds: 60,
+        network_seconds: 300,
+    };
+    let (_, plan) = if let Some(options) = options {
+        evaluate_selection(
+            &request, &snapshot, &scopes, requested, &resources, limits, options,
+        )
+        .unwrap()
+    } else {
+        evaluate_scoped(&request, &snapshot, &scopes, requested, &resources, limits).unwrap()
+    };
     let common = CommonDecisionClaims {
         decision_id: "0123456789abcdef0123456789abcdef".into(),
         issuer: format!("domain-authority:{}", request.domain_id),
@@ -203,4 +216,46 @@ fn projection_cannot_rebind_identity_policy_or_issuance_time() {
             Err(ProjectionError::ScopeMismatch)
         ));
     }
+}
+
+#[test]
+fn automatic_projection_emits_only_the_selected_route_material() {
+    let requested = RequestedAccess {
+        tcp: Some(RequestedTcp {
+            ports: BTreeSet::from([8080]),
+            ttl_seconds: 20,
+        }),
+        network: Some(RequestedNetwork {
+            wireguard_public_key: None,
+            ttl_seconds: 300,
+        }),
+        ..RequestedAccess::default()
+    };
+    let mut options = SelectionOptions {
+        choice: RouteChoice::Automatic,
+        availability: DeploymentAvailability {
+            existing_route: Some(ExistingRouteAvailability {
+                source: "10.77.0.1".parse().unwrap(),
+                destination: "10.77.0.2".parse().unwrap(),
+                registered_wireguard_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            }),
+            wireguard_target: Some("10.77.0.2".parse().unwrap()),
+        },
+    };
+    let (plan, common) =
+        authorize_selected(AccessIntent::tcp(Route::Direct), &requested, Some(&options));
+    let result = project_authorized(&common, &plan).unwrap();
+    assert!(result.network_grant.is_none());
+    assert_eq!(result.tcp_grant.unwrap().destination_ports, vec![8080]);
+    options.availability.existing_route = None;
+    let (plan, common) =
+        authorize_selected(AccessIntent::tcp(Route::Direct), &requested, Some(&options));
+    let result = project_authorized(&common, &plan).unwrap();
+    assert_eq!(
+        result.network_grant.unwrap().expires_at,
+        common.issued_at + 300
+    );
+    assert_eq!(result.tcp_grant.unwrap().expires_at, common.issued_at + 20);
+    assert!(result.ssh_issuance.is_none());
+    assert!(result.mtls_issuance.is_none());
 }

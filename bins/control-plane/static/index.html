@@ -373,14 +373,19 @@
       return { body, headers: await deviceProofHeaders(sessionToken, 'access.revoke', bindings) };
     };
 
-    window.authorityRequestTcpAuthorization = async function (ports, includeNetwork = false, ttlSeconds = 10) {
+    window.authorityRequestTcpAuthorization = async function (ports, includeNetwork = false, ttlSeconds = 10, automaticRoute = false) {
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
       const sessionToken = sessionStorage.getItem('authority-session');
       if (!access || !sessionToken) throw new Error('TCP authorization prerequisites are missing.');
       const body = { device_id: access.device_id, target_node_id: access.target_node_id,
         destination_ports: ports, include_network: includeNetwork, ttl_seconds: ttlSeconds };
-      return authorizedApi('/v1/tcp-authorizations', body, sessionToken, 'access.authorize_tcp',
-        [body.device_id, body.target_node_id, JSON.stringify(ports), String(includeNetwork), String(ttlSeconds)]);
+      const bindings = [body.device_id, body.target_node_id, JSON.stringify(ports), String(includeNetwork), String(ttlSeconds)];
+      if (automaticRoute) {
+        if (includeNetwork) throw new Error('Choose automatic routing or an explicit network grant.');
+        body.automatic_route = true;
+        bindings.push('automatic');
+      }
+      return authorizedApi('/v1/tcp-authorizations', body, sessionToken, 'access.authorize_tcp', bindings);
     };
 
     window.authorityRevokeDecision = async function (decisionId, adapterKinds = null) {

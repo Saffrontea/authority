@@ -36,3 +36,15 @@ decision. It binds the client SPKI digest, SPIFFE identity, service audience,
 target and decision ID. `SignedDecisionRevocationNoticeV2` replaces the
 protocol-specific audience with an explicit adapter set, allowing one signed
 notice to be verified independently by WireGuard and mTLS consumers.
+
+`PolicyPlanEvaluatedV1` records deployment selection and scoped planning evidence
+in the `policy.plan.evaluated` outbox event. Its provider and replay validator are
+implemented in `authority-policy-core::selection`, with consumer/provider vectors
+in that crate's conformance tests and the Control Plane audit tests. It records
+candidate authorization results, resource/deployment declarations, scoped abilities,
+effective permission bounds, policy revisions, goals and executable dependencies.
+It is an audit message with no signing preimage and grants no authority. Decoding
+it cannot construct an authorized plan for projection. Existing signed contract
+fields, audiences, nonces and lifetime semantics are unchanged. Automatic route
+selection is an explicitly proof-bound HTTP request option; it cannot turn a
+server-unavailable or policy-denied route into an authorized implementation.

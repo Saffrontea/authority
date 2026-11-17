@@ -35,6 +35,7 @@ pub struct EnrollmentConfig {
     pub client_wireguard_public_key: String,
     pub network_agent_origin: String,
     pub target_mesh_address: String,
+    pub existing_route_source_address: Option<std::net::Ipv4Addr>,
 }
 
 pub struct PendingRegistration {
@@ -109,6 +110,10 @@ impl AppState {
 
     pub fn target_mesh_address(&self) -> &str {
         &self.0.enrollment.target_mesh_address
+    }
+
+    pub fn existing_route_source_address(&self) -> Option<std::net::Ipv4Addr> {
+        self.0.enrollment.existing_route_source_address
     }
 
     pub fn network_agent_origin(&self) -> &str {

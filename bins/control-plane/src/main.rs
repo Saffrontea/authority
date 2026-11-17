@@ -1,6 +1,7 @@
 mod access_policy;
 mod api;
 mod config;
+mod planning_audit;
 mod revocation_delivery;
 mod state;
 mod ui;
@@ -46,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             client_wireguard_public_key: config.client_wireguard_public_key,
             network_agent_origin: config.network_agent_origin,
             target_mesh_address: config.target_mesh_address,
+            existing_route_source_address: config.existing_route_source_address,
         },
         (
             config.network_grant_ttl_seconds,

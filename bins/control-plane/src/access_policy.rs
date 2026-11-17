@@ -3,10 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use authority_policy_core::{
     AccessDecision, AccessIntent, AccessRequest, Capability, DenialReason, Effect, IdentityFacts,
     PolicyRef, PolicyRule, PolicySnapshot,
-    scoped::{
-        AuthorizedPlan, LifetimeLimits, NetworkResources, PolicyScope, RequestedAccess, ScopeError,
-        evaluate_scoped,
-    },
+    scoped::{AuthorizedPlan, LifetimeLimits, NetworkResources, PolicyScope, RequestedAccess},
+    selection::{SelectionFailure, SelectionOptions, evaluate_selection},
 };
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -18,7 +16,7 @@ pub struct AuthorizedAccess {
 
 pub enum AuthorizationOutcome {
     Allowed(Box<AuthorizedAccess>),
-    Denied(ScopeError),
+    Denied(Box<SelectionFailure>),
 }
 
 struct StoredRule {
@@ -33,6 +31,7 @@ pub async fn authorize(
     request: AccessRequest,
     requested: &RequestedAccess,
     limits: LifetimeLimits,
+    selection: &SelectionOptions,
 ) -> Result<AuthorizationOutcome, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
@@ -64,9 +63,9 @@ pub async fn authorize(
     .await?;
 
     let Some(first) = rows.first() else {
-        return Ok(AuthorizationOutcome::Denied(
-            DenialReason::NoApplicablePolicy.into(),
-        ));
+        return Ok(AuthorizationOutcome::Denied(Box::new(
+            SelectionFailure::policy(&request, selection, DenialReason::NoApplicablePolicy),
+        )));
     };
     let identity = IdentityFacts {
         device_domain_id: first.try_get("device_domain_id")?,
@@ -107,12 +106,14 @@ pub async fn authorize(
         identity,
         rules: stored.into_iter().map(|item| item.rule).collect(),
     };
-    match evaluate_scoped(&request, &snapshot, &scopes, requested, &resources, limits) {
+    match evaluate_selection(
+        &request, &snapshot, &scopes, requested, &resources, limits, selection,
+    ) {
         Ok((decision, plan)) => Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
             decision,
             plan,
         }))),
-        Err(reason) => Ok(AuthorizationOutcome::Denied(reason)),
+        Err(reason) => Ok(AuthorizationOutcome::Denied(Box::new(reason))),
     }
 }
 

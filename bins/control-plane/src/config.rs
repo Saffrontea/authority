@@ -19,6 +19,7 @@ pub struct Config {
     pub client_wireguard_public_key: String,
     pub network_agent_origin: String,
     pub target_mesh_address: String,
+    pub existing_route_source_address: Option<std::net::Ipv4Addr>,
     pub network_grant_ttl_seconds: i64,
     pub ssh_authorization_ttl_seconds: i64,
 }
@@ -60,6 +61,7 @@ impl Config {
         {
             return Err("invalid target mesh address".to_owned());
         }
+        let existing_route_source_address = existing_route_source()?;
         let network_grant_ttl_seconds = value("AUTHORITY_NETWORK_GRANT_TTL_SECONDS", "300")?
             .parse::<i64>()
             .map_err(|error| format!("AUTHORITY_NETWORK_GRANT_TTL_SECONDS is invalid: {error}"))?;
@@ -110,6 +112,7 @@ impl Config {
             client_wireguard_public_key,
             network_agent_origin,
             target_mesh_address,
+            existing_route_source_address,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
         })
@@ -147,5 +150,21 @@ fn nonempty_one_line(name: &str, value: String) -> Result<String, String> {
         Err(format!("{name} must contain exactly one non-empty line"))
     } else {
         Ok(value)
+    }
+}
+
+fn existing_route_source() -> Result<Option<std::net::Ipv4Addr>, String> {
+    match env::var("AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS") {
+        Ok(address) => {
+            let address = address
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|cause| format!("invalid existing route source: {cause}"))?;
+            if address.is_unspecified() || address.is_multicast() || address.is_broadcast() {
+                return Err("invalid existing route source".to_owned());
+            }
+            Ok(Some(address))
+        }
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(cause) => Err(format!("cannot read existing route source: {cause}")),
     }
 }

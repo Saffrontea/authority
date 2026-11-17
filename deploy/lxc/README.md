@@ -75,6 +75,7 @@ mise run db:migrate
 mise run db:status
 mise run db:verify
 mise run db:verify-schema
+mise run db:verify-planning  # after poc:e2e: audit/outbox and issued TCP scope checks
 mise run db:shell
 mise run db:reset-password
 mise run db:stop
