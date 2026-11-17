@@ -11,6 +11,7 @@ authority-policy-core.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+uuid.workspace = true
 proptest = "1"
 
 [lints]

@@ -2,6 +2,8 @@
 
 mod selection;
 pub use selection::{ProjectionInputs, SelectedProjections, project_plan};
+mod scoped;
+pub use scoped::project_authorized;
 
 use authority_contracts_model::{
     ContractError, IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
@@ -58,6 +60,8 @@ pub struct ProjectionSet {
 
 #[derive(Debug, Error)]
 pub enum ProjectionError {
+    #[error("projection claims differ from the authorized scope")]
+    ScopeMismatch,
     #[error("selected mechanism requires {0} projection input")]
     MissingInput(&'static str),
     #[error("projection lifetime must be between 1 and 600 seconds")]

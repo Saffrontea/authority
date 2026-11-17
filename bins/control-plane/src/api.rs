@@ -14,11 +14,14 @@ use authority_device_auth_core::{
 use authority_issuer_core::{
     sign_authorization, sign_mtls_authorization, sign_network_grant, sign_revocation_notice_v2,
 };
-use authority_policy_core::{AccessIntent, Route};
-use authority_projection_core::{
-    CommonDecisionClaims, MtlsProjectionRequest, NetworkProjectionRequest, ProjectionInputs,
-    SshProjectionRequest, project_plan,
+use authority_policy_core::{
+    AccessIntent, Route,
+    scoped::{
+        AuthorizedPlan, LifetimeLimits, RequestedAccess, RequestedMtls, RequestedNetwork,
+        RequestedSsh, RequestedTcp, ScopeError,
+    },
 };
+use authority_projection_core::{CommonDecisionClaims, project_authorized};
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -893,6 +896,24 @@ async fn issue_access_authorization(
             issued_at,
             AccessIntent::infrastructure(Route::MeshRequired),
         ),
+        &RequestedAccess {
+            ssh: Some(RequestedSsh {
+                public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
+                principals: None,
+                terminal_token_hash: request.terminal_token_hash.clone(),
+                ttl_seconds: state.ssh_authorization_ttl_seconds(),
+            }),
+            mtls: Some(RequestedMtls {
+                client_spki_sha256: request.mtls_client_spki_sha256.clone(),
+                ttl_seconds: state.network_grant_ttl_seconds(),
+            }),
+            network: Some(RequestedNetwork {
+                wireguard_public_key: Some(request.wireguard_public_key.clone()),
+                ttl_seconds: state.network_grant_ttl_seconds(),
+            }),
+            ..RequestedAccess::default()
+        },
+        lifetime_limits(&state),
     )
     .await
     .map_err(ApiError::internal)?;
@@ -914,27 +935,10 @@ async fn issue_access_authorization(
                 },
             )
             .await?;
-            return Err(ApiError::forbidden("policy_denied"));
+            return Err(authorization_denial(&reason));
         }
     };
-    if decision.wireguard_public_key != request.wireguard_public_key.as_bytes() {
-        record_access_decision(
-            &state,
-            session.user_id,
-            request.target_node_id,
-            DecisionAudit {
-                decision: "deny",
-                denial_reason: Some("wireguard_key_mismatch"),
-                denied_capability: None,
-                evaluated: Some(&decision),
-                authorization: None,
-            },
-        )
-        .await?;
-        return Err(ApiError::forbidden("wireguard_key_mismatch"));
-    }
-
-    let response = build_access_bundle(&state, &session, &request, &decision, issued_at)?;
+    let response = build_access_bundle(&state, &decision)?;
     record_access_decision(
         &state,
         session.user_id,
@@ -1187,66 +1191,41 @@ fn required_contract<T>(contract: Option<T>, name: &str) -> Result<T, ApiError> 
     contract.ok_or_else(|| ApiError::internal(format!("authorized plan omitted {name}")))
 }
 
+fn lifetime_limits(state: &AppState) -> LifetimeLimits {
+    LifetimeLimits {
+        ssh_seconds: state.ssh_authorization_ttl_seconds(),
+        network_seconds: state.network_grant_ttl_seconds(),
+    }
+}
+
+fn authorization_denial(reason: &ScopeError) -> ApiError {
+    ApiError::forbidden(match reason {
+        ScopeError::Policy(_) => "policy_denied",
+        _ => reason.code(),
+    })
+}
+
+fn authorized_claims(state: &AppState, plan: &AuthorizedPlan) -> CommonDecisionClaims {
+    let binding = plan.binding();
+    CommonDecisionClaims {
+        decision_id: Uuid::new_v4().simple().to_string(),
+        issuer: format!("domain-authority:{}", state.domain_id()),
+        domain_id: binding.domain_id.to_string(),
+        subject_user_id: binding.subject_user_id.to_string(),
+        device_id: binding.device_id.to_string(),
+        target_node_id: binding.target_node_id.to_string(),
+        policy_id: plan.policy_reference().to_owned(),
+        issued_at: plan.issued_at(),
+    }
+}
+
 fn build_access_bundle(
     state: &AppState,
-    session: &AuthenticatedSession,
-    request: &IssueAccessAuthorizationRequest,
     decision: &access_policy::AuthorizedAccess,
-    issued_at: i64,
 ) -> Result<AccessAuthorizationResponse, ApiError> {
-    // A shared nonce is the cryptographic decision identifier: both signed
-    // adapter contracts bind it, the policy, subject, device, target, and time.
-    let decision_id = Uuid::new_v4().simple().to_string();
-    let common_policy = policy_reference(&decision.decision);
-    let ssh_principal = decision
-        .ssh_principal
-        .clone()
-        .ok_or_else(|| ApiError::internal("SSH decision has no principal binding"))?;
-    let projected = project_plan(
-        &CommonDecisionClaims {
-            decision_id: decision_id.clone(),
-            issuer: format!("domain-authority:{}", state.domain_id()),
-            domain_id: state.domain_id().to_string(),
-            subject_user_id: session.user_id.to_string(),
-            device_id: request.device_id.to_string(),
-            target_node_id: request.target_node_id.to_string(),
-            policy_id: common_policy,
-            issued_at,
-        },
-        &decision.decision.realization,
-        ProjectionInputs {
-            ssh: Some((
-                &SshProjectionRequest {
-                    public_key_fingerprint: request.ssh_public_key_fingerprint.clone(),
-                    principals: vec![ssh_principal],
-                    terminal_token_hash: request.terminal_token_hash.clone(),
-                },
-                state.ssh_authorization_ttl_seconds(),
-            )),
-            network: Some((
-                &NetworkProjectionRequest {
-                    wireguard_public_key: request.wireguard_public_key.clone(),
-                    mesh_address: decision.device_mesh_address.clone(),
-                },
-                state.network_grant_ttl_seconds(),
-            )),
-            mtls: Some((
-                &MtlsProjectionRequest {
-                    client_spki_sha256: request.mtls_client_spki_sha256.clone(),
-                    identity_uri: format!(
-                        "spiffe://authority.local/domain/{}/user/{}/device/{}",
-                        state.domain_id(),
-                        session.user_id,
-                        request.device_id
-                    ),
-                    service_audience: "demo-api".to_owned(),
-                },
-                state.network_grant_ttl_seconds(),
-            )),
-            ..ProjectionInputs::default()
-        },
-    )
-    .map_err(ApiError::internal)?;
+    let common = authorized_claims(state, &decision.plan);
+    let decision_id = common.decision_id.clone();
+    let projected = project_authorized(&common, &decision.plan).map_err(ApiError::internal)?;
     let ssh_authorization = sign_authorization(
         required_contract(projected.ssh_issuance, "SSH")?,
         state.signer(),
@@ -1307,7 +1286,7 @@ async fn record_access_decision(
     let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     let payload = if let Some((bundle, evaluated)) = audit.authorization.zip(audit.evaluated) {
         policy_decision_payload(
-            evaluated,
+            &evaluated.decision,
             &bundle.decision_id,
             vec![
                 AdapterGrantV1 {
@@ -1398,11 +1377,10 @@ async fn record_access_decision(
 }
 
 fn policy_decision_payload(
-    evaluated: &access_policy::AuthorizedAccess,
+    decision: &authority_policy_core::AccessDecision,
     decision_id: &str,
     adapter_grants: Vec<AdapterGrantV1>,
 ) -> Result<Value, ApiError> {
-    let decision = &evaluated.decision;
     let contract = PolicyDecisionEvaluatedV1 {
         decision_id: decision_id.to_owned(),
         intent: PolicyIntentV1 {
@@ -1727,30 +1705,23 @@ mod tests {
             policy_id: Uuid::new_v4(),
             revision: 7,
         };
-        let evaluated = access_policy::AuthorizedAccess {
-            decision: AccessDecision {
-                realization: authority_policy_core::realization::realize(
-                    &AccessIntent::ssh(Route::MeshRequired),
-                    authority_policy_core::realization::all_abilities(),
-                )
-                .expect("built-in SSH plan"),
-                intent: AccessIntent::ssh(Route::MeshRequired),
-                required: BTreeSet::from([
-                    Capability::MeshJoin,
-                    Capability::NetworkReach,
-                    Capability::SshIssue,
-                ]),
-                sources: BTreeMap::from([
-                    (Capability::MeshJoin, policy),
-                    (Capability::NetworkReach, policy),
-                    (Capability::SshIssue, policy),
-                ]),
-            },
-            ssh_principal: Some("deploy".to_owned()),
-            wireguard_public_key: Vec::new(),
-            device_mesh_address: "10.77.0.1".to_owned(),
-            target_mesh_address: "10.77.0.2".to_owned(),
-            tcp_ports: vec![],
+        let evaluated = AccessDecision {
+            realization: authority_policy_core::realization::realize(
+                &AccessIntent::ssh(Route::MeshRequired),
+                authority_policy_core::realization::all_abilities(),
+            )
+            .expect("built-in SSH plan"),
+            intent: AccessIntent::ssh(Route::MeshRequired),
+            required: BTreeSet::from([
+                Capability::MeshJoin,
+                Capability::NetworkReach,
+                Capability::SshIssue,
+            ]),
+            sources: BTreeMap::from([
+                (Capability::MeshJoin, policy),
+                (Capability::NetworkReach, policy),
+                (Capability::SshIssue, policy),
+            ]),
         };
         let Ok(payload) = policy_decision_payload(
             &evaluated,
@@ -1847,6 +1818,18 @@ async fn issue_tcp_authorization(
                 Route::Direct
             }),
         ),
+        &RequestedAccess {
+            tcp: Some(RequestedTcp {
+                ports: request.destination_ports.iter().copied().collect(),
+                ttl_seconds: request.ttl_seconds,
+            }),
+            network: request.include_network.then(|| RequestedNetwork {
+                wireguard_public_key: None,
+                ttl_seconds: state.network_grant_ttl_seconds(),
+            }),
+            ..RequestedAccess::default()
+        },
+        lifetime_limits(&state),
     )
     .await
     .map_err(ApiError::internal)?;
@@ -1868,84 +1851,21 @@ async fn issue_tcp_authorization(
                 },
             )
             .await?;
-            return Err(ApiError::forbidden("policy_denied"));
+            return Err(authorization_denial(&reason));
         }
     };
-    if request
-        .destination_ports
-        .iter()
-        .any(|port| !evaluated.tcp_ports.contains(port))
-    {
-        record_access_decision(
-            &state,
-            session.user_id,
-            request.target_node_id,
-            DecisionAudit {
-                decision: "deny",
-                denial_reason: Some("tcp_port_denied"),
-                denied_capability: Some("tcp.connect"),
-                evaluated: Some(&evaluated),
-                authorization: None,
-            },
-        )
-        .await?;
-        return Err(ApiError::forbidden("tcp_port_denied"));
-    }
-    let (response, adapters) = build_tcp_response(&state, &session, &request, &evaluated, now)?;
-    let trace = policy_decision_payload(&evaluated, &response.decision_id, adapters)?;
+    let (response, adapters) = build_tcp_response(&state, &evaluated)?;
+    let trace = policy_decision_payload(&evaluated.decision, &response.decision_id, adapters)?;
     persist_tcp_authorization(&state, &session, request.target_node_id, &response, &trace).await?;
     Ok(Json(response))
 }
 
 fn build_tcp_response(
     state: &AppState,
-    session: &AuthenticatedSession,
-    request: &IssueTcpAuthorizationRequest,
     evaluated: &access_policy::AuthorizedAccess,
-    now: i64,
 ) -> Result<(TcpAuthorizationResponse, Vec<AdapterGrantV1>), ApiError> {
-    let common = CommonDecisionClaims {
-        decision_id: Uuid::new_v4().simple().to_string(),
-        issuer: format!("domain-authority:{}", state.domain_id()),
-        domain_id: state.domain_id().to_string(),
-        subject_user_id: session.user_id.to_string(),
-        device_id: request.device_id.to_string(),
-        target_node_id: request.target_node_id.to_string(),
-        policy_id: policy_reference(&evaluated.decision),
-        issued_at: now,
-    };
-    let plan = &evaluated.decision.realization;
-    let needs_network = plan
-        .mechanisms
-        .contains(&authority_policy_core::realization::AccessMechanism::WireGuardPeer);
-    let network = if needs_network {
-        Some(NetworkProjectionRequest {
-            wireguard_public_key: String::from_utf8(evaluated.wireguard_public_key.clone())
-                .map_err(ApiError::internal)?,
-            mesh_address: evaluated.device_mesh_address.clone(),
-        })
-    } else {
-        None
-    };
-    let projected = project_plan(
-        &common,
-        plan,
-        ProjectionInputs {
-            tcp: Some((
-                &authority_projection_core::TcpProjectionRequest {
-                    source_address: evaluated.device_mesh_address.clone(),
-                    destination_address: evaluated.target_mesh_address.clone(),
-                    destination_ports: request.destination_ports.clone(),
-                },
-                request.ttl_seconds,
-            )),
-            network: network
-                .as_ref()
-                .map(|input| (input, state.network_grant_ttl_seconds())),
-            ..ProjectionInputs::default()
-        },
-    )
-    .map_err(ApiError::internal)?;
+    let common = authorized_claims(state, &evaluated.plan);
+    let projected = project_authorized(&common, &evaluated.plan).map_err(ApiError::internal)?;
     let tcp_grant = authority_issuer_core::sign_tcp_grant(
         required_contract(projected.tcp_grant, "TCP admission")?,
         state.signer(),

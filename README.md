@@ -133,6 +133,9 @@ the LXC installer installs it before starting the Network Agent.
 
 Authorization now selects a realization from an ability/mechanism hypergraph
 inside the effective policy envelope, then projects only its selected adapters.
+The authorized plan binds identity, target, keys, ports, principals and independent
+validity intervals; projection consumes these immutable scopes directly. Requested
+leases cannot outlive their winning policies or configured TTL limits.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 

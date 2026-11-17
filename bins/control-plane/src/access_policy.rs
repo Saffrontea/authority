@@ -1,30 +1,29 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use authority_policy_core::{
     AccessDecision, AccessIntent, AccessRequest, Capability, DenialReason, Effect, IdentityFacts,
-    PolicyRule, PolicySnapshot, evaluate,
+    PolicyRef, PolicyRule, PolicySnapshot,
+    scoped::{
+        AuthorizedPlan, LifetimeLimits, NetworkResources, PolicyScope, RequestedAccess, ScopeError,
+        evaluate_scoped,
+    },
 };
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 pub struct AuthorizedAccess {
     pub decision: AccessDecision,
-    pub ssh_principal: Option<String>,
-    pub wireguard_public_key: Vec<u8>,
-    pub device_mesh_address: String,
-    pub target_mesh_address: String,
-    pub tcp_ports: Vec<u16>,
+    pub plan: AuthorizedPlan,
 }
 
 pub enum AuthorizationOutcome {
     Allowed(Box<AuthorizedAccess>),
-    Denied(DenialReason),
+    Denied(ScopeError),
 }
 
 struct StoredRule {
     rule: PolicyRule,
-    ssh_principal: String,
-    tcp_ports: Vec<i32>,
+    scope: PolicyScope,
 }
 
 /// Extracts an immutable snapshot from PostgreSQL, then delegates all policy
@@ -32,14 +31,16 @@ struct StoredRule {
 pub async fn authorize(
     pool: &PgPool,
     request: AccessRequest,
+    requested: &RequestedAccess,
+    limits: LifetimeLimits,
 ) -> Result<AuthorizationOutcome, sqlx::Error> {
     let rows = sqlx::query(
         "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
                 policy.required_device_id, policy.target_node_id, policy.enabled, \
                 policy.effect, policy.priority, policy.revision, policy.capabilities, \
                 EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
-                EXTRACT(EPOCH FROM policy.valid_from)::bigint AS valid_from, \
-                EXTRACT(EPOCH FROM policy.valid_until)::bigint AS valid_until, \
+                CEIL(EXTRACT(EPOCH FROM policy.valid_from))::bigint AS valid_from, \
+                FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
                 policy.ssh_principal, policy.tcp_ports, host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
                 client.status = 'active' AS device_active, \
@@ -64,7 +65,7 @@ pub async fn authorize(
 
     let Some(first) = rows.first() else {
         return Ok(AuthorizationOutcome::Denied(
-            DenialReason::NoApplicablePolicy,
+            DenialReason::NoApplicablePolicy.into(),
         ));
     };
     let identity = IdentityFacts {
@@ -73,55 +74,46 @@ pub async fn authorize(
         device_active: first.try_get("device_active")?,
         target_active: first.try_get("target_active")?,
     };
-    let wireguard_public_key = first.try_get("wireguard_public_key")?;
-    let device_mesh_address = first.try_get("device_mesh_address")?;
-    let target_mesh_address = first.try_get("target_mesh_address")?;
+    let resources = NetworkResources {
+        registered_wireguard_key: String::from_utf8(first.try_get("wireguard_public_key")?)
+            .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?,
+        source_address: first
+            .try_get::<String, _>("device_mesh_address")?
+            .parse()
+            .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?,
+        target_address: first
+            .try_get::<String, _>("target_mesh_address")?
+            .parse()
+            .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?,
+        service_audience: "demo-api".to_owned(),
+    };
     let stored = rows
         .iter()
         .map(stored_rule)
         .collect::<Result<Vec<_>, _>>()?;
+    let scopes: BTreeMap<_, _> = stored
+        .iter()
+        .map(|item| {
+            (
+                PolicyRef {
+                    policy_id: item.rule.policy_id,
+                    revision: item.rule.revision,
+                },
+                item.scope.clone(),
+            )
+        })
+        .collect();
     let snapshot = PolicySnapshot {
         identity,
-        rules: stored.iter().map(|item| item.rule.clone()).collect(),
+        rules: stored.into_iter().map(|item| item.rule).collect(),
     };
-    let decision = match evaluate(&request, &snapshot) {
-        Ok(decision) => decision,
-        Err(reason) => return Ok(AuthorizationOutcome::Denied(reason)),
-    };
-    let ssh_principal = decision
-        .sources
-        .get(&Capability::SshIssue)
-        .and_then(|source| {
-            stored
-                .iter()
-                .find(|item| {
-                    item.rule.policy_id == source.policy_id && item.rule.revision == source.revision
-                })
-                .map(|item| item.ssh_principal.clone())
-        });
-    let tcp_ports = decision
-        .sources
-        .get(&Capability::TcpConnect)
-        .and_then(|source| {
-            stored.iter().find(|item| {
-                item.rule.policy_id == source.policy_id && item.rule.revision == source.revision
-            })
-        })
-        .map(|item| {
-            item.tcp_ports
-                .iter()
-                .filter_map(|port| u16::try_from(*port).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
-        decision,
-        ssh_principal,
-        wireguard_public_key,
-        device_mesh_address,
-        target_mesh_address,
-        tcp_ports,
-    })))
+    match evaluate_scoped(&request, &snapshot, &scopes, requested, &resources, limits) {
+        Ok((decision, plan)) => Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
+            decision,
+            plan,
+        }))),
+        Err(reason) => Ok(AuthorizationOutcome::Denied(reason)),
+    }
 }
 
 fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {
@@ -157,6 +149,12 @@ fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {
             _ => {}
         }
     }
+    let tcp_ports: Vec<i32> = row.try_get("tcp_ports")?;
+    let tcp_ports = tcp_ports
+        .into_iter()
+        .map(u16::try_from)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?;
     Ok(StoredRule {
         rule: PolicyRule {
             policy_id: row.try_get("id")?,
@@ -173,8 +171,10 @@ fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, sqlx::Error> {
             valid_from: row.try_get("valid_from")?,
             valid_until: row.try_get("valid_until")?,
         },
-        ssh_principal: row.try_get("ssh_principal")?,
-        tcp_ports: row.try_get("tcp_ports")?,
+        scope: PolicyScope {
+            ssh_principals: BTreeSet::from([row.try_get("ssh_principal")?]),
+            tcp_ports,
+        },
     })
 }
 

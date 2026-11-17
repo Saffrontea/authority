@@ -30,9 +30,10 @@ without an available starting point cannot bootstrap authority.
 The solver checks the entire ability closure against the permitted set, including
 side effects and preexisting abilities used by the plan. Existing abilities must
 already be authorized; unauthenticated assertions and identity facts are not
-abilities to seed into the solver. In this first version permission inclusion is
-exact set inclusion. Wildcard scopes or interval containment require an explicit,
-reviewed normalization into scoped abilities before solving.
+abilities to seed into the solver. Solver permission inclusion is exact set
+inclusion. The access integration normalizes scope containment into the finite set
+of requested scoped abilities before solving. It does not enumerate every port or
+every timestamp as a separate graph node.
 
 The solver selects the fewest mechanisms and breaks ties deterministically by
 mechanism ID and executable order. This is not an ordering of privilege: a broader
@@ -71,29 +72,64 @@ route is externally available. A TCP-only request does not create mesh membershi
 This catalog preserves the current intent semantics; it does not yet model every
 network or service deployment as a choice of interchangeable routes.
 
-Policy evaluation first computes the effective permission envelope using existing
-rule precedence and identity checks. It then solves within that envelope and keeps
-the selected realization and the policy sources for its abilities in the decision.
-`projection-core::project_plan` materializes only the selected mechanisms, requiring
-only their input material. `NetworkRoute` is a planning step and emits no contract.
-Both production authorization endpoints use this path. The old fixed `project`
-function remains as a compatibility API.
+`policy-core::scoped::evaluate_scoped` first resolves existing policy precedence
+and identity checks, then instantiates scoped abilities and the access catalog.
+An ability carries the domain, subject, device and target plus:
 
-The access catalog's ability enums are scoped by the enclosing authenticated
-request. They are not yet the full resource/principal/port/time ability model.
-The existing API still validates requested TCP ports, SSH principal bindings and
-adapter lifetimes. Contract formats, DB policy capabilities and enforcement behavior
-remain compatible. `ServiceIdentity` means presenting the specified identity, not
-permission to execute every operation at a service.
+- TCP: source/destination IPv4 addresses and the exact requested port set.
+- SSH: the key fingerprint, selected principals and terminal token binding.
+- Mesh membership: the registered WireGuard key and assigned IPv4 address.
+- Network reachability: source/destination IPv4 addresses.
+- mTLS identity: client SPKI hash, subject/device-derived SPIFFE identity and the
+  trusted deployment's service audience. This is identity authority, not arbitrary
+  application-operation permission.
+
+Each also carries its independent `[not_before, expires_at)` validity interval.
+A policy grant contains a requested ability only when all identity/resource/key
+bindings match, its principal or port set includes the requested set, and its time
+interval contains the entire requested interval. Empty principals, empty TCP port
+sets, port zero and invalid intervals are rejected. The current policy vocabulary
+permits the authenticated device to select SSH and mTLS public keys; those selected
+keys are frozen into the authorized plan, not granted as an unbound wildcard.
+
+Rule precedence remains per capability. Scope metadata is read only from that
+capability's winning policy ID and revision. It is never unioned with a losing
+policy's ports or principals, and a losing broad allow cannot rescue an insufficient
+winning scope. The winning deny continues to deny that capability as before.
+
+Every requested adapter lease must fit both the configured TTL limit and its
+winning policy's `valid_until`. Exceeding either is rejected, not silently shortened.
+Integer timestamp conversion rounds policy starts up and policy deadlines down.
+Zero, negative and overflowing lifetimes fail closed. Adapter leases remain
+independent; expiry of an SSH or TCP lease does not change a separate mesh lease.
+The graph models authorization dependencies, not a guarantee that a runtime
+transport remains available for a credential's entire validity period.
+
+The result contains an immutable `AuthorizedPlan`. Its bindings, material, scoped
+abilities, intervals and policy provenance are private; callers can inspect them
+but cannot rewrite them. Both production authorization endpoints pass this plan to
+`projection-core::project_authorized`. Projection takes no replacement ports,
+principals, keys or TTLs. It rejects mismatches in common claim identity, issuer,
+policy provenance or issuance time before emitting unsigned contracts. It then
+materializes only the selected mechanisms. `NetworkRoute` emits no contract.
+
+The existing HTTP request shapes and signed contract formats remain compatible.
+TCP input syntax and device proof checks remain at the API boundary; authoritative
+port inclusion is in policy-core. `wireguard_key_mismatch` and `tcp_port_denied`
+response codes are preserved. The unscoped `evaluate`/`realize` and low-level
+`project`/`project_plan` APIs remain for compatibility and model tests; they are not
+the production signing path.
 
 ## Next extension
 
-Move the existing resource, principal, port and validity constraints into explicit
-scoped ability values and permission containment, with adapter effects describing
-their actual breadth. Add alternative deployment mechanisms to the catalog and
-persist the selected mechanism/dependency trace with policy provenance. Only then
-can the compatibility mapping from issuance permissions be removed. Runtime
-enforcement and revocation must continue to enforce the authorized scopes.
+Add alternative deployment mechanisms with complete scoped effects and persist
+the selected mechanism/dependency trace with policy provenance. Stored policies
+still use the compatibility capability vocabulary and one SSH principal per row;
+scoped containment is explicit in the core, but policies do not yet expose a general
+ability-expression language or scope-specific deny precedence. The mTLS service
+audience remains trusted deployment configuration, not a client-selectable policy
+field. Wildcard resources, CIDR containment and dynamic discovery are not modeled.
+Runtime enforcement and revocation continue to enforce the signed scopes.
 
 ## Validation
 
@@ -104,4 +140,8 @@ property test compares the solver's answer and minimum mechanism count against
 independent exhaustive subset enumeration. Existing policy properties continue to
 check dependency closure, deny precedence and rule-order invariance. Projection
 tests cover TCP-only selection, required dependencies and compatibility with the
-existing infrastructure contracts.
+existing infrastructure contracts. Scoped tests cover winning-policy isolation,
+port/principal containment, policy expiry, configured limits, invalid lifetimes,
+identity/resource separation and independent adapter deadlines. Projection tests
+verify that mutation of the original request cannot change the authorized output
+and that claim rebinding is rejected.

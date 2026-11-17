@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod realization;
+pub mod scoped;
 
 use realization::{AccessPlan, all_abilities, realize};
 use thiserror::Error;

@@ -1,8 +1,8 @@
 //! The current access catalog, separate from the protocol-independent solver.
 //!
-//! Each invocation is scoped to one authenticated request's subject, device and
-//! target. Port/principal/TTL restrictions are still checked by the existing API;
-//! these enum values do not authorize arbitrary ports, identities or resources.
+//! This coarse topology is instantiated with identity/resource/principal/port/time
+//! scopes by `scoped::evaluate_scoped` in the production authorization path.
+//! The compatibility enums alone do not authorize adapter contract material.
 
 use std::collections::BTreeSet;
 
@@ -41,7 +41,7 @@ impl Ability {
     }
 
     /// Compatibility bridge from the existing policy vocabulary. This mapping
-    /// does not replace the API's scoped principal, port and lifetime checks.
+    /// does not replace scoped policy evaluation and projection binding.
     #[must_use]
     pub const fn permission(self) -> Capability {
         match self {
@@ -76,7 +76,7 @@ pub fn all_abilities() -> BTreeSet<Ability> {
     ])
 }
 
-fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
+pub(crate) fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
     let mesh = route == Route::MeshRequired;
     let service_requires = if mesh {
         BTreeSet::from([Ability::NetworkReachability])
