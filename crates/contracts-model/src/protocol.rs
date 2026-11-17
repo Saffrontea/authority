@@ -25,3 +25,12 @@ pub const fn valid_ttl_seconds(seconds: i64) -> bool {
 pub fn domain_issuer(domain_id: impl std::fmt::Display) -> String {
     format!("domain-authority:{domain_id}")
 }
+
+/// A positive, bounded lifetime without overflowing at arbitrary wire timestamps.
+#[must_use]
+pub const fn lifetime_seconds(not_before: i64, expires_at: i64) -> Option<i64> {
+    match expires_at.checked_sub(not_before) {
+        Some(seconds) if valid_ttl_seconds(seconds) => Some(seconds),
+        _ => None,
+    }
+}

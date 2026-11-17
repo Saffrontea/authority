@@ -1,4 +1,3 @@
-use authority_contracts_model::protocol::valid_ttl_seconds;
 use authority_contracts_model::protocol::{CREDENTIAL_ISSUER_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
     IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV1,
@@ -27,13 +26,6 @@ pub struct SelectedProjections {
     pub mtls_issuance: Option<MtlsIssuanceAuthorizationV1>,
     pub mtls_node_install: Option<MtlsIssuanceAuthorizationV1>,
     pub tcp_grant: Option<TcpAccessGrantV1>,
-}
-
-fn lifetime(common: &CommonDecisionClaims, seconds: i64) -> Result<(), ProjectionError> {
-    if !valid_ttl_seconds(seconds) || common.issued_at.checked_add(seconds).is_none() {
-        return Err(ProjectionError::InvalidLifetime);
-    }
-    Ok(())
 }
 
 /// Materializes exactly the mechanisms selected by the policy planner.
@@ -66,21 +58,20 @@ pub fn project_plan(
             }
             AccessMechanism::SshCertificate => {
                 let (request, ttl) = inputs.ssh.ok_or(ProjectionError::MissingInput("ssh"))?;
-                lifetime(common, ttl)?;
                 let issuance = ssh_contract(
                     common,
                     request,
                     &common.decision_id,
                     CREDENTIAL_ISSUER_AUDIENCE,
                     ttl,
-                );
+                )?;
                 let install = ssh_contract(
                     common,
                     request,
                     &request.terminal_token_hash,
                     NODE_AGENT_AUDIENCE,
                     ttl,
-                );
+                )?;
                 issuance.validate()?;
                 install.validate()?;
                 result.ssh_issuance = Some(issuance);
@@ -88,9 +79,8 @@ pub fn project_plan(
             }
             AccessMechanism::MtlsCertificate => {
                 let (request, ttl) = inputs.mtls.ok_or(ProjectionError::MissingInput("mtls"))?;
-                lifetime(common, ttl)?;
-                let issuance = mtls_contract(common, request, CREDENTIAL_ISSUER_AUDIENCE, ttl);
-                let install = mtls_contract(common, request, NODE_AGENT_AUDIENCE, ttl);
+                let issuance = mtls_contract(common, request, CREDENTIAL_ISSUER_AUDIENCE, ttl)?;
+                let install = mtls_contract(common, request, NODE_AGENT_AUDIENCE, ttl)?;
                 issuance.validate()?;
                 install.validate()?;
                 result.mtls_issuance = Some(issuance);

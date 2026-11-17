@@ -74,6 +74,15 @@ pub enum ProjectionError {
     Contract(#[from] ContractError),
 }
 
+// One checked lifetime kernel for every contract constructor. Verified from this
+// exact body; even the legacy all-adapter entry point must fail without overflow.
+fn projection_expiry(issued_at: i64, ttl_seconds: i64) -> Option<i64> {
+    if !valid_ttl_seconds(ttl_seconds) {
+        return None;
+    }
+    issued_at.checked_add(ttl_seconds)
+}
+
 /// Projects one decision into adapter-specific unsigned contracts.
 ///
 /// # Errors
@@ -86,39 +95,29 @@ pub fn project(
     mtls: &MtlsProjectionRequest,
     lifetimes: ProjectionLifetimes,
 ) -> Result<ProjectionSet, ProjectionError> {
-    if [
-        lifetimes.ssh_seconds,
-        lifetimes.network_seconds,
-        lifetimes.mtls_seconds,
-    ]
-    .into_iter()
-    .any(|ttl| !valid_ttl_seconds(ttl))
-    {
-        return Err(ProjectionError::InvalidLifetime);
-    }
     let ssh_issuance = ssh_contract(
         common,
         ssh,
         &common.decision_id,
         CREDENTIAL_ISSUER_AUDIENCE,
         lifetimes.ssh_seconds,
-    );
+    )?;
     let ssh_node_install = ssh_contract(
         common,
         ssh,
         &ssh.terminal_token_hash,
         NODE_AGENT_AUDIENCE,
         lifetimes.ssh_seconds,
-    );
+    )?;
     let network_grant = project_network(common, network, lifetimes.network_seconds)?;
     let mtls_issuance = mtls_contract(
         common,
         mtls,
         CREDENTIAL_ISSUER_AUDIENCE,
         lifetimes.mtls_seconds,
-    );
+    )?;
     let mtls_node_install =
-        mtls_contract(common, mtls, NODE_AGENT_AUDIENCE, lifetimes.mtls_seconds);
+        mtls_contract(common, mtls, NODE_AGENT_AUDIENCE, lifetimes.mtls_seconds)?;
     ssh_issuance.validate()?;
     ssh_node_install.validate()?;
     network_grant.validate()?;
@@ -139,8 +138,8 @@ fn ssh_contract(
     nonce: &str,
     audience: &str,
     ttl: i64,
-) -> IssuanceAuthorizationV1 {
-    IssuanceAuthorizationV1 {
+) -> Result<IssuanceAuthorizationV1, ProjectionError> {
+    Ok(IssuanceAuthorizationV1 {
         version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
@@ -153,9 +152,10 @@ fn ssh_contract(
         nonce: nonce.to_owned(),
         issued_at: common.issued_at,
         not_before: common.issued_at,
-        expires_at: common.issued_at + ttl,
+        expires_at: projection_expiry(common.issued_at, ttl)
+            .ok_or(ProjectionError::InvalidLifetime)?,
         audience: audience.to_owned(),
-    }
+    })
 }
 
 fn mtls_contract(
@@ -163,8 +163,8 @@ fn mtls_contract(
     mtls: &MtlsProjectionRequest,
     audience: &str,
     ttl: i64,
-) -> MtlsIssuanceAuthorizationV1 {
-    MtlsIssuanceAuthorizationV1 {
+) -> Result<MtlsIssuanceAuthorizationV1, ProjectionError> {
+    Ok(MtlsIssuanceAuthorizationV1 {
         version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
@@ -179,9 +179,10 @@ fn mtls_contract(
         nonce: format!("{}_mtls_{}", common.decision_id, audience.replace('-', "_")),
         issued_at: common.issued_at,
         not_before: common.issued_at,
-        expires_at: common.issued_at + ttl,
+        expires_at: projection_expiry(common.issued_at, ttl)
+            .ok_or(ProjectionError::InvalidLifetime)?,
         audience: audience.to_owned(),
-    }
+    })
 }
 
 /// TCP is an independently selectable projection. No SSH, CA, or peer key
@@ -202,9 +203,6 @@ pub fn project_tcp(
     tcp: &TcpProjectionRequest,
     ttl_seconds: i64,
 ) -> Result<authority_contracts_model::TcpAccessGrantV1, ProjectionError> {
-    if !valid_ttl_seconds(ttl_seconds) {
-        return Err(ProjectionError::InvalidLifetime);
-    }
     let grant = authority_contracts_model::TcpAccessGrantV1 {
         version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
@@ -219,9 +217,7 @@ pub fn project_tcp(
         destination_ports: tcp.destination_ports.clone(),
         issued_at: common.issued_at,
         not_before: common.issued_at,
-        expires_at: common
-            .issued_at
-            .checked_add(ttl_seconds)
+        expires_at: projection_expiry(common.issued_at, ttl_seconds)
             .ok_or(ProjectionError::InvalidLifetime)?,
         audience: NETWORK_AGENT_AUDIENCE.to_owned(),
     };
@@ -238,9 +234,6 @@ pub fn project_network(
     network: &NetworkProjectionRequest,
     ttl_seconds: i64,
 ) -> Result<NetworkAccessGrantV1, ProjectionError> {
-    if !valid_ttl_seconds(ttl_seconds) {
-        return Err(ProjectionError::InvalidLifetime);
-    }
     let grant = NetworkAccessGrantV1 {
         version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
         issuer: common.issuer.clone(),
@@ -254,9 +247,7 @@ pub fn project_network(
         nonce: common.decision_id.clone(),
         issued_at: common.issued_at,
         not_before: common.issued_at,
-        expires_at: common
-            .issued_at
-            .checked_add(ttl_seconds)
+        expires_at: projection_expiry(common.issued_at, ttl_seconds)
             .ok_or(ProjectionError::InvalidLifetime)?,
         audience: NODE_AGENT_AUDIENCE.to_owned(),
     };

@@ -12,6 +12,8 @@ import tempfile
 import urllib.request
 import zipfile
 
+from verus_sources import scopes_source, expiry_source, projection_source
+
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.2026.11.02.8bf68ee"
 RUST = "1.99.1"
@@ -127,11 +129,25 @@ def main():
     solver = (ROOT / "formal/verus/solver.rs").read_text()
     verify(binary, env, "production_validity", validity, minimum=4)
     verify(binary, env, "solver", solver, minimum=20)
+    scopes = scopes_source()
+    expiry = expiry_source()
+    projection = projection_source()
+    verify(binary, env, "production_scopes", scopes, minimum=7)
+    verify(binary, env, "production_expiry", expiry, minimum=8)
+    verify(binary, env, "production_projection", projection, minimum=9)
     if args.mutations:
         mutations = [
             ("widened_deadline", validity, "other.expires_at <= self.expires_at", "other.expires_at >= self.expires_at"),
             ("unauthorized_effects", solver, "&& abilities(c, after).subset_of(c.permitted)", "&& true"),
             ("nonminimal_search", solver, "Some(length) => Some(length)", "Some(_length) => Some(bound)"),
+            ("expanded_tcp_ports", scopes, "selected.subset_of(ports)", "true"),
+            ("expanded_ssh_principals", scopes, "selected.subset_of(principals)", "true"),
+            ("rebound_identity", scopes, "self.binding == requested.binding", "true"),
+            ("reversed_lifetime", expiry, "expires_at.checked_sub(not_before)", "not_before.checked_sub(expires_at)"),
+            ("unchecked_expiry_overflow", expiry, "issued_at.checked_add(ttl_seconds)", "Some(issued_at + ttl_seconds)"),
+            ("rebound_projection_domain", projection, "common.domain_id != uuid_text(binding.domain_id)", "false"),
+            ("wrong_tcp_source", projection, "source_address: ip_text(source),", "source_address: ip_text(destination),"),
+            ("wrong_ssh_key", projection, "public_key_fingerprint: public_key_fingerprint,", "public_key_fingerprint: terminal_token_hash,"),
         ]
         for name, source, before, after in mutations:
             if source.count(before) != 1:

@@ -32,67 +32,17 @@ pub fn project_authorized(
     }
     let (mut ssh, mut mtls, mut network, mut tcp) = (None, None, None, None);
     for ability in &plan.realization().abilities {
-        let ttl = ability
-            .validity
-            .expires_at
-            .checked_sub(common.issued_at)
-            .ok_or(ProjectionError::InvalidLifetime)?;
-        match &ability.scope {
-            AbilityScope::MeshMembership {
-                wireguard_public_key,
-                address,
-            } => {
-                network = Some((
-                    NetworkProjectionRequest {
-                        wireguard_public_key: wireguard_public_key.clone(),
-                        mesh_address: address.to_string(),
-                    },
-                    ttl,
-                ));
-            }
-            AbilityScope::NetworkReachability { .. } => {}
-            AbilityScope::SshSession {
-                public_key_fingerprint,
-                principals,
-                terminal_token_hash,
-            } => {
-                ssh = Some((
-                    SshProjectionRequest {
-                        public_key_fingerprint: public_key_fingerprint.clone(),
-                        principals: principals.iter().cloned().collect(),
-                        terminal_token_hash: terminal_token_hash.clone(),
-                    },
-                    ttl,
-                ));
-            }
-            AbilityScope::ServiceIdentity {
-                client_spki_sha256,
-                identity_uri,
-                service_audience,
-            } => {
-                mtls = Some((
-                    MtlsProjectionRequest {
-                        client_spki_sha256: client_spki_sha256.clone(),
-                        identity_uri: identity_uri.clone(),
-                        service_audience: service_audience.clone(),
-                    },
-                    ttl,
-                ));
-            }
-            AbilityScope::TcpConnection {
-                source,
-                destination,
-                ports,
-            } => {
-                tcp = Some((
-                    TcpProjectionRequest {
-                        source_address: source.to_string(),
-                        destination_address: destination.to_string(),
-                        destination_ports: ports.iter().copied().collect(),
-                    },
-                    ttl,
-                ));
-            }
+        let ttl = authority_contracts_model::protocol::lifetime_seconds(
+            common.issued_at,
+            ability.validity.expires_at,
+        )
+        .ok_or(ProjectionError::InvalidLifetime)?;
+        match project_scope(&ability.scope) {
+            ScopeProjection::None => {}
+            ScopeProjection::Network(request) => network = Some((request, ttl)),
+            ScopeProjection::Ssh(request) => ssh = Some((request, ttl)),
+            ScopeProjection::Mtls(request) => mtls = Some((request, ttl)),
+            ScopeProjection::Tcp(request) => tcp = Some((request, ttl)),
         }
     }
     let selection = AccessPlan {
@@ -114,4 +64,55 @@ pub fn project_authorized(
             tcp: tcp.as_ref().map(|(input, ttl)| (input, *ttl)),
         },
     )
+}
+
+// The only conversion from an approved ability to protocol request material.
+// Keep this pure: lifetime validation and mechanism selection happen in the
+// caller, while these fields must come solely from the immutable approved scope.
+enum ScopeProjection {
+    None,
+    Network(NetworkProjectionRequest),
+    Ssh(SshProjectionRequest),
+    Mtls(MtlsProjectionRequest),
+    Tcp(TcpProjectionRequest),
+}
+
+fn project_scope(scope: &AbilityScope) -> ScopeProjection {
+    match scope {
+        AbilityScope::MeshMembership {
+            wireguard_public_key,
+            address,
+        } => ScopeProjection::Network(NetworkProjectionRequest {
+            wireguard_public_key: wireguard_public_key.clone(),
+            mesh_address: address.to_string(),
+        }),
+        AbilityScope::NetworkReachability { .. } => ScopeProjection::None,
+        AbilityScope::SshSession {
+            public_key_fingerprint,
+            principals,
+            terminal_token_hash,
+        } => ScopeProjection::Ssh(SshProjectionRequest {
+            public_key_fingerprint: public_key_fingerprint.clone(),
+            principals: principals.iter().cloned().collect(),
+            terminal_token_hash: terminal_token_hash.clone(),
+        }),
+        AbilityScope::ServiceIdentity {
+            client_spki_sha256,
+            identity_uri,
+            service_audience,
+        } => ScopeProjection::Mtls(MtlsProjectionRequest {
+            client_spki_sha256: client_spki_sha256.clone(),
+            identity_uri: identity_uri.clone(),
+            service_audience: service_audience.clone(),
+        }),
+        AbilityScope::TcpConnection {
+            source,
+            destination,
+            ports,
+        } => ScopeProjection::Tcp(TcpProjectionRequest {
+            source_address: source.to_string(),
+            destination_address: destination.to_string(),
+            destination_ports: ports.iter().copied().collect(),
+        }),
+    }
 }

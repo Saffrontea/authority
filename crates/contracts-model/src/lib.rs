@@ -347,18 +347,12 @@ impl IssuanceAuthorizationV1 {
             return Err(ContractError::InvalidPrincipals);
         }
 
-        if !(32..=128).contains(&self.nonce.len())
-            || !self.nonce.bytes().all(is_base64url_character)
-        {
-            return Err(ContractError::InvalidNonce);
-        }
-
-        if self.issued_at > self.not_before || self.not_before >= self.expires_at {
-            return Err(ContractError::InvalidTimeRange);
-        }
-        if self.expires_at - self.not_before > MAX_TTL_SECONDS {
-            return Err(ContractError::LifetimeTooLong);
-        }
+        validate_nonce_and_time(
+            &self.nonce,
+            self.issued_at,
+            self.not_before,
+            self.expires_at,
+        )?;
 
         Ok(())
     }
@@ -851,7 +845,7 @@ fn validate_nonce_and_time(
     if issued_at > not_before || not_before >= expires_at {
         return Err(ContractError::InvalidTimeRange);
     }
-    if expires_at - not_before > MAX_TTL_SECONDS {
+    if protocol::lifetime_seconds(not_before, expires_at).is_none() {
         return Err(ContractError::LifetimeTooLong);
     }
     Ok(())

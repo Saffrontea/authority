@@ -9,6 +9,15 @@ fn fixture(
     network: i64,
     mtls: i64,
 ) -> Result<authority_projection_core::ProjectionSet, authority_projection_core::ProjectionError> {
+    fixture_at(1_700_000_000, ssh, network, mtls)
+}
+
+fn fixture_at(
+    issued_at: i64,
+    ssh: i64,
+    network: i64,
+    mtls: i64,
+) -> Result<authority_projection_core::ProjectionSet, authority_projection_core::ProjectionError> {
     project(
         &CommonDecisionClaims {
             decision_id: "0123456789abcdef0123456789abcdef".into(),
@@ -18,7 +27,7 @@ fn fixture(
             device_id: "device_01".into(),
             target_node_id: "node_01".into(),
             policy_id: "policy_01@1".into(),
-            issued_at: 1_700_000_000,
+            issued_at,
         },
         &SshProjectionRequest {
             public_key_fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
@@ -90,5 +99,23 @@ proptest! {
         prop_assert_eq!(tcp.decision_id, network.nonce);
         prop_assert_eq!(tcp.source_address, network.mesh_address);
         prop_assert_eq!(network.expires_at - network.issued_at, 600);
+    }
+}
+
+proptest! {
+    #[test]
+    fn whole_projection_fails_without_panicking_at_timestamp_boundaries(
+        issued_at in prop_oneof![any::<i64>(), (0_i64..=600).prop_map(|offset| i64::MAX - offset)],
+        (ssh, network, mtls) in (1_i64..=600, 1_i64..=600, 1_i64..=600),
+    ) {
+        let largest = i128::from(ssh.max(network).max(mtls));
+        let expected = i128::from(issued_at) + largest <= i128::from(i64::MAX);
+        let result = fixture_at(issued_at, ssh, network, mtls);
+        prop_assert_eq!(result.is_ok(), expected);
+        if let Ok(projected) = result {
+            prop_assert_eq!(i128::from(projected.ssh_issuance.expires_at), i128::from(issued_at) + i128::from(ssh));
+            prop_assert_eq!(i128::from(projected.network_grant.expires_at), i128::from(issued_at) + i128::from(network));
+            prop_assert_eq!(i128::from(projected.mtls_issuance.expires_at), i128::from(issued_at) + i128::from(mtls));
+        }
     }
 }

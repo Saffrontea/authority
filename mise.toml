@@ -287,7 +287,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh client-reconnect"
 
 [tasks."verification:pbt"]
 description = "Check planning, containment, projection and durable-state properties"
-run = "cargo test -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger"
+run = "cargo test -p authority-contracts-model -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger"
 
 [tasks."verification:tla"]
 description = "Model-check revocation distribution safety and conditional liveness (requires Java 11+)"
@@ -299,16 +299,20 @@ run = "python3 ./scripts/check-tla.py --mutations"
 
 [tasks."verification:check"]
 description = "Run Verus proofs, property tests and the revocation model with mutation checks"
-depends = ["verification:verus:mutations", "verification:pbt", "verification:tla:mutations"]
+depends = ["verification:sources", "verification:verus:mutations", "verification:pbt", "verification:tla:mutations"]
 
 [tasks."verification:verus:setup"]
 description = "Install pinned Verus and its private Rust toolchain, then verify proofs"
 run = "python3 ./scripts/check-verus.py --install"
 
 [tasks."verification:verus"]
-description = "Prove the solver model and production TTL containment with pinned Verus"
+description = "Prove solver, scope, checked-lifetime and projection obligations with pinned Verus"
 run = "python3 ./scripts/check-verus.py"
 
 [tasks."verification:verus:mutations"]
 description = "Prove the Verus obligations and reject unsafe source/model mutations"
 run = "python3 ./scripts/check-verus.py --mutations"
+
+[tasks."verification:sources"]
+description = "Check proof source extraction and fail-closed injection boundaries"
+run = "python3 -m unittest discover -s scripts -p test_verus_sources.py"
