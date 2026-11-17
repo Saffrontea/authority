@@ -94,6 +94,17 @@ sets, port zero and invalid intervals are rejected. The current policy vocabular
 permits the authenticated device to select SSH and mTLS public keys; those selected
 keys are frozen into the authorized plan, not granted as an unbound wildcard.
 
+Stored capability decoding is atomic and strict for both allow and deny rules.
+The accepted vocabulary is `ssh.issue`, `mesh.join`, `network.reach`, `mtls.issue`
+and `tcp.connect`, plus the explicit legacy aliases `ssh` and `wireguard` (the
+latter expands to mesh join and network reach). Unknown strings, wildcard spelling,
+case/whitespace variants and empty lists never produce partial or empty grants.
+If any policy row loaded for the request contains invalid capability vocabulary,
+the whole authorization is refused and audited as `invalid_policy`; the HTTP
+response remains `policy_denied`. This conservative check includes inactive rows
+returned by the policy lookup, so malformed stored configuration must be corrected
+rather than relying on rule ordering or activation state to ignore it.
+
 Rule precedence remains per capability. Scope metadata is read only from that
 capability's winning policy ID and revision. It is never unioned with a losing
 policy's ports or principals, and a losing broad allow cannot rescue an insufficient
@@ -239,3 +250,15 @@ payloads, selected-plan/issuance correlation and exact TCP port/address/expiry
 agreement. It can also be invoked separately after the suite. The reconnect fixture
 resets only the PoC client's cached WireGuard transport after a revoked peer is
 re-authorized; it does not alter the target agent's granted membership or TCP rules.
+
+The strict stored-policy decoder also has a read-only LXC PostgreSQL regression
+that constructs typed rows without modifying stored policies. It verifies that a
+valid allow and an invalid deny cannot yield a partial snapshot, in either order:
+
+```sh
+AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
+  cargo test -p authority-control-plane stored_policy_capabilities_fail_closed_in_postgres -- --ignored
+```
+
+It uses the local development credential file (or `AUTHORITY_DB_PASSWORD` /
+`AUTHORITY_DB_PASSWORD_FILE`) and is explicitly opt-in outside LXC environments.

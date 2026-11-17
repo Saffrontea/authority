@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod capabilities;
 pub mod realization;
 pub mod scoped;
 pub mod selection;
@@ -201,6 +202,8 @@ impl AccessDecision {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DenialReason {
+    #[error("stored policy contains invalid capability vocabulary")]
+    InvalidPolicy,
     #[error("no authorized realization satisfies the requested intent")]
     NoRealization,
     #[error("no policy applies to the requested access")]
@@ -220,6 +223,7 @@ impl DenialReason {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::InvalidPolicy => "invalid_policy",
             Self::NoApplicablePolicy => "no_applicable_policy",
             Self::NoRealization => "no_authorized_realization",
             Self::DeviceMismatch => "device_mismatch",
@@ -236,7 +240,8 @@ impl DenialReason {
             Self::ExplicitDeny(capability) | Self::MissingCapability(capability) => {
                 Some(*capability)
             }
-            Self::NoApplicablePolicy
+            Self::InvalidPolicy
+            | Self::NoApplicablePolicy
             | Self::NoRealization
             | Self::DeviceMismatch
             | Self::Disabled => None,
