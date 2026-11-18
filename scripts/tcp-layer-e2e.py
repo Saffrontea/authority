@@ -11,6 +11,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from tcp_probe import echo, probe as probe_tcp
 
 session, control, agent, client = sys.argv[1:]
 
@@ -54,18 +55,12 @@ def connect(port, timeout=1):
     return stream
 
 
-def echo(stream):
-    stream.sendall(b'TCP_ADMISSION_OK')
-    assert stream.recv(64) == b'TCP_ADMISSION_OK', 'echo did not arrive'
+def probe(port, timeout=1):
+    return probe_tcp(client, port, timeout)
 
 
 def allowed(port, timeout=1):
-    try:
-        with connect(port, timeout) as stream:
-            echo(stream)
-        return True
-    except (OSError, AssertionError):
-        return False
+    return probe(port, timeout)['admitted']
 
 
 def wait(predicate, seconds=5):
@@ -239,4 +234,4 @@ trace_spec = importlib.util.spec_from_file_location(
     'lifecycle_trace_e2e', Path(__file__).with_name('lifecycle-trace-e2e.py'))
 trace_module = importlib.util.module_from_spec(trace_spec)
 trace_spec.loader.exec_module(trace_module)
-trace_module.run(issue, revoke, http, wait, allowed, agent, control)
+trace_module.run(issue, revoke, http, wait, allowed, agent, control, probe)

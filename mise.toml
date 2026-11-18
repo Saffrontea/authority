@@ -359,7 +359,11 @@ run = "python3 ./scripts/check-tla-traces.py --self-test"
 
 [tasks."verification:check"]
 description = "Run Verus proofs, property tests and the revocation model with mutation checks"
-depends = ["verification:sources", "verification:verus:mutations", "verification:pbt", "verification:tla:mutations", "verification:traces"]
+depends = ["verification:sources", "verification:probes", "verification:verus:mutations", "verification:pbt", "verification:tla:mutations", "verification:traces"]
+
+[tasks."verification:probes"]
+description = "Check TCP observation framing, deadlines and failure diagnostics"
+run = "python3 -m unittest discover -s scripts -p test_tcp_probe.py"
 
 [tasks."verification:verus:setup"]
 description = "Install pinned Verus and its private Rust toolchain, then verify proofs"

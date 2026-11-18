@@ -80,7 +80,7 @@ class Model:
             for decision, kind in self.active)
 
 
-def run(issue, revoke, http, wait, allowed, agent, control):
+def run(issue, revoke, http, wait, allowed, agent, control, probe):
     proxy = os.environ['AUTHORITY_E2E_DELIVERY_PROXY']
     seeds = [int(value, 0) for value in os.environ.get('AUTHORITY_E2E_TRACE_SEEDS', '0,7,42').split(',')]
     assert seeds, 'at least one generated trace is required'
@@ -117,7 +117,9 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             def observe():
                 assert time.time() + 0.5 < expires, f'trace {seed} exceeded live-grant window'
                 expected = {port: model.admitted(port) for port in ports}
-                actual = {port: allowed(2223 if port == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS) for port in ports}
+                details = {port: probe(2223 if port == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS) for port in ports}
+                actual = {port: value['admitted'] for port, value in details.items()}
+                trace['steps'][-1]['probe_details'] = details
                 trace['steps'][-1]['expected_ports'] = expected
                 trace['steps'][-1]['actual_ports'] = actual
                 trace['observations'].append({'state_index': len(model.history), 'ports': actual})
@@ -255,7 +257,7 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             trace['completed'] = True
             verify_live_trace(trace)
             print(f'Lifecycle trace seed={seed}: {len(trace["steps"])} steps matched real HTTP/DB/TCP/WG', flush=True)
-            run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy)
+            run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy, probe)
     finally:
         try:
             output.write_text(json.dumps(traces, indent=2) + '\n')
@@ -264,7 +266,7 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             http(f'{proxy}/__e2e/delivery', {'blocked': False})
 
 
-def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy):
+def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy, probe):
     """Compose live revocation transitions with PeerLifecycle expiry/replacement.
 
     TCP timeouts remove rules in the kernel. WG expiry is a pending cleanup until
@@ -337,8 +339,10 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         model.active = {pair for pair in model.active
                         if pair[1] != 'tcp.port' or deadlines[pair] > now}
         expected = {value: model.admitted(value) for value in (8080, 8081)}
-        actual = {value: allowed(2223 if value == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS)
-                  for value in (8080, 8081)}
+        details = {value: probe(2223 if value == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS)
+                   for value in (8080, 8081)}
+        actual = {value: result['admitted'] for value, result in details.items()}
+        trace['steps'][-1]['probe_details'] = details
         trace['steps'][-1].update(expected_ports=expected, actual_ports=actual)
         shadow.observe(actual, None if fault_active else peer_present())
         assert actual == expected, f'seed={seed}, timed step={len(trace["steps"])-1}, {trace["steps"][-1]}'

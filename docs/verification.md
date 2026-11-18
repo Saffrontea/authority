@@ -1,5 +1,7 @@
 # Verification obligations and evidence
 
+See the [coverage audit](verification-audit.md) for the requested property-to-evidence mapping.
+
 This work tracks the full verification target; a passing model is not a proof of
 all production code. Verus now proves the abstract solver and directly checks the
 production TTL containment and checked-lifetime predicates. Source-derived value
@@ -783,3 +785,32 @@ A source-adapter regression also changes the actual catalog iteration to reverse
 order and requires fail-closed rejection: that order is outside the supported
 ascending BTreeMap view. Faithful generic ID/collection views remain trusted
 adapters, with native oracle and canonical-label PBT as independent evidence.
+
+## TCP observation fidelity
+
+The LXC TCP admission checks now use `scripts/tcp_probe.py`. A single attempt
+connects, sends the fixed echo payload and receives exactly that payload before
+reporting admission. It accumulates fragmented stream reads; a single `recv` is
+not assumed to contain the complete response. Connection, send and all receive
+operations share one monotonic deadline. Fragment arrivals cannot refresh that
+deadline. There is no retry inside an observation, and partial, wrong or absent
+echoes never become successful admission.
+
+Generated live and timed trace steps include `probe_details` for each port:
+admission, connection/send/receive stage, elapsed milliseconds, received byte
+count and exception class/errno on failure. These diagnostics contain neither
+credentials nor signed envelopes. The existing Boolean port observations still
+feed TLC unchanged; the diagnostic metadata is not a new modeled transition.
+A timeout records lack of a successful echo within the observation window, not
+proof that a particular firewall rule rejected a packet. The deadline remains
+0.25 seconds for generated observations. Waits used to establish readiness are
+separate from the individual observations.
+
+`mise run verification:probes`, included in the combined gate, checks 256 generated
+fragment partitions, incorrect/truncated echoes, connection refusal, partial-read
+reset, shared deadlines across fragments and connection establishment, and the
+exception behavior used for existing-stream revocation checks. It uses a
+deterministic stream/clock fixture, while LXC supplies the actual TCP/WG/kernel
+and socket-proxy evidence. An earlier single-read observation mismatch did not
+record its failure cause; these changes do not claim to reconstruct that cause
+or hide mismatches through retries.
