@@ -11,6 +11,9 @@ authority-policy-core.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+authority-credential-crypto-openssl.workspace = true
+authority-issuer-core.workspace = true
+serde_json.workspace = true
 uuid.workspace = true
 proptest = "1"
 

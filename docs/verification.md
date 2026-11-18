@@ -15,7 +15,7 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | --- | --- | --- | --- |
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
-| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
+| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL consumer PBT | App-specific consumer context and universal representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live/timed TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
 
@@ -631,3 +631,41 @@ run uses a fresh E2E username so virtual Passkeys do not accumulate on one accou
 and hit browser authentication-list limits. This
 keeps repeated gate/E2E runs from accumulating browser profiles or sharing checker
 scratch files. Logical trace JSON artifacts remain available for replay.
+
+
+## Scoped projection to signed JSON consumers
+
+`crates/projection-core/tests/wire.rs` extends the native correspondence checks
+through policy evaluation, checked `AuthorizedPlan`, `project_authorized`, the
+real OpenSSL Ed25519 signer, JSON serialization/deserialization, and issuer-core's
+actual envelope verifiers. Its selection strategy ranges over the 15 nonempty SSH/mTLS/TCP/network
+selection masks, arbitrary UUID bindings, bounded principal/port sets and service
+labels, independent TTLs, and timestamps including zero and near the i64 upper
+boundary. A fixture policy explicitly permits the generated scopes; acceptance
+still goes through the production policy evaluator and plan factory.
+
+The oracle compares decoded contract material with the original requested scopes
+and binding, independently of the projected values. It checks the exact selected
+set of six possible envelopes (SSH issuer/node, mTLS issuer/node, WG and TCP),
+consumer audiences, policy provenance, keys, principal/port scopes, identity URI
+and independent deadlines. JSON object ordering and whitespace change before the
+typed receiver reads the envelope.
+
+Every inner claim is mutated and removed in turn; envelope metadata is mutated
+and removed too. Unknown fields at either level and cross-protocol envelope
+substitution must fail. Invalid mutations may be rejected by schema/contract
+validation or signature verification. A semantically valid target mutation must
+specifically fail signature verification. WG/TCP additionally reject a wrong
+expected node, times before not-before and at expiry, and a correctly signed
+contract for the wrong consumer audience; the first and last valid instants are
+accepted. These cases are included in the existing `verification:pbt` and combined
+gate. `PROPTEST_CASES=4096 cargo test -p authority-projection-core --test wire`
+runs the suite directly.
+
+This is bounded native PBT, not a proof of serde/OpenSSL internals or all wire
+encodings. The fixture keeps network addresses and key/hash strings fixed while
+varying bindings, scopes, TTLs and service labels. SSH/mTLS use the shared envelope
+verifiers here, which check shape and signature; their application-specific
+clock, audience, CSR/local-key and certificate checks are separate consumer
+obligations and are not implied by this property. Existing LXC tests remain the
+system evidence for those concrete workflows.
