@@ -16,8 +16,8 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
-| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; generated live-binding system traces | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
-| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
+| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live system traces replayed by TLC | Timed trace replay, arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
+| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Timed TLC replay, broader arbitrary trace coverage, power-loss and other OS failure classes |
 
 ## Reproducible checks
 
@@ -39,7 +39,10 @@ is checked even when supplied locally. Otherwise the script downloads the jar to
 Run `mise run verification:tla:mutations` to additionally require counterexamples
 for accepting a grant after a tombstone and acknowledging without adapter cleanup.
 A third mutation removes delivery/cleanup fairness and must violate eventual revocation.
-The Python runner keeps TLC state in temporary directories.
+The Python runner keeps TLC state in temporary directories. The model also
+includes receiver restart clearing installed bindings while retaining durable
+records. `verification:traces` runs the live trace replay fixture and semantic/schema
+mutations; it is part of `verification:check`.
 
 Existing system checks remain `mise run poc:e2e` for the default WireGuard route,
 and `AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS=10.77.0.1 mise run poc:e2e` for an
@@ -353,7 +356,8 @@ availability, undeclared effects and mutable facts are outside this monotone mod
 
 `formal/tla/Revocation.tla` models authenticated, unexpired bindings as
 `<<decision, adapter>>` pairs. Its finite configuration has two decisions and two
-adapters. The source publishes durable notices; delivery can occur in any order.
+adapters. Receiver restart clears installed bindings and retains durable records.
+The source publishes durable notices; delivery can occur in any order.
 Duplicates, network failures and failed cleanup can stutter without changing state.
 A dispatcher restart clears its acknowledged cache. Durable tombstones are never
 cleared in this live-notice model. Sequence numbers are not a global watermark:
@@ -367,6 +371,7 @@ a later notice cannot suppress an older notice for another binding.
 | `Persist` / `tombstones` | `apply_revocation` persists `wg_<decision>` / `tcp_<decision>` before removing adapter state |
 | `Complete` / `acknowledged` | successful adapter removal precedes the HTTP acknowledgement; duplicate notices still perform cleanup |
 | `DispatcherRestart` | delivery cache is volatile; source notices and receiver tombstones remain durable |
+| `ReceiverRestart` | startup clears peers and the owned nft state before serving, while durable consume/tombstone ledgers survive |
 
 These are reviewable abstraction mappings, not a proved refinement. In particular,
 the model does not model the byte encoding, verifier, operating system or network
@@ -466,6 +471,46 @@ cannot masquerade as successful revocation. It checks:
   automatic recovery, both actual ledger files must contain no records expired at
   process start, expired WG/TCP signatures remain invalid, a still-live consumed
   TCP grant still rejects replay, and a fresh valid signed decision installs only its selected port.
+
+Live traces additionally run through `scripts/tla_replay.py` with the pinned TLC
+checker before the E2E proceeds. The artifact records versioned reconstructed
+states, declared transition edges and observation checkpoints. A successful grant
+is expanded into `Consume` then `Install`; a successful cleanup into `Persist`
+then `Complete`. Duplicate completions stutter. Receiver restart clears installed
+bindings. Rejected/read-only requests retain the current state checkpoint.
+
+TLC imports the actual `formal/tla/Revocation.tla`, constrains each next state to
+the recorded state and requires the declared model action as well as `Next` (or
+an explicit stutter). A bad edge deadlocks instead of being skipped. The successful
+run must visit exactly as many distinct counter-indexed states as the artifact
+contains. Replay-index fairness forces traversal of this finite recorded trace;
+it is not an added runtime fairness claim. Model safety invariants and eventual
+completion of published notices are checked too.
+
+For each observation, TLC independently derives allowed ports from active WG/TCP
+bindings and the requested service scopes, then compares them with actual socket
+probe results. It does not take the Python oracle's expected port result as an
+input. Semantic mutations must reject a changed actual port observation, omitted
+nonce consumption and receiver restart retaining state. Schema checks reject
+incomplete traces, unknown actions, unknown state fields, missing port probes and
+unsupported timed trace formats.
+
+The E2E runner now requires Java/TLC and checks tool availability before changing
+LXC state. The same `TLA_JAVA` / `TLA_JAR` settings select the pinned checker for
+both model checking and E2E replay. To replay an artifact later, set `TRACE_FILE` to the path printed by E2E, then run:
+
+```sh
+python3 scripts/check-tla-traces.py --scenario live "$TRACE_FILE"
+```
+
+The explicit `--scenario live` selects the supported projection when the artifact
+also contains time/failure traces. Without that selector, an unsupported trace
+fails the command; an empty selection fails too. Timed traces continue to use the
+Python/time-failure oracle and actual system probes, and are not TLC-replayed yet.
+The serialized states are reconstructed logical state from the harness, not raw
+receiver memory or DB snapshots. Thus this checks finite trace consistency and
+actual admission observations against the model, not a universal refinement of
+the implementation or proof of hidden internal state.
 
 An E2E-only loopback proxy (`scripts/revocation-delivery-proxy.py`) forwards the
 control plane's normal receiver traffic and temporarily returns HTTP 503 for

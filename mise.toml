@@ -353,9 +353,13 @@ run = "python3 ./scripts/check-tla.py"
 description = "Model-check revocation and require counterexamples for unsafe mutations"
 run = "python3 ./scripts/check-tla.py --mutations"
 
+[tasks."verification:traces"]
+description = "Check live trace replay and require semantic/schema counterexamples"
+run = "python3 ./scripts/check-tla-traces.py --self-test"
+
 [tasks."verification:check"]
 description = "Run Verus proofs, property tests and the revocation model with mutation checks"
-depends = ["verification:sources", "verification:verus:mutations", "verification:pbt", "verification:tla:mutations"]
+depends = ["verification:sources", "verification:verus:mutations", "verification:pbt", "verification:tla:mutations", "verification:traces"]
 
 [tasks."verification:verus:setup"]
 description = "Install pinned Verus and its private Rust toolchain, then verify proofs"

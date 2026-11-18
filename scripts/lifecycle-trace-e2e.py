@@ -1,7 +1,9 @@
 """Generated, reproducible traces against real HTTP/DB and kernel adapters.
 
 The live-binding oracle uses Revocation.tla's publish/consume/install/persist/
-complete transitions. This is runtime correspondence testing, not refinement proof.
+complete transitions. Live snapshots and measured port admission are replayed
+through TLC; timed cases retain their separate oracle. This is correspondence
+testing, not a universal refinement proof.
 """
 import copy
 import json
@@ -12,6 +14,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+
+from tla_replay import verify_live_trace
 
 TRACE_TTL_SECONDS = 35
 PROBE_TIMEOUT_SECONDS = 0.25
@@ -25,23 +29,48 @@ class Model:
         self.tombstones = set()
         self.active = set()
         self.completed = set()
+        self.history = []
+        self.edges = []
+        self.snapshot()
+
+    def snapshot(self, action=None, pair=None):
+        if action is not None:
+            self.edges.append({'action': action, 'pair': list(pair) if pair else None})
+        self.history.append({key: [list(pair) for pair in sorted(value)] for key, value in {
+            'published': self.published, 'tombstones': self.tombstones,
+            'active': self.active, 'consumed': self.consumed,
+            'acknowledged': self.completed, 'completed': self.completed,
+        }.items()})
+
+    def receiver_restart(self):
+        had_active = bool(self.active)
+        self.active.clear()
+        self.snapshot('ReceiverRestart' if had_active else 'Stutter')
 
     def install(self, pair):
         assert pair not in self.consumed | self.tombstones
         self.consumed.add(pair)
+        self.snapshot('Consume', pair)
         if pair[1] == 'wireguard.peer':
             self.active = {current for current in self.active if current[1] != 'wireguard.peer'}
         self.active.add(pair)
+        self.snapshot('Install', pair)
 
     def publish(self, pair):
+        already = pair in self.published
         self.published.add(pair)
+        self.snapshot('Stutter' if already else 'Publish', pair)
 
     def complete(self, pair):
         assert pair in self.published
+        persisted = pair in self.tombstones
         self.tombstones.add(pair)
+        self.snapshot('Stutter' if persisted else 'Persist', pair)
+        completed = pair in self.completed
         self.active.discard(pair)
         self.completed.add(pair)
         assert not self.active & self.completed
+        self.snapshot('Stutter' if completed else 'Complete', pair)
 
     def admitted(self, port):
         return any(kind == 'wireguard.peer' for _, kind in self.active) and any(
@@ -68,7 +97,9 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             scopes = {'transport': set(ports), 'first': {ports[0]},
                       'other': {ports[1]}, 'late': {rng.choice(ports)}}
             model = Model(scopes)
-            trace = {'seed': seed, 'scopes': {key: sorted(value) for key, value in scopes.items()}, 'steps': []}
+            trace = {'seed': seed, 'scenario': 'live', 'version': 1, 'completed': False,
+                     'scopes': {key: sorted(value) for key, value in scopes.items()},
+                     'states': model.history, 'edges': model.edges, 'observations': [], 'steps': []}
             traces.append(trace)
             http(f'{proxy}/__e2e/delivery', {'blocked': True})
             grants = {name: issue(sorted(scope), ttl=TRACE_TTL_SECONDS, network=name == 'transport')
@@ -78,7 +109,8 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             notices = {}
 
             def record(action, name, kind='tcp.port'):
-                trace['steps'].append({'action': action, 'decision': name, 'adapter': kind})
+                trace['steps'].append({'action': action, 'decision': name, 'adapter': kind,
+                                       'state_index': len(model.history)})
 
             def observe():
                 assert time.time() + 0.5 < expires, f'trace {seed} exceeded live-grant window'
@@ -86,6 +118,7 @@ def run(issue, revoke, http, wait, allowed, agent, control):
                 actual = {port: allowed(2223 if port == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS) for port in ports}
                 trace['steps'][-1]['expected_ports'] = expected
                 trace['steps'][-1]['actual_ports'] = actual
+                trace['observations'].append({'state_index': len(model.history), 'ports': actual})
                 assert actual == expected, f'seed={seed}, step={len(trace["steps"])-1}, {trace["steps"][-1]}'
 
             def apply(name, kind='tcp.port', expected=200, error=None):
@@ -170,7 +203,7 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             restart_task = 'mesh:test:crash' if seed % 2 else 'mesh:agent:restart'
             subprocess.run(['mise', 'run', restart_task], check=True,
                            stdout=subprocess.DEVNULL)
-            model.active.clear()
+            model.receiver_restart()
             record('receiver-crash' if seed % 2 else 'receiver-restart', 'transport', 'wireguard.peer')
             def receiver_ready():
                 try:
@@ -217,6 +250,8 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             deliver('recovery', 'wireguard.peer')
             assert subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL).returncode != 0
+            trace['completed'] = True
+            verify_live_trace(trace)
             print(f'Lifecycle trace seed={seed}: {len(trace["steps"])} steps matched real HTTP/DB/TCP/WG', flush=True)
             run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy)
     finally:

@@ -52,8 +52,15 @@ DispatcherRestart == /\ acknowledged # {}
                      /\ acknowledged' = {}
                      /\ UNCHANGED <<published, tombstones, active, consumed, completed>>
 
+\* A receiver restart clears installed state before becoming ready. Durable
+\* consume/tombstone records survive. Installation remains an overapproximation:
+\* the actual receiver additionally rejects reuse of already consumed nonces.
+ReceiverRestart == /\ active # {}
+                   /\ active' = {}
+                   /\ UNCHANGED <<published, tombstones, consumed, acknowledged, completed>>
+
 Next == \/ \E p \in Pairs: Publish(p) \/ Consume(p) \/ Install(p) \/ Persist(p) \/ Complete(p)
-        \/ DispatcherRestart
+        \/ DispatcherRestart \/ ReceiverRestart
 
 TypeOK == /\ published \subseteq Pairs /\ tombstones \subseteq Pairs
           /\ active \subseteq Pairs /\ consumed \subseteq Pairs
@@ -65,7 +72,8 @@ InstalledWasConsumed == active \subseteq consumed
 
 \* Liveness is conditional: each live notice is eventually delivered and its
 \* cleanup eventually succeeds. No finite delivery bound or network fairness is
-\* inferred from safety. Tombstone expiry and adapter restart are separate models.
+\* inferred from safety. Expiry and pending cleanup across crash are in the
+\* separate peer lifecycle model.
 Spec == Init /\ [][Next]_vars
         /\ \A p \in Pairs: WF_vars(Persist(p)) /\ WF_vars(Complete(p))
 EventuallyRevoked == \A p \in Pairs: (p \in published) ~> (p \in completed)

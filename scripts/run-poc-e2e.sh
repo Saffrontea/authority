@@ -7,6 +7,8 @@ proxy_pid=''
 proxy_directory=''
 cleaned_up=0
 
+python3 "${SCRIPT_DIR}/check-tla-traces.py" --check-tools
+
 mesh_status="$(mise run mesh:status)"
 AUTHORITY_POC_WG_PUBLIC_KEY="$(printf '%s\n' "${mesh_status}" | awk '/public-key:/ { print $2; exit }')"
 target_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-target:/ { sub(/^.*underlay=/, ""); print; exit }')"
