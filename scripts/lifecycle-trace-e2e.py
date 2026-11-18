@@ -29,6 +29,8 @@ class Model:
     def install(self, pair):
         assert pair not in self.consumed | self.tombstones
         self.consumed.add(pair)
+        if pair[1] == 'wireguard.peer':
+            self.active = {current for current in self.active if current[1] != 'wireguard.peer'}
         self.active.add(pair)
 
     def publish(self, pair):
@@ -165,10 +167,11 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             # A real receiver restart discards installed authority but retains
             # replay and revocation ledgers. Restore only transport first to
             # distinguish nft cleanup from denial caused by a missing WG peer.
-            subprocess.run(['mise', 'run', 'mesh:agent:restart'], check=True,
+            restart_task = 'mesh:test:crash' if seed % 2 else 'mesh:agent:restart'
+            subprocess.run(['mise', 'run', restart_task], check=True,
                            stdout=subprocess.DEVNULL)
             model.active.clear()
-            record('receiver-restart', 'transport', 'wireguard.peer')
+            record('receiver-crash' if seed % 2 else 'receiver-restart', 'transport', 'wireguard.peer')
             def receiver_ready():
                 try:
                     return get(f'{agent}/v1/identity').get('node_id') == target
@@ -215,9 +218,213 @@ def run(issue, revoke, http, wait, allowed, agent, control):
             assert subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DEVNULL,
                                   stderr=subprocess.DEVNULL).returncode != 0
             print(f'Lifecycle trace seed={seed}: {len(trace["steps"])} steps matched real HTTP/DB/TCP/WG', flush=True)
+            run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy)
     finally:
         try:
             output.write_text(json.dumps(traces, indent=2) + '\n')
             print(f'Lifecycle trace artifact (logical actions only): {output}', flush=True)
         finally:
             http(f'{proxy}/__e2e/delivery', {'blocked': False})
+
+
+def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agent, proxy):
+    """Compose live revocation transitions with PeerLifecycle expiry/replacement.
+
+    TCP timeouts remove rules in the kernel. WG expiry is a pending cleanup until
+    its command succeeds; a failed timer retains the current binding for retry.
+    """
+    rng = random.Random(seed ^ 0xA17E)
+    port = rng.choice([8080, 8081])
+    other_port = 8081 if port == 8080 else 8080
+    model = Model({})
+    grants = {}
+    deadlines = {}
+    trace = {'seed': seed, 'scenario': 'time-and-command-failures', 'scopes': {}, 'steps': []}
+    traces.append(trace)
+    started = time.monotonic()
+
+    def task(name, check=True):
+        return subprocess.run(['mise', 'run', f'mesh:test:{name}'], check=check,
+                              stdout=subprocess.DEVNULL, stderr=None if check else subprocess.DEVNULL)
+
+    def record(action, name, kind='wireguard.peer'):
+        trace['steps'].append({'action': action, 'decision': name, 'adapter': kind,
+                               'elapsed_seconds': round(time.monotonic() - started, 3)})
+
+    def issue_named(name, ports, ttl, network=False):
+        value = issue(ports, ttl=ttl, network=network)
+        grants[name] = value
+        model.ports[name] = set(ports)
+        trace['scopes'][name] = {'ports': ports, 'tcp_ttl_seconds': ttl}
+        if 'network_grant' in value:
+            network = value['network_grant']['grant']
+            trace['scopes'][name]['network_ttl_seconds'] = network['expires_at'] - network['not_before']
+        for key, kind in [('tcp_grant', 'tcp.port'), ('network_grant', 'wireguard.peer')]:
+            if key in value:
+                deadlines[name, kind] = value[key]['grant']['expires_at']
+        return value
+
+    def apply(name, kind='wireguard.peer', status=200, error=None):
+        key, route = ('tcp_grant', 'tcp-grants') if kind == 'tcp.port' else ('network_grant', 'network-grants')
+        result = http(f'{agent}/v1/{route}', grants[name][key], status)
+        if error:
+            assert result['error'] == error
+        if status == 200:
+            model.install((name, kind))
+        record('apply' if status == 200 else error, name, kind)
+
+    def peer_present():
+        result = subprocess.run(['mise', 'run', 'mesh:test:peer-present'], check=True,
+                                capture_output=True, text=True)
+        values = [line.split('=', 1)[1] for line in result.stdout.splitlines()
+                  if line.startswith('authority-e2e-peer=')]
+        assert len(values) == 1 and values[0] in {'present', 'absent'}, result.stdout
+        return values[0] == 'present'
+
+    def observe():
+        now = time.time()
+        # Time alone expires TCP authority; WG removal requires successful cleanup.
+        model.active = {pair for pair in model.active
+                        if pair[1] != 'tcp.port' or deadlines[pair] > now}
+        expected = {value: model.admitted(value) for value in (8080, 8081)}
+        actual = {value: allowed(2223 if value == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS)
+                  for value in (8080, 8081)}
+        trace['steps'][-1].update(expected_ports=expected, actual_ports=actual)
+        assert actual == expected, f'seed={seed}, timed step={len(trace["steps"])-1}, {trace["steps"][-1]}'
+
+    def after_expiry(pair, margin=0.3):
+        while time.time() < deadlines[pair] + margin:
+            time.sleep(max(0, min(0.2, deadlines[pair] + margin - time.time())))
+
+    http(f'{proxy}/__e2e/delivery', {'blocked': True})
+    try:
+        lease = issue_named('lease', [port], TRACE_TTL_SECONDS, True)
+        apply('lease')
+        subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+        apply('lease', 'tcp.port')
+        wait(lambda: allowed(2223 if port == 8080 else 2224))
+        observe()
+
+        # A real command-spawn error must not ACK or forget the installed peer.
+        task('wg-fail')
+        try:
+            notice = revoke(lease['decision_id'], ['wireguard.peer'])
+            model.publish(('lease', 'wireguard.peer'))
+            result = http(f'{agent}/v1/revocations', notice, 500)
+            assert result['error'] == 'internal_error'
+            model.tombstones.add(('lease', 'wireguard.peer'))
+            record('failed-cleanup-no-ack', 'lease')
+            assert time.time() + 1 < deadlines['lease', 'tcp.port']
+            observe()  # Existing peer and independent TCP scope remain installed.
+            apply('lease', status=409, error='network_grant_revoked')
+        finally:
+            task('wg-restore')
+        response = http(f'{agent}/v1/revocations', notice)
+        assert response['peer_removed'], 'failed cleanup lost the peer registry entry'
+        model.complete(('lease', 'wireguard.peer'))
+        record('retry-cleanup', 'lease')
+        observe()
+        assert not peer_present()
+
+        # Restore only transport: the independent TCP lease must still work.
+        issue_named('carry', [port], TRACE_TTL_SECONDS, True)
+        apply('carry')
+        subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+        wait(lambda: allowed(2223 if port == 8080 else 2224))
+        observe()
+        issue_named('short-tcp', [other_port], rng.randint(2, 3))
+        apply('short-tcp', 'tcp.port')
+        observe()
+        after_expiry(('short-tcp', 'tcp.port'))
+        record('tcp-timeout', 'short-tcp', 'tcp.port')
+        observe()
+        apply('short-tcp', 'tcp.port', 401, 'invalid_tcp_grant')
+
+        # Let the actual timer fail with an expired peer still installed, then
+        # recover the executable and require its retry to remove the same peer.
+        issue_named('timer', [port], rng.randint(2, 3), True)
+        apply('timer')
+        task('wg-fail')
+        try:
+            after_expiry(('timer', 'wireguard.peer'))
+            wait(lambda: task('wg-expiry-observed', check=False).returncode == 0)
+            record('timer-command-failed', 'timer')
+            # WG uses the independently configured server TTL. Keep fresh TCP
+            # authority so traffic proves the expired peer is still installed.
+            issue_named('during-failure', [port], TRACE_TTL_SECONDS)
+            apply('during-failure', 'tcp.port')
+            observe()
+            apply('timer', status=401, error='invalid_network_grant')
+        finally:
+            task('wg-restore')
+        wait(lambda: not peer_present())
+        model.active.discard(('timer', 'wireguard.peer'))
+        record('timer-retry', 'timer')
+        observe()
+
+        old_ttl = rng.randint(2, 3)
+        issue_named('old-peer', [port], old_ttl, True)
+        apply('old-peer')
+        # The API intentionally gives WG its independent server TTL; TCP's
+        # requested TTL must not be mistaken for a peer expiry override.
+        separation = rng.randint(4, 5)
+        time.sleep(separation)
+        issue_named('new-peer', [port], old_ttl + rng.randint(5, 6), True)
+        assert deadlines['new-peer', 'wireguard.peer'] - deadlines['old-peer', 'wireguard.peer'] >= separation
+        apply('new-peer')
+        subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+        wait(peer_present)
+        after_expiry(('old-peer', 'wireguard.peer'), 1.3)
+        # Earlier TCP leases may have expired during the independent WG TTL.
+        issue_named('during-replacement', [port], TRACE_TTL_SECONDS)
+        apply('during-replacement', 'tcp.port')
+        record('stale-timer', 'old-peer')
+        observe()
+        assert time.time() + 0.5 < deadlines['new-peer', 'wireguard.peer']
+        assert peer_present(), 'old expiry removed a replacement decision'
+        after_expiry(('new-peer', 'wireguard.peer'), 0.8)
+        wait(lambda: not peer_present())
+        model.active.discard(('new-peer', 'wireguard.peer'))
+        record('current-timer', 'new-peer')
+        observe()
+
+        # Unclean process death reloads/compacts expired durable records. A dead
+        # signed grant must remain invalid even after its replay record is gone.
+        task('crash')
+        model.active.clear()
+        record('crash-after-expiry', 'new-peer')
+        def ready():
+            try:
+                with urllib.request.urlopen(f'{agent}/v1/identity', timeout=2):
+                    return True
+            except (urllib.error.URLError, TimeoutError):
+                return False
+        wait(ready)
+        task('ledgers-compacted')
+        record('expired-ledgers-compacted', 'new-peer')
+        for name in ('old-peer', 'new-peer', 'timer'):
+            apply(name, status=401, error='invalid_network_grant')
+        apply('short-tcp', 'tcp.port', 401, 'invalid_tcp_grant')
+        assert time.time() + 1 < deadlines['during-replacement', 'tcp.port']
+        apply('during-replacement', 'tcp.port', 409, 'tcp_grant_replayed')
+        observe()
+        # A valid fresh signature still works after reopening/compaction; an
+        # unavailable or misconfigured verifier cannot explain the expired denials.
+        fresh = issue_named('post-gc', [port], TRACE_TTL_SECONDS, True)
+        apply('post-gc')
+        apply('post-gc', 'tcp.port')
+        subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+        wait(lambda: allowed(2223 if port == 8080 else 2224))
+        observe()
+        cleanup = revoke(fresh['decision_id'], ['wireguard.peer', 'tcp.port'])
+        http(f'{agent}/v1/revocations', cleanup)
+        for kind in ('tcp.port', 'wireguard.peer'):
+            model.publish(('post-gc', kind))
+            model.complete(('post-gc', kind))
+            record('cleanup', 'post-gc', kind)
+        observe()
+        assert not peer_present()
+        print(f'Timed lifecycle trace seed={seed}: {len(trace["steps"])} steps matched expiry, crash and WG command failures', flush=True)
+    finally:
+        task('wg-restore')
+        http(f'{proxy}/__e2e/delivery', {'blocked': False})

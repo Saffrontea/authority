@@ -45,6 +45,10 @@ Expire(d) == /\ ready /\ d \in timers /\ ~Live(d)
              /\ badCleanup' = badCleanup \/ (registry # d /\ kernel' # kernel)
              /\ timers' = timers \ {d}
              /\ UNCHANGED <<now, ready, consumed, tombstones, published, completed>>
+\* A failed external command keeps the installed peer tracked. This explicit
+\* stuttering action lets mutation checks reject losing the retry obligation.
+FailExpire(d) == /\ ready /\ d \in timers /\ ~Live(d) /\ registry = d
+                 /\ UNCHANGED vars
 Tick == /\ now < 3 /\ now' = now + 1
         /\ UNCHANGED <<ready, kernel, registry, consumed, tombstones, published,
                        completed, timers, badCleanup>>
@@ -58,7 +62,7 @@ Crash == /\ ready /\ ready' = FALSE /\ registry' = None /\ timers' = {}
 Restart == /\ ~ready /\ ready' = TRUE /\ kernel' = None
            /\ UNCHANGED <<now, registry, consumed, tombstones, published, completed, timers, badCleanup>>
 Next == \/ \E d \in Decisions: Apply(d) \/ Burn(d) \/ Publish(d) \/ Persist(d)
-                                   \/ Complete(d) \/ Expire(d)
+                                   \/ Complete(d) \/ Expire(d) \/ FailExpire(d)
         \/ Tick \/ GC \/ Crash \/ Restart
 TypeOK == /\ now \in 0..3 /\ ready \in BOOLEAN
           /\ kernel \in Decisions \cup {None} /\ registry \in Decisions \cup {None}
@@ -70,4 +74,10 @@ NoCrossDecisionCleanup == ~badCleanup
 NoResurrection == kernel \notin completed
 DurableWhileLive == \A d \in completed: Live(d) => d \in tombstones
 Spec == Init /\ [][Next]_vars
+\* Conditional progress: logical time advances, failed receivers eventually
+\* restart, and an enabled expiry cleanup eventually succeeds. No bound on
+\* failures, scheduler delay or packet delivery follows from these assumptions.
+SpecFair == Spec /\ WF_vars(Tick) /\ WF_vars(Restart)
+                 /\ \A d \in Decisions: WF_vars(Expire(d))
+EventuallyExpiredPeerRemoved == <> (now = 3 /\ kernel = None)
 =============================================================================

@@ -16,8 +16,8 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
-| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; separate peer lifecycle safety with expiry/GC, replacement and receiver restart; counterexample mutations; generated live-binding system traces | Arbitrary lifecycle trace generation and refinement |
-| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live-binding HTTP/DB/TCP/WG traces; native authority/time/durable-state PBT | Generated expiry/crash/kernel-failure actions and broader arbitrary trace coverage |
+| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; generated live-binding system traces | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
+| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
 
 ## Reproducible checks
 
@@ -395,7 +395,8 @@ ready. Failures stutter; registry state is retained until kernel cleanup succeed
 The checked invariants require registry/kernel agreement while ready, no cleanup
 of a different decision, no resurrection after completed revocation, and durable
 tombstones for completed decisions while still live. Mutations must expose expired
-grant resurrection after GC, stale timer deletion, and restart without cleanup.
+grant resurrection after GC, stale timer deletion, loss of the registry after a
+failed expiry command, and restart without cleanup.
 
 The actual expiry helper holds the policy mutex through its identity check,
 kernel callback and registry deletion. A failed callback retains the registry and
@@ -409,22 +410,26 @@ calls the production expiry helper with a simulated kernel; restart/install step
 model the real ordering but do not execute `/usr/bin/wg` or HTTP. This suite is
 included in `verification:pbt`.
 
-The lifecycle model is a safety model without fairness/liveness claims. It does
-not promise immediate WG traffic denial at the deadline during scheduler stalls,
-crashes or kernel failure. TCP expiry is independently enforced by nft timeouts.
+The lifecycle model's `Spec` checks safety without fairness. Its separate
+`SpecFair` checks `EventuallyExpiredPeerRemoved`: after the finite catalog's two
+decisions expire, the model eventually reaches the terminal clock with no kernel
+peer. It assumes weak fairness for clock ticks, receiver restart and successful
+expiry cleanup. Removing expiry fairness must produce a temporal counterexample.
+This is conditional finite-workload progress, without a time bound or a claim
+about an unbounded stream of fresh decisions. It does not promise immediate WG
+traffic denial at the deadline during scheduler stalls, crashes or kernel failure. TCP expiry is independently enforced by nft timeouts.
 Both models assume verified immutable decision/expiry bindings and trusted clock
 semantics; the lifecycle model does not include TCP's overlapping rules. The
 generated E2E traces below exercise real HTTP, DB, adapter restart and kernel
-admission. Generated expiry/crash/kernel-command-failure actions remain work;
-existing deterministic E2E covers independent expiry. These mappings and tests are
-not a machine-checked refinement proof.
+admission, expiry, SIGKILL recovery and external WG command failure. These mappings
+and tests are not a machine-checked refinement proof.
 
 ## Generated HTTP / DB / kernel correspondence traces
 
 `mise run poc:e2e` runs `scripts/lifecycle-trace-e2e.py` after its fixed browser,
 SSH, scope and expiry regressions. By default seeds `0,7,42` vary service scopes,
-publication order, duplicate count and replay order in a constrained lifecycle
-scenario. Each trace issues fresh signed contracts through device-authenticated
+publication order, duplicate count, replay order, TTLs and process restart mode
+in constrained live-binding and time/failure scenarios. Each trace issues fresh signed contracts through device-authenticated
 browser requests, then drives the actual HTTP receiver and compares port admission
 with an independent set oracle using the transitions of `Revocation.tla`.
 
@@ -446,7 +451,21 @@ cannot masquerade as successful revocation. It checks:
   fresh TCP decision restores only its selected service;
 - automatic delivery retries after HTTP 503 and removes an installed scope;
   repeated publication returns its original notice/sequence;
-- WG removal is observed independently with the real mesh connectivity probe.
+- WG removal is observed independently with mesh connectivity probes and direct
+  successful kernel peer queries;
+- removing execute permission from the real container's `/usr/bin/wg` causes
+  revocation to return HTTP 500 while existing peer/TCP traffic still works;
+  durable tombstones deny the late grant, and a later successful retry reports
+  `peer_removed`, demonstrating the registry was retained;
+- a journal cursor captured at fault injection requires a new expiry-command
+  failure message before restoring permissions; the timer's own retry then
+  removes the peer without another revocation request;
+- generated short TCP TTLs expire independently, while a newer WG decision on
+  the same peer survives the older timer and expires on its own deadline;
+- SIGKILL must change the receiver PID and advance systemd's `NRestarts`; after
+  automatic recovery, both actual ledger files must contain no records expired at
+  process start, expired WG/TCP signatures remain invalid, a still-live consumed
+  TCP grant still rejects replay, and a fresh valid signed decision installs only its selected port.
 
 An E2E-only loopback proxy (`scripts/revocation-delivery-proxy.py`) forwards the
 control plane's normal receiver traffic and temporarily returns HTTP 503 for
@@ -463,11 +482,35 @@ outbox record, including repeated publication.
 separated list for more cases. `AUTHORITY_E2E_TRACE_FILE` selects the JSON artifact,
 otherwise the path is `/tmp/authority-lifecycle-traces-<pid>.json`. The artifact
 contains symbolic decisions, scopes, operations and expected/actual port results,
-without signed envelopes or credentials. It is written even on failure.
+without signed envelopes or credentials. It is written even on failure. Each
+seed includes a live-binding trace and a separate time/command-failure trace.
 
-These are generated integration tests over a constrained scenario, not exhaustive
-traces, an arbitrary-interleaving theorem or a proved refinement. Receiver restart
-is a graceful systemd restart, not power loss. HTTP delivery failures are real;
-kernel-command failures remain simulated in native expiry PBT. Expiry/GC and crash
-actions are not generated here, and liveness remains conditional on eventual
-successful delivery and kernel operations.
+The time/failure oracle composes the live model with `PeerLifecycle` semantics:
+WG installation replaces the shared peer's binding, a stale timer cannot remove
+its replacement, failed commands retain pending WG state, and successful cleanup
+removes the matching binding. TCP timeout independently removes expired port
+rules. Short-TTL WG assertions use direct kernel queries through
+`mesh:test:peer-present`, keeping their timing separate from long connectivity
+probes. A query error fails the test. The test waits for actual cleanup before
+observing WG expiry; it does not assert instantaneous traffic denial during
+command failure. No source clock or expiry verifier is replaced. WG retains its
+independent server TTL; the test separates issuance times to obtain distinct
+signed WG deadlines and creates fresh TCP authority when needed to probe a peer
+that outlives the earlier TCP lease.
+
+The E2E-only `deploy/lxc/authority-lifecycle-test.sh` controls faults through the
+existing privileged task agent. `mesh:test:wg-fail` records the original file mode
+and a journal cursor before removing execute bits; `mesh:test:wg-restore` restores
+that mode. Python finally blocks and the outer E2E shell trap both restore it.
+`mesh:test:crash` sends SIGKILL and requires an observed automatic systemd restart,
+without editing its service configuration. These tasks are absent from production
+service flows. Manual recovery after an interrupted harness is
+`mise run mesh:test:wg-restore`.
+
+These are generated integration tests over constrained scenarios, not exhaustive
+traces, an arbitrary-interleaving theorem or a proved refinement. SIGKILL tests
+process failure, not power loss or interruption of a specific fsync. The command
+fault is an actual executable-permission/spawn failure; it does not simulate all
+kernel syscall errors, partial kernel updates, disk failure or arbitrary scheduler
+stalls. Liveness remains conditional on eventual successful delivery and kernel
+operations.

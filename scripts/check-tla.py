@@ -52,6 +52,7 @@ def main():
     lifecycle_config = (ROOT / "formal/tla/PeerLifecycle.cfg").read_text()
     models.append(("peer-lifecycle", lifecycle, None))
     models.append(("peer-lifecycle-same-deadline", lifecycle, None))
+    models.append(("peer-lifecycle-liveness", lifecycle, None))
     if args.mutations:
         guard = "Apply(d) == /\\ ready /\\ Live(d)"
         assert lifecycle.count(guard) == 1
@@ -63,6 +64,17 @@ def main():
         before, expiry = lifecycle.split("Expire(d) ==", 1)
         models.append(("stale-timer-removes-replacement", before + "Expire(d) ==" +
             expiry.replace(cleanup, "kernel' = None", 1), "RegistryTracksKernel"))
+        failed_expiry = "FailExpire(d) == /\\ ready /\\ d \\in timers /\\ ~Live(d) /\\ registry = d\n                 /\\ UNCHANGED vars"
+        assert lifecycle.count(failed_expiry) == 1
+        models.append(("failed-expiry-forgets-registry", lifecycle.replace(failed_expiry,
+            "FailExpire(d) == /\\ ready /\\ d \\in timers /\\ ~Live(d) /\\ registry = d\n"
+            "                 /\\ registry' = None\n"
+            "                 /\\ UNCHANGED <<now, ready, kernel, consumed, tombstones, published, completed, timers, badCleanup>>"),
+            "RegistryTracksKernel"))
+        expiry_fairness = "                 /\\ \\A d \\in Decisions: WF_vars(Expire(d))"
+        assert lifecycle.count(expiry_fairness) == 1
+        models.append(("expiry-without-fairness", lifecycle.replace(expiry_fairness, ""),
+            "EventuallyExpiredPeerRemoved"))
         restart = "Restart == /\\ ~ready /\\ ready' = TRUE /\\ kernel' = None"
         assert lifecycle.count(restart) == 1
         models.append(("restart-without-cleanup", lifecycle.replace(restart,
@@ -75,13 +87,16 @@ def main():
             selected_config = lifecycle_config if module == "PeerLifecycle" else config
             if name == "peer-lifecycle-same-deadline":
                 selected_config = selected_config.replace("LateDeadline = 3", "LateDeadline = 2")
+            if name in {"peer-lifecycle-liveness", "expiry-without-fairness"}:
+                selected_config = selected_config.replace("SPECIFICATION Spec", "SPECIFICATION SpecFair")
+                selected_config += "\nPROPERTY EventuallyExpiredPeerRemoved\n"
             (directory / f"{module}.cfg").write_text(selected_config)
             result = subprocess.run([java, "-XX:+UseParallelGC", "-jar", str(jar.resolve()),
                 "-workers", "2", "-metadir", str(directory / "states"), f"{module}.tla"],
                 cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 timeout=180)
             if expected_failure:
-                marker = ("Temporal properties were violated" if expected_failure == "EventuallyRevoked"
+                marker = ("Temporal properties were violated" if expected_failure in {"EventuallyRevoked", "EventuallyExpiredPeerRemoved"}
                     else f"Invariant {expected_failure} is violated")
                 if result.returncode == 0 or marker not in result.stdout:
                     print(result.stdout)

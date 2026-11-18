@@ -99,6 +99,30 @@ run = "cargo build --offline -p authority-network-agent && ./scripts/authority-a
 description = "Restart the target network agent with its durable ledgers retained"
 run = "./scripts/authority-agent.sh run _mesh:agent-restart"
 
+[tasks."mesh:test:wg-fail"]
+description = "E2E only: receiver wg-fail"
+run = "./scripts/authority-agent.sh run _mesh:test-wg-fail"
+
+[tasks."mesh:test:wg-restore"]
+description = "E2E only: receiver wg-restore"
+run = "./scripts/authority-agent.sh run _mesh:test-wg-restore"
+
+[tasks."mesh:test:wg-expiry-observed"]
+description = "E2E only: require a logged WG expiry command failure"
+run = "./scripts/authority-agent.sh run _mesh:test-wg-expiry-observed"
+
+[tasks."mesh:test:peer-present"]
+description = "E2E only: query actual target kernel WG peer presence"
+run = "./scripts/authority-agent.sh run _mesh:test-peer-present"
+
+[tasks."mesh:test:ledgers-compacted"]
+description = "E2E only: require expired durable records to be removed at startup"
+run = "./scripts/authority-agent.sh run _mesh:test-ledgers-compacted"
+
+[tasks."mesh:test:crash"]
+description = "E2E only: receiver crash"
+run = "./scripts/authority-agent.sh run _mesh:test-crash"
+
 [tasks."mesh:agent:status"]
 description = "Show the target LXC network-agent status"
 run = "./scripts/authority-agent.sh run _mesh:agent-status"
@@ -192,6 +216,30 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-install"
 [tasks."_mesh:agent-restart"]
 description = "Internal: restart the target network agent"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-restart"
+
+[tasks."_mesh:test-wg-fail"]
+description = "Internal E2E only: receiver wg-fail"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh wg-fail"
+
+[tasks."_mesh:test-wg-restore"]
+description = "Internal E2E only: receiver wg-restore"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh wg-restore"
+
+[tasks."_mesh:test-wg-expiry-observed"]
+description = "Internal E2E only: observe WG expiry failure"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh wg-expiry-observed"
+
+[tasks."_mesh:test-peer-present"]
+description = "Internal E2E only: query target kernel peer"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh peer-present"
+
+[tasks."_mesh:test-ledgers-compacted"]
+description = "Internal E2E only: verify startup ledger compaction"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh ledgers-compacted"
+
+[tasks."_mesh:test-crash"]
+description = "Internal E2E only: receiver crash"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh crash"
 
 [tasks."_mesh:agent-status"]
 description = "Internal: show the target LXC network-agent status"

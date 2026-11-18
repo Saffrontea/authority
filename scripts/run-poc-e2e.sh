@@ -38,6 +38,9 @@ export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NO
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1
+    if ! mise run mesh:test:wg-restore >/dev/null 2>&1; then
+        echo "poc:e2e: failed to restore receiver wg command permissions" >&2
+    fi
     if [[ -n "${proxy_pid}" ]]; then
         kill "${proxy_pid}" 2>/dev/null || true
         wait "${proxy_pid}" 2>/dev/null || true
