@@ -129,6 +129,8 @@ def main():
     solver = (ROOT / "formal/verus/solver.rs").read_text()
     verify(binary, env, "production_validity", validity, minimum=4)
     verify(binary, env, "solver", solver, minimum=20)
+    lexicographic = solver + (ROOT / "formal/verus/lexicographic.rs").read_text()
+    verify(binary, env, "lexicographic_representatives", lexicographic, minimum=28)
     scopes = scopes_source()
     expiry = expiry_source()
     projection = projection_source()
@@ -148,6 +150,12 @@ def main():
             ("widened_deadline", validity, "other.expires_at <= self.expires_at", "other.expires_at >= self.expires_at"),
             ("unauthorized_effects", solver, "&& abilities(c, after).subset_of(c.permitted)", "&& true"),
             ("nonminimal_search", solver, "Some(length) => Some(length)", "Some(_length) => Some(bound)"),
+            ("reversed_lexicographic_ids", lexicographic,
+                "left.len() == right.len() && exists|at: int| 0 <= at < left.len()\n        && left[at] < right[at]",
+                "left.len() == right.len() && exists|at: int| 0 <= at < left.len()\n        && left[at] > right[at]"),
+            ("memoization_changes_selected_set", lexicographic,
+                "original.to_set() == replacement.to_set(), valid_execution(c, original + suffix)",
+                "true, valid_execution(c, original + suffix)"),
             ("expanded_tcp_ports", scopes, "selected.subset_of(ports)", "true"),
             ("expanded_ssh_principals", scopes, "selected.subset_of(principals)", "true"),
             ("rebound_identity", scopes, "self.binding == requested.binding", "true"),

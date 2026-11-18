@@ -13,7 +13,7 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
-| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
+| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; lexicographic representative dominance; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL and app-context consumer PBT | Remaining consumer variants and universal representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
@@ -53,7 +53,7 @@ AUTHORITY_DB_HOST=<lxc-db-address> cargo test -p authority-control-plane \
   access_policy::tests:: -- --ignored --test-threads=1
 ```
 
-These existing E2E scenarios do not yet constitute model-based generated traces.
+These fixed E2E scenarios complement the generated traces and TLC replay described below.
 
 ## Verus proofs and source correspondence
 
@@ -64,11 +64,12 @@ checked lifetimes, nine for material projection (which rechecks the seven scope
 obligations), and 33 for the conditional complete projection pipeline (which
 rechecks shared scope/material/lifetime obligations), 35 for checked construction
 and its composition with projection (including the 33 pipeline obligations),
-26 for concrete closure (including the 20 abstract solver obligations), and 51 for
+26 for concrete closure (including the 20 abstract solver obligations), 28 for
+lexicographic representative replacement (including the same 20), and 51 for
 the source-derived BFS (which rechecks those 26). Counts include generated
 obligations and are not independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for thirty-three
+`mise run verification:verus:mutations` also requires proof failures for thirty-five
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a
@@ -80,7 +81,8 @@ Factory mutations drop binding/start checks or permit negative issuance times;
 closure mutations ignore prerequisites, omit mandatory effects or stop before a
 fixed point. BFS mutations drop final constraints, forbidden-mechanism checks or
 permission checks; use the parent as a visit key; violate FIFO; exceed mechanism or
-state bounds; or fail despite sufficient budget. These mutations must produce
+state bounds; or fail despite sufficient budget. Representative mutations reverse
+ID ordering or allow replacing a prefix with a different selected set. These mutations must produce
 verifier errors, rather than merely parse failures. The combined gate includes these checks. Own proof files may not introduce `assume`,
 `admit`, or unchecked external bodies/specifications.
 
@@ -721,3 +723,31 @@ injected consumer clock. They do not model arbitrary disk failure, clock rollbac
 all accepted key algorithms, an unimplemented mTLS node-installation workflow, or
 universally prove the application/codec/OS implementations. LXC E2E remains the
 network/system check for the concrete HTTP, OpenSSH and TCP workflows.
+
+
+## Lexicographic representative replacement
+
+`formal/verus/lexicographic.rs` uses the independent `valid_execution` and
+`execute` specification from `solver.rs`. It proves strict equal-length
+lexicographic order is irreflexive, total on distinct sequences and transitive.
+Appending a common suffix preserves order. Ordered catalog children preserve
+parent order even when their appended IDs differ; equal parents use ID order.
+These facts apply to arbitrary finite sequences of mathematical catalog positions,
+without a PBT-sized bound.
+
+The replacement theorem permits any two valid prefixes selecting exactly the
+same set. Every valid suffix of the original prefix remains executable after the
+replacement, with the same final selected set and abilities. Thus prerequisite,
+forbidden/repeated ID and permission checks remain satisfied at every step.
+If the replacement is lexicographically smaller, every goal-reaching continuation
+has a smaller execution of the same length that satisfies the same pure final
+predicate. No monotonicity assumption is made about that predicate.
+
+This discharges the semantic dominance obligation behind selected-set
+memoization. It does **not** yet prove that the concrete BFS's first admitted
+representative is the smallest one: that requires a queue/frontier canonicality
+invariant connected to the source-derived loop. Full canonical tie-breaking
+therefore remains an open obligation and continues to be checked by native oracle
+and canonical-label PBT. The new proof unit is checked by both normal and mutation
+Verus tasks. Reversing the defined ID order and dropping selected-set equality
+must each produce a verifier proof error, not only a parse error.
