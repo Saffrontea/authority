@@ -503,7 +503,7 @@ def bfs_source():
     expansion = expansion.replace("request.max_states", "budget").replace("PlanningError::", "SearchFailure::")
     expansion = expansion.replace("visited.insert(next_selected);", "visited = visited.insert(next_selected);")
     expansion = expansion.replace("queue.push_back(next);", "queue = queue.push(next);")
-    expansion = expansion.replace("continue;", "return Ok(SearchState { queue, visited, done: before.done });")
+    expansion = expansion.replace("continue;", "return Ok(SearchState { queue, visited, done: before.done, representatives: before.representatives });")
     expansion = expansion.replace("return Err(SearchFailure::SearchLimit);",
         "node_representation(c, next); capacity_at_failure(c, budget, visited, next_selected); return Err(SearchFailure::SearchLimit);")
     _, queue_loop = block(solver, "while let Some(plan) = queue.pop_front() {")
@@ -548,7 +548,7 @@ def bfs_source():
     expand_end = delimiter_end(remainder, remainder.index("{", expand_pos))
     if remainder[expand_end:].strip():
         raise SystemExit("unmodeled statements after BFS expansion")
-    return closure_source() + inject((ROOT / "formal/verus/bfs.rs").read_text(), {
+    return closure_source() + (ROOT / "formal/verus/lexicographic.rs").read_text() + inject((ROOT / "formal/verus/bfs.rs").read_text(), {
         "PRODUCTION_EXTEND_NODE": next_body, "PRODUCTION_EXPAND_ONE": expansion,
         "PRODUCTION_GOAL_GUARD": goal_guard, "PRODUCTION_BOUND_GUARD": bound_guard,
         "PRODUCTION_INITIAL_QUEUE": "seq![SearchNode { mechanisms: Seq::empty(), abilities: initial }]",

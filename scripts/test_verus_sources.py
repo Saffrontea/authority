@@ -1,5 +1,6 @@
 """Source extraction is part of the proof boundary, so test it independently."""
 import unittest
+from unittest.mock import patch
 from verus_sources import (block, inject, scopes_source, projection_source, checked_declaration,
                            contract_values, result_calls, authorized_source, factory_source, closure_source,
                            check_private_plan_declaration, ROOT, bfs_source)
@@ -71,9 +72,26 @@ class SourceExtraction(unittest.TestCase):
         for fragment in ["pub proof fn solve_canonical", "pub proof fn full_budget_completeness",
                          "queue = queue.push(next)", "visited = visited.insert(next_selected)",
                          "c.goals.subset_of(plan.abilities) && (c.accepts)(key(plan), plan.abilities)",
-                         "capacity_at_failure(c, budget, visited, next_selected)"]:
+                         "capacity_at_failure(c, budget, visited, next_selected)",
+                         "pub proof fn goal_at_head_is_lex_minimum", "representative_inv(c, state)",
+                         "admitted_child_is_canonical(c, bound, budget, plan, before, id, next)"]:
             self.assertIn(fragment, bfs)
         self.assertNotIn("/* PRODUCTION_", bfs)
+
+    def test_bfs_reversed_catalog_scan_fails_closed(self):
+        path = ROOT / "crates/planning-core/src/lib.rs"
+        read_text = type(path).read_text
+        source = path.read_text()
+        header = "for (id, mechanism) in &catalog {"
+        self.assertEqual(source.count(header), 1)
+        reversed_scan = source.replace(header, "for (id, mechanism) in catalog.iter().rev() {")
+
+        def changed_read(current, *args, **kwargs):
+            return reversed_scan if current == path else read_text(current, *args, **kwargs)
+
+        with patch("pathlib.Path.read_text", changed_read):
+            with self.assertRaises(SystemExit):
+                bfs_source()
 
     def test_source_correspondence_includes_material_and_binding_guards(self):
         scope = scopes_source()

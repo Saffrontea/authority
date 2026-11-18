@@ -5,15 +5,15 @@ all production code. Verus now proves the abstract solver and directly checks th
 production TTL containment and checked-lifetime predicates. Source-derived value
 models also cover all scope variants, binding checks and projection material. The
 source-derived BFS queue/visited/budget transitions now prove soundness,
-completeness with a sufficient budget, minimum mechanism count and termination.
+completeness with a sufficient budget, minimum mechanism count, canonical
+lexicographic tie-breaking and termination.
 Private checked construction establishes the projection invariant; concrete closure
-refines the least fixed point. Standard-library/encoding representation internals
-and the lexicographic tie-break are not universally proved.
+refines the least fixed point. Standard-library/encoding representation internals remain outside these proofs.
 Each row identifies both current evidence and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
-| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; lexicographic representative dominance; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
+| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count, canonical tie-break and termination; lexicographic representative dominance; independent/native PBT | Trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL and app-context consumer PBT | Remaining consumer variants and universal representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
@@ -64,12 +64,12 @@ checked lifetimes, nine for material projection (which rechecks the seven scope
 obligations), and 33 for the conditional complete projection pipeline (which
 rechecks shared scope/material/lifetime obligations), 35 for checked construction
 and its composition with projection (including the 33 pipeline obligations),
-26 for concrete closure (including the 20 abstract solver obligations), 28 for
-lexicographic representative replacement (including the same 20), and 51 for
-the source-derived BFS (which rechecks those 26). Counts include generated
+26 for concrete closure (including the 20 abstract solver obligations), 30 for
+lexicographic representative replacement/order (including the same 20), and 66 for
+the source-derived BFS (which rechecks closure and lexicographic obligations). Counts include generated
 obligations and are not independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for thirty-five
+`mise run verification:verus:mutations` also requires proof failures for thirty-six
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a
@@ -81,7 +81,7 @@ Factory mutations drop binding/start checks or permit negative issuance times;
 closure mutations ignore prerequisites, omit mandatory effects or stop before a
 fixed point. BFS mutations drop final constraints, forbidden-mechanism checks or
 permission checks; use the parent as a visit key; violate FIFO; exceed mechanism or
-state bounds; or fail despite sufficient budget. Representative mutations reverse
+state bounds; fail despite sufficient budget; or repeatedly scan the wrong catalog ID. Representative mutations reverse
 ID ordering or allow replacing a prefix with a different selected set. These mutations must produce
 verifier errors, rather than merely parse failures. The combined gate includes these checks. Own proof files may not introduce `assume`,
 `admit`, or unchecked external bodies/specifications.
@@ -239,8 +239,8 @@ scoped-ability labels and a finite catalog with unique positional IDs. It proves
 These are universal Verus theorems about that model, not bounded PBT results. The
 source-derived concrete closure and BFS units below now connect production value
 operations to it. They are not proofs of Rust collection memory internals, the
-source adapter/compiler transformation or generic trait implementations. Stable
-lexicographic tie-breaking remains checked natively, rather than universally proved.
+source adapter/compiler transformation or generic trait implementations. Canonical lexicographic tie-breaking is proved by the additional concrete BFS
+invariants described below, and remains independently checked natively.
 
 ## Concrete closure implementation
 
@@ -300,13 +300,20 @@ visited values. Its invariant establishes:
 * Visited consists of expanded states and queued selected sets. Every child of a
   fully expanded state within the mechanism bound has been visited.
 * Expanded states failed the goal/final constraint. Queue lengths are nondecreasing
-  and span at most two adjacent mechanism-count layers.
+  and span at most two adjacent mechanism-count layers. Equal-depth nodes are
+  strictly lexicographically ordered; next-layer children come from parents
+  preceding the current head.
+* A ghost map assigns every visited set its valid, lexicographically smallest
+  execution. Queue nodes match those representatives. Each newly admitted child
+  preserves this property; a smaller competing execution would already be
+  visited through an expanded parent or an earlier catalog ID.
 * Each admission adds one visited set and one queued node. Popping removes one
   node. Thus `2 * (budget - visited.len()) + queue.len()` strictly decreases across
   outer iterations; finite catalog scans are proved by induction.
 
 These facts connect to the independent reachable/execution specification. A goal
-at the queue head has minimum mechanism count; if the queue empties there is no
+at the queue head has minimum mechanism count and is lexicographically smallest
+among all equally short valid goals; if the queue empties there is no
 valid solution within the mechanism bound. Invalid initial authority also admits
 no valid execution, rather than being silently clipped. `SearchLimit` is never
 interpreted as `NoSolution` or authorization.
@@ -325,8 +332,9 @@ pop/push and set operations, as in the projection proofs. The final predicate mu
 be total, pure and depend only on the selected set/final abilities; this is the
 existing solver contract. These are universal statements over arbitrary finite
 catalogs under that value abstraction, not a proof of callback termination or
-allocation success. They do not assert canonical lexicographic tie-breaking; native
-oracle and canonical-label PBT continue to fix the existing deterministic behavior.
+allocation success. Canonical lexicographic tie-breaking is proved under this
+same catalog-position/value abstraction. Native oracle and canonical-label PBT
+independently check the deterministic behavior and the ID-order correspondence.
 
 ## Solver specification boundary
 
@@ -744,10 +752,34 @@ has a smaller execution of the same length that satisfies the same pure final
 predicate. No monotonicity assumption is made about that predicate.
 
 This discharges the semantic dominance obligation behind selected-set
-memoization. It does **not** yet prove that the concrete BFS's first admitted
-representative is the smallest one: that requires a queue/frontier canonicality
-invariant connected to the source-derived loop. Full canonical tie-breaking
-therefore remains an open obligation and continues to be checked by native oracle
-and canonical-label PBT. The new proof unit is checked by both normal and mutation
-Verus tasks. Reversing the defined ID order and dropping selected-set equality
-must each produce a verifier proof error, not only a parse error.
+memoization. The concrete BFS now carries a ghost map from each visited selected
+set to its canonical execution. This map is proof-only; the production algorithm
+and state layout are unchanged. Its domain equals visited, its values are valid
+and lexicographically minimum for their selected set, and queued nodes equal
+those representatives. The queue also preserves strict equal-depth order and a
+frontier invariant relating next-layer children to already scanned parents.
+
+During expansion, every reachable state in the parent's layer has been visited,
+because all shallower layers are expanded. For a hypothetically smaller execution
+of a new child, take its prefix's canonical representative. It cannot be later in
+the queue than the current parent. If it is an earlier expanded parent, the
+replacement theorem and expanded-edge invariant show that this child was already
+visited. If it is the current parent, the competing last ID was scanned earlier,
+again contradicting the child's novelty. This proves canonicality on admission,
+including states deduplicated by selected set.
+
+For a goal at the queue head, any equally short valid goal has a visited selected
+set. It cannot be expanded, since expanded sets failed the goal/final predicate.
+Its queued canonical representative cannot precede the ordered queue head. Thus
+the strengthened `solution_spec` proves the returned plan is lexicographically
+minimum among all minimum-length valid goal executions, even under a smaller
+budget when a result is returned. It does not reinterpret `SearchLimit` as a
+result or absence proof.
+
+Both normal and mutation Verus tasks check these obligations. Reversing the
+defined ID order, dropping selected-set equality and repeatedly scanning the
+wrong catalog ID must each produce verifier proof errors, not only parse errors.
+A source-adapter regression also changes the actual catalog iteration to reverse
+order and requires fail-closed rejection: that order is outside the supported
+ascending BTreeMap view. Faithful generic ID/collection views remain trusted
+adapters, with native oracle and canonical-label PBT as independent evidence.

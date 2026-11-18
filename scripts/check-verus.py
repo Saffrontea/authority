@@ -130,7 +130,7 @@ def main():
     verify(binary, env, "production_validity", validity, minimum=4)
     verify(binary, env, "solver", solver, minimum=20)
     lexicographic = solver + (ROOT / "formal/verus/lexicographic.rs").read_text()
-    verify(binary, env, "lexicographic_representatives", lexicographic, minimum=28)
+    verify(binary, env, "lexicographic_representatives", lexicographic, minimum=30)
     scopes = scopes_source()
     expiry = expiry_source()
     projection = projection_source()
@@ -144,7 +144,7 @@ def main():
     concrete_closure = closure_source()
     verify(binary, env, "concrete_closure", concrete_closure, minimum=26)
     bfs = bfs_source()
-    verify(binary, env, "concrete_bfs", bfs, minimum=51)
+    verify(binary, env, "concrete_bfs", bfs, minimum=66)
     if args.mutations:
         mutations = [
             ("widened_deadline", validity, "other.expires_at <= self.expires_at", "other.expires_at >= self.expires_at"),
@@ -187,6 +187,9 @@ def main():
             ("bfs_exceeds_mechanism_bound", bfs, "if plan.mechanisms.len() >= bound {", "if plan.mechanisms.len() > bound {"),
             ("bfs_exceeds_state_budget", bfs, "if visited.len() >= budget {", "if visited.len() > budget {"),
             ("bfs_fails_with_sufficient_budget", bfs, "if visited.len() >= budget {", "if true {"),
+            ("bfs_scans_repeated_id", bfs,
+                "expand_one(c, bound, budget, plan, previous, (length - 1) as int)",
+                "expand_one(c, bound, budget, plan, previous, 0)"),
         ]
         for name, source, before, after in mutations:
             if source.count(before) != 1:

@@ -1,6 +1,6 @@
 // Uses the independent execution specification from solver.rs. This establishes
-// the semantic replacement rule for selected-set memoization, not yet the
-// concrete BFS invariant that the first admitted representative is canonical.
+// the semantic replacement rule for selected-set memoization. The concrete BFS
+// unit uses it to prove canonical representatives and the returned tie-break.
 verus! {
 
 pub open spec fn lex_less(left: Seq<nat>, right: Seq<nat>) -> bool {
@@ -79,6 +79,28 @@ pub proof fn ordered_children(left: Seq<nat>, right: Seq<nat>, a: nat, b: nat)
         assert(left.push(a)[left.len() as int] < right.push(b)[left.len() as int]);
         assert(forall|i: int| 0 <= i < left.len() ==> left.push(a)[i] == right.push(b)[i]);
     }
+}
+
+pub proof fn child_order_reflects_parents(left: Seq<nat>, right: Seq<nat>, a: nat, b: nat)
+    requires left.len() == right.len(), lex_less(left.push(a), right.push(b)),
+    ensures lex_less(left, right) || (left == right && a < b),
+{
+    lex_total(left, right);
+    if lex_less(right, left) || (left == right && b < a) {
+        ordered_children(right, left, b, a);
+        lex_transitive(left.push(a), right.push(b), left.push(a));
+        lex_irreflexive(left.push(a));
+    }
+    if left == right && a == b {
+        lex_irreflexive(left.push(a));
+    }
+}
+
+pub proof fn lex_nonstrict_transitive(a: Seq<nat>, b: Seq<nat>, c: Seq<nat>)
+    requires a == b || lex_less(a, b), b == c || lex_less(b, c),
+    ensures a == c || lex_less(a, c),
+{
+    if a != b && b != c { lex_transitive(a, b, c); }
 }
 
 pub proof fn concatenated_selection(prefix: Seq<nat>, suffix: Seq<nat>)
