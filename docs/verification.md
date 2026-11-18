@@ -4,15 +4,16 @@ This work tracks the full verification target; a passing model is not a proof of
 all production code. Verus now proves the abstract solver and directly checks the
 production TTL containment and checked-lifetime predicates. Source-derived value
 models also cover all scope variants, binding checks and projection material. The
-BFS queue/visited/budget implementation and standard-library/encoding representation
-internals are not yet universally proved. The checked private constructor now
-establishes the input invariant needed by the source-derived projection pipeline;
-the concrete closure iteration also refines the least fixed point and terminates.
+source-derived BFS queue/visited/budget transitions now prove soundness,
+completeness with a sufficient budget, minimum mechanism count and termination.
+Private checked construction establishes the projection invariant; concrete closure
+refines the least fixed point. Standard-library/encoding representation internals
+and the lexicographic tie-break are not universally proved.
 Each row identifies both current evidence and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
-| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Verus concrete closure termination/least-fixed-point refinement, selected-set equivalence, execution/layer correspondence and shortest-search theorems; native PBT | BFS queue/visited/budget refinement and deterministic tie-breaking proof |
+| Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters, plus safety and liveness mutations | Expiry, receiver restart and kernel failure/recovery model; trace correspondence with actual HTTP/DB/adapters |
@@ -59,11 +60,12 @@ for the solver, four for direct TTL containment, seven for scopes, eight for
 checked lifetimes, nine for material projection (which rechecks the seven scope
 obligations), and 33 for the conditional complete projection pipeline (which
 rechecks shared scope/material/lifetime obligations), 35 for checked construction
-and its composition with projection (including the 33 pipeline obligations), and
-26 for concrete closure (including the 20 abstract solver obligations). Counts
-include generated obligations and are not independent end-to-end guarantees.
+and its composition with projection (including the 33 pipeline obligations),
+26 for concrete closure (including the 20 abstract solver obligations), and 51 for
+the source-derived BFS (which rechecks those 26). Counts include generated
+obligations and are not independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for twenty-five
+`mise run verification:verus:mutations` also requires proof failures for thirty-three
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a
@@ -73,8 +75,10 @@ terminal nonce and mTLS identity; omit the SSH install contract; emit an unselec
 WireGuard grant; or replace the approved TCP lifetime while collecting inputs.
 Factory mutations drop binding/start checks or permit negative issuance times;
 closure mutations ignore prerequisites, omit mandatory effects or stop before a
-fixed point. These mutations must produce verifier errors, rather than merely parse failures. The
-combined gate includes these checks. Own proof files may not introduce `assume`,
+fixed point. BFS mutations drop final constraints, forbidden-mechanism checks or
+permission checks; use the parent as a visit key; violate FIFO; exceed mechanism or
+state bounds; or fail despite sufficient budget. These mutations must produce
+verifier errors, rather than merely parse failures. The combined gate includes these checks. Own proof files may not introduce `assume`,
 `admit`, or unchecked external bodies/specifications.
 
 The verifier is pinned to
@@ -227,13 +231,11 @@ scoped-ability labels and a finite catalog with unique positional IDs. It proves
   its mechanism bound. The final predicate may require extending a goal-reaching
   state, provided it depends only on the selected set and final abilities.
 
-These are universal Verus theorems about that model, not bounded PBT results. They
-are **not yet a proof of production's concrete BFS**: translating arbitrary Rust
-IDs to positional IDs, queue/frontier order, visited-set admission, search-budget
-accounting and lexicographic tie-breaking
-still require implementation refinement. The PBT reference currently checks the
-concrete implementation against an independent execution model with those runtime
-behaviors; it is evidence of correspondence, not a universal refinement proof.
+These are universal Verus theorems about that model, not bounded PBT results. The
+source-derived concrete closure and BFS units below now connect production value
+operations to it. They are not proofs of Rust collection memory internals, the
+source adapter/compiler transformation or generic trait implementations. Stable
+lexicographic tie-breaking remains checked natively, rather than universally proved.
 
 ## Concrete closure implementation
 
@@ -259,8 +261,67 @@ unsupported changes. The proof is a refinement of that source-derived iterative
 value model, not a verification of BTreeSet memory internals. A direct native
 closure PBT compares it with independent synchronous bitset rounds, including
 empty premises, cycles, reordered rules, idempotence and growth through multiple
-rounds. This closes the concrete closure obligation; queue processing, visited-set
-deduplication and search budgets in the rest of `solve` remain separate work.
+rounds. The BFS proof above uses this closure result for its source node-extension
+and initial-authority semantics.
+
+## Source-derived BFS transitions
+
+`formal/verus/bfs.rs` retains complete mechanism sequences and ability sets in
+queue nodes. Its source adapter copies the production candidate guards, node
+extension, permission pruning, visited admission, state-budget check and FIFO
+insertion. The initial budget/permission checks and loop goal/mechanism guards are
+also copied. Catalog construction and duplicate-ID rejection, empty queue/visited
+initialization, selected-key collection and exhaustion return shape are checked
+against the supported source form. Extra unmodeled statements fail extraction;
+unknown fields in `Mechanism`, `Model`, `Request` or `Plan` require specification
+updates. Native closure calls use the already-proved least-fixed-point result.
+
+A valid BTreeMap catalog is viewed in its iteration order with unique IDs
+injectively relabeled to positions. Ability values are similarly faithful labels.
+The raw ID collector and ID/string/collection representations are trusted value
+adapters, not a new machine proof of BTreeMap or arbitrary Eq/Ord/Clone code.
+`canonical_labels.rs` checks this correspondence natively using arbitrary signed
+mechanism IDs, structured ability labels, reversed catalog/rule insertion order,
+forbidden/required selections, partial and exhaustive budgets, and exact result,
+ability and execution-order equality. The independent exhaustive execution oracle
+remains a separate check, so this metamorphic test is not presented as an oracle
+for algorithm correctness.
+
+The transition proof uses ghost-only expanded states alongside the real queue and
+visited values. Its invariant establishes:
+
+* Every queued node is an executable, authorized execution with no forbidden or
+  repeated mechanism, exact mandatory-closure abilities and bounded length.
+* Visited consists of expanded states and queued selected sets. Every child of a
+  fully expanded state within the mechanism bound has been visited.
+* Expanded states failed the goal/final constraint. Queue lengths are nondecreasing
+  and span at most two adjacent mechanism-count layers.
+* Each admission adds one visited set and one queued node. Popping removes one
+  node. Thus `2 * (budget - visited.len()) + queue.len()` strictly decreases across
+  outer iterations; finite catalog scans are proved by induction.
+
+These facts connect to the independent reachable/execution specification. A goal
+at the queue head has minimum mechanism count; if the queue empties there is no
+valid solution within the mechanism bound. Invalid initial authority also admits
+no valid execution, rather than being silently clipped. `SearchLimit` is never
+interpreted as `NoSolution` or authorization.
+
+A recursively constructed finite state space contains exactly the subsets of the
+`N` mechanism IDs, with cardinality `2^N` (defined by repeated mathematical
+doubling, without machine shift overflow). Each attempted new state is a member
+not already visited. Therefore exhaustion implies `budget < 2^N`; with budget at
+least `2^N`, the algorithm returns a solution exactly when the independent shortest
+specification has one. Under smaller budgets, any returned solution is still
+sound and globally minimum in mechanism count. The sufficient bound is not a
+claim that all instances require that much memory.
+
+The source loop is an ordered recursive fold in proof mode, with faithful queue
+pop/push and set operations, as in the projection proofs. The final predicate must
+be total, pure and depend only on the selected set/final abilities; this is the
+existing solver contract. These are universal statements over arbitrary finite
+catalogs under that value abstraction, not a proof of callback termination or
+allocation success. They do not assert canonical lexicographic tie-breaking; native
+oracle and canonical-label PBT continue to fix the existing deterministic behavior.
 
 ## Solver specification boundary
 

@@ -2,7 +2,7 @@
 import unittest
 from verus_sources import (block, inject, scopes_source, projection_source, checked_declaration,
                            contract_values, result_calls, authorized_source, factory_source, closure_source,
-                           check_private_plan_declaration, ROOT)
+                           check_private_plan_declaration, ROOT, bfs_source)
 
 
 class SourceExtraction(unittest.TestCase):
@@ -65,6 +65,15 @@ class SourceExtraction(unittest.TestCase):
         self.assertIn("pub proof fn checked_factory_then_projection", factory_source())
         self.assertIn("decreases universe.len() - seed.len()", closure_source())
         self.assertNotIn("/* PRODUCTION_", closure_source())
+
+    def test_bfs_view_covers_queue_budget_candidates_and_complete_return_boundary(self):
+        bfs = bfs_source()
+        for fragment in ["pub proof fn solve_canonical", "pub proof fn full_budget_completeness",
+                         "queue = queue.push(next)", "visited = visited.insert(next_selected)",
+                         "c.goals.subset_of(plan.abilities) && (c.accepts)(key(plan), plan.abilities)",
+                         "capacity_at_failure(c, budget, visited, next_selected)"]:
+            self.assertIn(fragment, bfs)
+        self.assertNotIn("/* PRODUCTION_", bfs)
 
     def test_source_correspondence_includes_material_and_binding_guards(self):
         scope = scopes_source()

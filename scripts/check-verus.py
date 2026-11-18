@@ -12,7 +12,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-from verus_sources import scopes_source, expiry_source, projection_source, authorized_source, factory_source, closure_source
+from verus_sources import scopes_source, expiry_source, projection_source, authorized_source, factory_source, closure_source, bfs_source
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "0.2026.11.02.8bf68ee"
@@ -141,6 +141,8 @@ def main():
     verify(binary, env, "checked_plan_factory", factory, minimum=35)
     concrete_closure = closure_source()
     verify(binary, env, "concrete_closure", concrete_closure, minimum=26)
+    bfs = bfs_source()
+    verify(binary, env, "concrete_bfs", bfs, minimum=51)
     if args.mutations:
         mutations = [
             ("widened_deadline", validity, "other.expires_at <= self.expires_at", "other.expires_at >= self.expires_at"),
@@ -169,6 +171,14 @@ def main():
             ("closure_ignores_prerequisites", concrete_closure, "if rule.requires.subset_of(abilities) {", "if true {"),
             ("closure_omits_effects", concrete_closure, "abilities = abilities.union(rule.provides);", "abilities = abilities;"),
             ("closure_stops_early", concrete_closure, "if abilities.len() == count {", "if true {"),
+            ("bfs_ignores_constraints", bfs, "c.goals.subset_of(plan.abilities) && (c.accepts)(key(plan), plan.abilities)", "c.goals.subset_of(plan.abilities)"),
+            ("bfs_ignores_forbidden", bfs, "|| c.forbidden.contains(id as nat)", "|| false"),
+            ("bfs_ignores_permissions", bfs, "if !next.abilities.subset_of(c.permitted) {", "if false {"),
+            ("bfs_reuses_parent_as_visit_key", bfs, "if visited.contains(next_selected) {", "if visited.contains(selected) {"),
+            ("bfs_violates_fifo", bfs, "queue = queue.push(next);", "queue = seq![next] + queue;"),
+            ("bfs_exceeds_mechanism_bound", bfs, "if plan.mechanisms.len() >= bound {", "if plan.mechanisms.len() > bound {"),
+            ("bfs_exceeds_state_budget", bfs, "if visited.len() >= budget {", "if visited.len() > budget {"),
+            ("bfs_fails_with_sufficient_budget", bfs, "if visited.len() >= budget {", "if true {"),
         ]
         for name, source, before, after in mutations:
             if source.count(before) != 1:

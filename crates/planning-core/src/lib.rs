@@ -75,7 +75,7 @@ fn closure<A: Ord + Clone>(abilities: &mut BTreeSet<A>, derivations: &[Derivatio
 /// Finds a plan with the fewest mechanisms, with stable id order breaking ties.
 ///
 /// `satisfies` checks final constraints and may reject a goal-reaching plan while
-/// allowing a larger plan. It must be pure and depend only on the selected set
+/// allowing a larger plan. It must terminate, be pure, and depend only on the selected set
 /// and abilities, not execution order. Effects must be monotone and complete:
 /// deletions, mutable external facts and undeclared side effects are not modeled.
 ///

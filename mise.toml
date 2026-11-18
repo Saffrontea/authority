@@ -306,7 +306,7 @@ description = "Install pinned Verus and its private Rust toolchain, then verify 
 run = "python3 ./scripts/check-verus.py --install"
 
 [tasks."verification:verus"]
-description = "Prove solver, scope, lifetime and complete conditional projection pipeline with Verus"
+description = "Prove source-derived BFS, scope, lifetime and checked projection pipeline with Verus"
 run = "python3 ./scripts/check-verus.py"
 
 [tasks."verification:verus:mutations"]

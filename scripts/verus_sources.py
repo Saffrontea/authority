@@ -465,3 +465,93 @@ def closure_source():
         "PRODUCTION_RULE_APPLICATION": step,
         "PRODUCTION_CLOSURE_STOP": condition,
     })
+
+
+def bfs_source():
+    source = (ROOT / "crates/planning-core/src/lib.rs").read_text()
+    for name, fields in {
+        "Mechanism<A, M>": {"id": "M", "requires": "BTreeSet<A>", "provides": "BTreeSet<A>"},
+        "Model<A, M>": {"mechanisms": "Vec<Mechanism<A, M>>", "derivations": "Vec<Derivation<A>>"},
+        "Request<A, M>": {"goals": "BTreeSet<A>", "available": "BTreeSet<A>", "permitted": "BTreeSet<A>",
+            "forbidden_mechanisms": "BTreeSet<M>", "max_mechanisms": "usize", "max_states": "usize"},
+        "Plan<A, M>": {"mechanisms": "Vec<M>", "abilities": "BTreeSet<A>"},
+    }.items():
+        checked_declaration(source, name, fields)
+    _, solver = block(source, "pub fn solve<A: Ord + Clone, M: Ord + Clone>(")
+    header = "for (id, mechanism) in &catalog {"
+    _, expansion = block(solver, header)
+    opening = expansion.index("let mut next = plan.clone();")
+    end = expansion.index("if !next.abilities.is_subset(&request.permitted)", opening)
+    native_next = expansion[opening:end]
+    expected_next = '''let mut next = plan.clone();
+            next.mechanisms.push(id.clone());
+            next.abilities.extend(mechanism.provides.iter().cloned());
+            closure(&mut next.abilities, &model.derivations);'''
+    if re.sub(r"\s+", "", native_next) != re.sub(r"\s+", "", expected_next):
+        raise SystemExit("next-node data construction changed; extend source refinement")
+    next_body = native_next.replace("plan.clone()", "plan")
+    next_body = next_body.replace("next.mechanisms.push(id.clone());", "next.mechanisms = next.mechanisms.push(id as nat);")
+    next_body = next_body.replace("next.abilities.extend(mechanism.provides.iter().cloned());", "next.abilities = next.abilities.union(mechanism.provides);")
+    next_body = next_body.replace("closure(&mut next.abilities, &model.derivations);", "next.abilities = closure(c.derivations, next.abilities);")
+    expansion = expansion[:opening] + "let next = extend_node(c, plan, id);\n" + expansion[end:]
+    expansion = expansion.replace("selected.contains(id)", "selected.contains(id as nat)")
+    expansion = expansion.replace("request.forbidden_mechanisms.contains(id)", "c.forbidden.contains(id as nat)")
+    expansion = expansion.replace(".is_subset(&plan.abilities)", ".subset_of(plan.abilities)")
+    expansion = expansion.replace("let mut next_selected = selected.clone();\n            next_selected.insert(id.clone());", "let next_selected = selected.insert(id as nat);")
+    expansion = expansion.replace("visited.contains(&next_selected)", "visited.contains(next_selected)")
+    expansion = expansion.replace("next.abilities.is_subset(&request.permitted)", "next.abilities.subset_of(c.permitted)")
+    expansion = expansion.replace("request.max_states", "budget").replace("PlanningError::", "SearchFailure::")
+    expansion = expansion.replace("visited.insert(next_selected);", "visited = visited.insert(next_selected);")
+    expansion = expansion.replace("queue.push_back(next);", "queue = queue.push(next);")
+    expansion = expansion.replace("continue;", "return Ok(SearchState { queue, visited, done: before.done });")
+    expansion = expansion.replace("return Err(SearchFailure::SearchLimit);",
+        "node_representation(c, next); capacity_at_failure(c, budget, visited, next_selected); return Err(SearchFailure::SearchLimit);")
+    _, queue_loop = block(solver, "while let Some(plan) = queue.pop_front() {")
+    goal_match = re.match(r"\s*if (.*?)\s*\{\s*return Ok\(plan\);\s*\}\s*if (.*?)\s*\{\s*continue;\s*\}", queue_loop, re.DOTALL)
+    if not goal_match:
+        raise SystemExit("BFS goal/bound guards changed; extend proof lift")
+    goal_guard = goal_match[1].replace("request.goals.is_subset(&plan.abilities)", "c.goals.subset_of(plan.abilities)")
+    goal_guard = goal_guard.replace("satisfies(&plan)", "(c.accepts)(key(plan), plan.abilities)")
+    bound_guard = goal_match[2].replace("request.max_mechanisms", "bound")
+    prefix = solver[:solver.index("while let Some(plan)")]
+    map_end = prefix.index("if request.max_states")
+    expected_map = """let catalog: BTreeMap<_, _> = model.mechanisms.iter().map(|mechanism| (mechanism.id.clone(), mechanism)).collect();
+        if catalog.len() != model.mechanisms.len() { return Err(PlanningError::DuplicateMechanism); }"""
+    if re.sub(r"\s+", "", prefix[:map_end]) != re.sub(r"\s+", "", expected_map):
+        raise SystemExit("catalog construction/duplicate guard changed; extend value-view proof")
+    budget_match = re.search(r"if (.*?)\s*\{\s*return Err\(PlanningError::SearchLimit\);\s*\}", prefix[map_end:], re.DOTALL)
+    if not budget_match:
+        raise SystemExit("initial budget guard changed")
+    zero_budget = budget_match[1].replace("request.max_states", "budget")
+    initial = re.search(r"let mut initial = request.available.clone\(\);\s*closure\(&mut initial, &model.derivations\);\s*if (.*?)\s*\{\s*return Err\(PlanningError::NoSolution\);\s*\}", prefix, re.DOTALL)
+    if not initial:
+        raise SystemExit("initial authority closure/permission boundary changed")
+    if prefix[map_end + budget_match.end():initial.start()].strip():
+        raise SystemExit("unmodeled statements before initial closure")
+    initial_guard = initial[1].replace("initial.is_subset(&request.permitted)", "initial.subset_of(c.permitted)")
+    initialization = prefix[initial.end():].strip()
+    expected_init = """let mut queue = VecDeque::from([Plan { mechanisms: Vec::new(), abilities: initial, }]);
+        let mut visited = BTreeSet::from([BTreeSet::<M>::new()]);"""
+    if re.sub(r"\s+", "", initialization) != re.sub(r"\s+", "", expected_init):
+        raise SystemExit("BFS queue/visited initialization changed; extend proof")
+    # Every remaining loop statement and terminal boundary must be consumed.
+    remainder = queue_loop[goal_match.end():]
+    before_expand = remainder[:remainder.index(header)]
+    expected_selected = "let selected: BTreeSet<_> = plan.mechanisms.iter().cloned().collect();"
+    if re.sub(r"\s+", "", before_expand) != re.sub(r"\s+", "", expected_selected):
+        raise SystemExit("BFS selected-state key construction changed")
+    loop_open = solver.index("{", solver.index("while let Some(plan)"))
+    loop_end = delimiter_end(solver, loop_open)
+    if re.sub(r"\s+", "", solver[loop_end:]) != "Err(PlanningError::NoSolution)":
+        raise SystemExit("BFS exhaustion boundary changed")
+    expand_pos = remainder.index(header)
+    expand_end = delimiter_end(remainder, remainder.index("{", expand_pos))
+    if remainder[expand_end:].strip():
+        raise SystemExit("unmodeled statements after BFS expansion")
+    return closure_source() + inject((ROOT / "formal/verus/bfs.rs").read_text(), {
+        "PRODUCTION_EXTEND_NODE": next_body, "PRODUCTION_EXPAND_ONE": expansion,
+        "PRODUCTION_GOAL_GUARD": goal_guard, "PRODUCTION_BOUND_GUARD": bound_guard,
+        "PRODUCTION_INITIAL_QUEUE": "seq![SearchNode { mechanisms: Seq::empty(), abilities: initial }]",
+        "PRODUCTION_INITIAL_VISITED": "Set::<Set<nat>>::empty().insert(Set::<nat>::empty())",
+        "PRODUCTION_ZERO_BUDGET_GUARD": zero_budget, "PRODUCTION_INITIAL_PERMISSION_GUARD": initial_guard,
+    })
