@@ -445,6 +445,18 @@ BEGIN
         OR scoped.ability #> '{scope,destination}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,destination_address}'
         OR scoped.ability #> '{validity,expires_at}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,expires_at}')
   ) THEN RAISE EXCEPTION 'issued TCP grant differs from scoped plan'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM policy.revocation_notices n
+    JOIN outbox.events p ON p.aggregate_id = n.decision_id
+      AND p.event_type = 'policy.plan.evaluated'
+      AND p.payload #>> '{planning,binding,subject_user_id}' = actor
+    WHERE (SELECT count(*) FROM audit.events a WHERE a.actor_id = actor
+      AND a.action = 'access.revoke' AND a.target_id = n.decision_id
+      AND a.payload = n.envelope) <> 1
+      OR (SELECT count(*) FROM outbox.events e WHERE e.aggregate_id = n.decision_id
+      AND e.event_type = 'access.authorization.revoked' AND e.contract_version = 1
+      AND e.payload = n.envelope) <> 1
+  ) THEN RAISE EXCEPTION 'revocation notice/audit/outbox mismatch or duplicate'; END IF;
 END
 $checks$;
 WITH latest AS (

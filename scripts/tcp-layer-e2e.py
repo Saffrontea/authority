@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise signed TCP derivation and real kernel enforcement over the mesh."""
 import copy
+import importlib.util
 import json
 import os
+from pathlib import Path
 import socket
 import subprocess
 import sys
@@ -46,9 +48,9 @@ def revoke(decision, kinds):
                    [decision, kinds])['value']
 
 
-def connect(port):
-    stream = socket.create_connection((client, port), timeout=1)
-    stream.settimeout(1)
+def connect(port, timeout=1):
+    stream = socket.create_connection((client, port), timeout=timeout)
+    stream.settimeout(timeout)
     return stream
 
 
@@ -57,9 +59,9 @@ def echo(stream):
     assert stream.recv(64) == b'TCP_ADMISSION_OK', 'echo did not arrive'
 
 
-def allowed(port):
+def allowed(port, timeout=1):
     try:
-        with connect(port) as stream:
+        with connect(port, timeout) as stream:
             echo(stream)
         return True
     except (OSError, AssertionError):
@@ -231,3 +233,10 @@ wait(lambda: subprocess.run(['mise', 'run', 'mesh:verify'], stdout=subprocess.DE
 print('Automatic TCP planning: proof-bound mode, '
       + ('WireGuard fallback' if expect_network else 'declared existing route')
       + ', selected-port enforcement and revocation verified', flush=True)
+
+# Run generated traces after fixed UI/protocol regressions have retired their leases.
+trace_spec = importlib.util.spec_from_file_location(
+    'lifecycle_trace_e2e', Path(__file__).with_name('lifecycle-trace-e2e.py'))
+trace_module = importlib.util.module_from_spec(trace_spec)
+trace_spec.loader.exec_module(trace_module)
+trace_module.run(issue, revoke, http, wait, allowed, agent, control)

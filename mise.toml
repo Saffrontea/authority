@@ -95,6 +95,10 @@ run = "./scripts/authority-agent.sh run _mesh:verify"
 description = "Build and install the signed-grant network agent in the target LXC"
 run = "cargo build --offline -p authority-network-agent && ./scripts/authority-agent.sh run _mesh:agent-install"
 
+[tasks."mesh:agent:restart"]
+description = "Restart the target network agent with its durable ledgers retained"
+run = "./scripts/authority-agent.sh run _mesh:agent-restart"
+
 [tasks."mesh:agent:status"]
 description = "Show the target LXC network-agent status"
 run = "./scripts/authority-agent.sh run _mesh:agent-status"
@@ -184,6 +188,10 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh verify"
 [tasks."_mesh:agent-install"]
 description = "Internal: install the network agent in the target LXC"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-install"
+
+[tasks."_mesh:agent-restart"]
+description = "Internal: restart the target network agent"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-restart"
 
 [tasks."_mesh:agent-status"]
 description = "Internal: show the target LXC network-agent status"

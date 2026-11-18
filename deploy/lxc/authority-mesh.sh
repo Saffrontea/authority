@@ -41,6 +41,7 @@ Commands:
   verify    Ping the target over WireGuard and require a handshake
   agent-install Install and start the network-agent in authority-target
   agent-status  Show network-agent service status and endpoint
+  agent-restart Restart the existing network-agent and reset client handshake
   tcp-demo-install Install the two TCP admission E2E services
   client-reconnect Reset only the client cached WireGuard transport
   stop      Gracefully stop both containers
@@ -567,6 +568,10 @@ main() {
     verify) verify_mesh ;;
     agent-install) install_network_agent ;;
     agent-status) network_agent_status ;;
+    agent-restart)
+      attach "${TARGET_NAME}" systemctl restart authority-network-agent.service
+      reconnect_client
+      ;;
     tcp-demo-install) install_tcp_demo ;;
     client-reconnect) reconnect_client ;;
     stop) stop_containers ;;

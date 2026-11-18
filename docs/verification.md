@@ -16,8 +16,8 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
-| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; separate peer lifecycle safety with expiry/GC, replacement and receiver restart; counterexample mutations | Generated lifecycle traces through actual HTTP/DB/adapters; lifecycle liveness/refinement |
-| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; durable ledger, all-scope authority and contract-time PBT | Generated end-to-end action traces compared with the formal transition model |
+| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; separate peer lifecycle safety with expiry/GC, replacement and receiver restart; counterexample mutations; generated live-binding system traces | Arbitrary lifecycle trace generation and refinement |
+| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live-binding HTTP/DB/TCP/WG traces; native authority/time/durable-state PBT | Generated expiry/crash/kernel-failure actions and broader arbitrary trace coverage |
 
 ## Reproducible checks
 
@@ -413,6 +413,61 @@ The lifecycle model is a safety model without fairness/liveness claims. It does
 not promise immediate WG traffic denial at the deadline during scheduler stalls,
 crashes or kernel failure. TCP expiry is independently enforced by nft timeouts.
 Both models assume verified immutable decision/expiry bindings and trusted clock
-semantics; the lifecycle model does not include TCP's overlapping rules. Generated
-traces through real HTTP, DB, restart and kernel failure remain required work.
-These mappings and tests are not a machine-checked refinement proof.
+semantics; the lifecycle model does not include TCP's overlapping rules. The
+generated E2E traces below exercise real HTTP, DB, adapter restart and kernel
+admission. Generated expiry/crash/kernel-command-failure actions remain work;
+existing deterministic E2E covers independent expiry. These mappings and tests are
+not a machine-checked refinement proof.
+
+## Generated HTTP / DB / kernel correspondence traces
+
+`mise run poc:e2e` runs `scripts/lifecycle-trace-e2e.py` after its fixed browser,
+SSH, scope and expiry regressions. By default seeds `0,7,42` vary service scopes,
+publication order, duplicate count and replay order in a constrained lifecycle
+scenario. Each trace issues fresh signed contracts through device-authenticated
+browser requests, then drives the actual HTTP receiver and compares port admission
+with an independent set oracle using the transitions of `Revocation.tla`.
+
+The oracle tracks `published`, `consumed`, `active`, `tombstones` and `completed`
+per decision/adapter. It distinguishes TCP authority from the independent WG peer
+and overlapping TCP grants. Both managed TCP ports are probed after observable
+operations. The trace rejects a run that exceeds its live-grant window, so expiry
+cannot masquerade as successful revocation. It checks:
+
+- committed notices pulled from the real DB retain their signed envelopes and
+  monotonically paginated sequence numbers;
+- a newer notice delivered before an older notice cannot suppress the older
+  decision's revocation, and duplicate delivery is idempotent;
+- revocation before consumption blocks a late grant; consumed grants reject
+  replay; modified service scopes reject the original signature;
+- revoking one TCP scope preserves another scope and WG transport;
+- restarting the real systemd receiver clears installed authority while keeping
+  durable replay/tombstone ledgers; restoring only WG still denies TCP, and a
+  fresh TCP decision restores only its selected service;
+- automatic delivery retries after HTTP 503 and removes an installed scope;
+  repeated publication returns its original notice/sequence;
+- WG removal is observed independently with the real mesh connectivity probe.
+
+An E2E-only loopback proxy (`scripts/revocation-delivery-proxy.py`) forwards the
+control plane's normal receiver traffic and temporarily returns HTTP 503 for
+revocations. It records rejected sequence numbers so the retry test confirms its
+particular notice encountered a real 503 before resuming delivery. Its block ACK
+waits for earlier forwards to finish. Direct requests
+use the original LXC receiver, so delivery order is controlled without changing
+production services or adding a production fault-injection switch. The runner
+starts/stops the proxy and removes its temporary endpoint file. The DB gate also
+checks each tested decision's stored notice has exactly one matching audit and
+outbox record, including repeated publication.
+
+`AUTHORITY_E2E_TRACE_SEEDS=7 mise run poc:e2e` reproduces one seed; use a comma
+separated list for more cases. `AUTHORITY_E2E_TRACE_FILE` selects the JSON artifact,
+otherwise the path is `/tmp/authority-lifecycle-traces-<pid>.json`. The artifact
+contains symbolic decisions, scopes, operations and expected/actual port results,
+without signed envelopes or credentials. It is written even on failure.
+
+These are generated integration tests over a constrained scenario, not exhaustive
+traces, an arbitrary-interleaving theorem or a proved refinement. Receiver restart
+is a graceful systemd restart, not power loss. HTTP delivery failures are real;
+kernel-command failures remain simulated in native expiry PBT. Expiry/GC and crash
+actions are not generated here, and liveness remains conditional on eventual
+successful delivery and kernel operations.

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 poc_pid=''
+proxy_pid=''
+proxy_directory=''
 cleaned_up=0
 
 mesh_status="$(mise run mesh:status)"
@@ -14,7 +16,7 @@ client_underlay="$(printf '%s\n' "${mesh_status}" | awk '/^authority-client:/ { 
     exit 1
 }
 AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
-AUTHORITY_NETWORK_GRANT_TTL_SECONDS=25
+AUTHORITY_NETWORK_GRANT_TTL_SECONDS=40
 AUTHORITY_SSH_AUTHORIZATION_TTL_SECONDS=15
 AUTHORITY_BIND=127.0.0.1:3100
 AUTHORITY_RP_ORIGIN=http://localhost:3100
@@ -36,6 +38,11 @@ export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NO
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1
+    if [[ -n "${proxy_pid}" ]]; then
+        kill "${proxy_pid}" 2>/dev/null || true
+        wait "${proxy_pid}" 2>/dev/null || true
+    fi
+    [[ -z "${proxy_directory}" ]] || rm -rf -- "${proxy_directory}"
     [[ -n "${poc_pid}" ]] || return 0
 
     # run-poc owns a separate session/process group. Stop cargo wrappers and
@@ -59,6 +66,22 @@ on_signal() {
 
 trap cleanup EXIT
 trap on_signal INT TERM
+
+# Only the E2E control plane uses this fault-injection proxy. Direct adapter
+# requests retain the real LXC origin, allowing deliberate delivery order.
+proxy_directory="$(mktemp -d /tmp/authority-delivery-proxy.XXXXXX)"
+python3 "${SCRIPT_DIR}/revocation-delivery-proxy.py" \
+    "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}" "${proxy_directory}/origin" &
+proxy_pid=$!
+for _ in {1..100}; do
+    [[ -s "${proxy_directory}/origin" ]] && break
+    kill -0 "${proxy_pid}" 2>/dev/null || exit 1
+    sleep 0.05
+done
+[[ -s "${proxy_directory}/origin" ]] || exit 1
+AUTHORITY_NETWORK_AGENT_ORIGIN="$(<"${proxy_directory}/origin")"
+AUTHORITY_E2E_DELIVERY_PROXY="${AUTHORITY_NETWORK_AGENT_ORIGIN}"
+export AUTHORITY_NETWORK_AGENT_ORIGIN AUTHORITY_E2E_DELIVERY_PROXY
 
 mise run mesh:tcp-demo:install
 
