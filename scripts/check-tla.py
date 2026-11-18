@@ -48,13 +48,36 @@ def main():
         fairness = "        /\\ \\A p \\in Pairs: WF_vars(Persist(p)) /\\ WF_vars(Complete(p))"
         assert source.count(fairness) == 1
         models.append(("delivery-without-fairness", source.replace(fairness, ""), "EventuallyRevoked"))
+    lifecycle = (ROOT / "formal/tla/PeerLifecycle.tla").read_text()
+    lifecycle_config = (ROOT / "formal/tla/PeerLifecycle.cfg").read_text()
+    models.append(("peer-lifecycle", lifecycle, None))
+    models.append(("peer-lifecycle-same-deadline", lifecycle, None))
+    if args.mutations:
+        guard = "Apply(d) == /\\ ready /\\ Live(d)"
+        assert lifecycle.count(guard) == 1
+        models.append(("expired-grant-after-gc", lifecycle.replace(guard,
+            "Apply(d) == /\\ ready"), "NoResurrection"))
+        cleanup = "kernel' = IF registry = d THEN None ELSE kernel"
+        assert lifecycle.count(cleanup) == 2
+        # Mutate only timer cleanup; revocation cleanup keeps its identity guard.
+        before, expiry = lifecycle.split("Expire(d) ==", 1)
+        models.append(("stale-timer-removes-replacement", before + "Expire(d) ==" +
+            expiry.replace(cleanup, "kernel' = None", 1), "RegistryTracksKernel"))
+        restart = "Restart == /\\ ~ready /\\ ready' = TRUE /\\ kernel' = None"
+        assert lifecycle.count(restart) == 1
+        models.append(("restart-without-cleanup", lifecycle.replace(restart,
+            "Restart == /\\ ~ready /\\ ready' = TRUE /\\ UNCHANGED kernel"), "RegistryTracksKernel"))
     for name, model, expected_failure in models:
         with tempfile.TemporaryDirectory(prefix="authority-tlc-") as directory:
             directory = Path(directory)
-            (directory / "Revocation.tla").write_text(model)
-            (directory / "Revocation.cfg").write_text(config)
+            module = "PeerLifecycle" if "MODULE PeerLifecycle" in model else "Revocation"
+            (directory / f"{module}.tla").write_text(model)
+            selected_config = lifecycle_config if module == "PeerLifecycle" else config
+            if name == "peer-lifecycle-same-deadline":
+                selected_config = selected_config.replace("LateDeadline = 3", "LateDeadline = 2")
+            (directory / f"{module}.cfg").write_text(selected_config)
             result = subprocess.run([java, "-XX:+UseParallelGC", "-jar", str(jar.resolve()),
-                "-workers", "2", "-metadir", str(directory / "states"), "Revocation.tla"],
+                "-workers", "2", "-metadir", str(directory / "states"), f"{module}.tla"],
                 cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 timeout=180)
             if expected_failure:

@@ -16,7 +16,7 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
-| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters, plus safety and liveness mutations | Expiry, receiver restart and kernel failure/recovery model; trace correspondence with actual HTTP/DB/adapters |
+| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; separate peer lifecycle safety with expiry/GC, replacement and receiver restart; counterexample mutations | Generated lifecycle traces through actual HTTP/DB/adapters; lifecycle liveness/refinement |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; durable ledger, all-scope authority and contract-time PBT | Generated end-to-end action traces compared with the formal transition model |
 
 ## Reproducible checks
@@ -384,6 +384,35 @@ successful cleanup. Publishing a notice remotely is not immediate enforcement.
 Eventual completion requires weak fairness for delivery/persistence and successful
 cleanup for each published binding. This assumption means failures eventually
 permit progress; the implementation cannot guarantee it during a permanent
-partition or permanent adapter failure. No time bound, receiver restart safety,
-expired-tombstone safety or arbitrary-size universal theorem is claimed by this
-finite model. Those remain explicit work items before the full goal is complete.
+partition or permanent adapter failure. No time bound or arbitrary-size universal theorem is claimed by this finite model.
+
+`formal/tla/PeerLifecycle.tla` separately checks a single shared peer with two
+immutable decisions, both staggered and equal deadlines. Its clock advances
+monotonically; expired durable replay/tombstone records may be garbage collected.
+It covers replacement, stale expiry tasks, burned nonces, revocation completion,
+receiver crashes and clearing kernel state before the restarted HTTP receiver is
+ready. Failures stutter; registry state is retained until kernel cleanup succeeds.
+The checked invariants require registry/kernel agreement while ready, no cleanup
+of a different decision, no resurrection after completed revocation, and durable
+tombstones for completed decisions while still live. Mutations must expose expired
+grant resurrection after GC, stale timer deletion, and restart without cleanup.
+
+The actual expiry helper holds the policy mutex through its identity check,
+kernel callback and registry deletion. A failed callback retains the registry and
+the timer retries every second. The deadline uses a monotonic instant captured
+before lock contention and kernel installation; grant validity is checked again
+under the lock for both WG and TCP. A deterministic test checks that the mutex
+is unavailable inside the kernel callback and failed cleanup can be retried.
+Native PBT generates installation/replacement, stale/current timers, failures,
+retries and clean restarts against an independent optional-binding oracle. It
+calls the production expiry helper with a simulated kernel; restart/install steps
+model the real ordering but do not execute `/usr/bin/wg` or HTTP. This suite is
+included in `verification:pbt`.
+
+The lifecycle model is a safety model without fairness/liveness claims. It does
+not promise immediate WG traffic denial at the deadline during scheduler stalls,
+crashes or kernel failure. TCP expiry is independently enforced by nft timeouts.
+Both models assume verified immutable decision/expiry bindings and trusted clock
+semantics; the lifecycle model does not include TCP's overlapping rules. Generated
+traces through real HTTP, DB, restart and kernel failure remain required work.
+These mappings and tests are not a machine-checked refinement proof.

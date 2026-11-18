@@ -87,17 +87,28 @@ impl PolicyState {
             .iter()
             .find_map(|(peer, active)| (active.decision_id == decision_id).then(|| peer.clone()))
     }
+}
 
-    fn remove_if_current(&mut self, peer: &str, decision_id: &str, expires_at: i64) -> bool {
-        if self.active_peers.get(peer).is_some_and(|active| {
-            active.decision_id == decision_id && active.expires_at == expires_at
-        }) {
-            self.active_peers.remove(peer);
-            true
-        } else {
-            false
-        }
+/// Serialize the identity check, kernel mutation and registry update with grant
+/// installation. Failed kernel operations keep the binding available for retry.
+fn expire_peer_if_current(
+    state: &Mutex<PolicyState>,
+    peer: &str,
+    decision_id: &str,
+    expires_at: i64,
+    remove: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    let mut policy = state.lock().map_err(|cause| cause.to_string())?;
+    if !policy
+        .active_peers
+        .get(peer)
+        .is_some_and(|active| active.decision_id == decision_id && active.expires_at == expires_at)
+    {
+        return Ok(false);
     }
+    remove()?;
+    policy.active_peers.remove(peer);
+    Ok(true)
 }
 
 struct NodeIdentity {
@@ -146,6 +157,90 @@ mod revocation_tests {
         assert!(!state.is_revoked("decision", 200));
     }
 
+    proptest::proptest! {
+        #[test]
+        fn generated_expiry_traces_match_kernel_and_registry(
+            actions in proptest::collection::vec((0_u8..4, 0_u8..4, 0_i64..3, proptest::bool::ANY), 1..128)
+        ) {
+            let state = Mutex::new(PolicyState::default());
+            let mut kernel = None;
+            let mut expected = None;
+            for (action, decision, expiry, success) in actions {
+                let binding = (decision.to_string(), expiry);
+                match action {
+                    0 => {
+                        // Grant installation holds this same mutex through kernel update.
+                        let mut policy = state.lock().unwrap();
+                        kernel = Some(binding.clone());
+                        policy.active_peers.insert("peer".into(), ActivePeer {
+                            decision_id: binding.0.clone(), expires_at: expiry,
+                        });
+                        expected = Some(binding);
+                    }
+                    1 | 2 => {
+                        let matches = expected.as_ref() == Some(&binding);
+                        let result = expire_peer_if_current(&state, "peer", &binding.0, expiry, || {
+                            assert!(matches!(state.try_lock(), Err(std::sync::TryLockError::WouldBlock)));
+                            if success { kernel = None; Ok(()) } else { Err("kernel failure".into()) }
+                        });
+                        let oracle = if matches {
+                            if success { expected = None; Ok(true) } else { Err("kernel failure".into()) }
+                        } else { Ok(false) };
+                        proptest::prop_assert_eq!(result, oracle);
+                    }
+                    _ => {
+                        // Startup clears kernel state before serving after a restart.
+                        kernel = None;
+                        state.lock().unwrap().active_peers.clear();
+                        expected = None;
+                    }
+                }
+                let actual = state.lock().unwrap().active_peers.get("peer")
+                    .map(|active| (active.decision_id.clone(), active.expires_at));
+                proptest::prop_assert_eq!(&actual, &expected);
+                proptest::prop_assert_eq!(&kernel, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_holds_the_lock_and_retains_failed_cleanup_for_retry() {
+        let state = Mutex::new(PolicyState::default());
+        state.lock().unwrap().active_peers.insert(
+            "peer".into(),
+            ActivePeer {
+                decision_id: "decision".into(),
+                expires_at: 200,
+            },
+        );
+        let failure = expire_peer_if_current(&state, "peer", "decision", 200, || {
+            assert!(matches!(
+                state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ));
+            Err("kernel unavailable".into())
+        });
+        assert_eq!(failure, Err("kernel unavailable".into()));
+        assert!(state.lock().unwrap().active_peers.contains_key("peer"));
+        assert!(
+            expire_peer_if_current(&state, "peer", "decision", 200, || {
+                assert!(matches!(
+                    state.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ));
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert!(!state.lock().unwrap().active_peers.contains_key("peer"));
+        assert!(
+            !expire_peer_if_current(&state, "peer", "decision", 200, || {
+                panic!("completed cleanup must be idempotent")
+            })
+            .unwrap()
+        );
+    }
+
     #[test]
     fn old_expiry_cannot_remove_a_replacement_grant_with_the_same_deadline() {
         let mut state = PolicyState::default();
@@ -156,9 +251,15 @@ mod revocation_tests {
                 expires_at: 200,
             },
         );
-        assert!(!state.remove_if_current("peer", "old-decision", 200));
-        assert!(state.active_peers.contains_key("peer"));
-        assert!(state.remove_if_current("peer", "new-decision", 200));
+        let state = Mutex::new(state);
+        assert!(
+            !expire_peer_if_current(&state, "peer", "old-decision", 200, || {
+                panic!("stale timer must not touch the kernel")
+            })
+            .unwrap()
+        );
+        assert!(state.lock().unwrap().active_peers.contains_key("peer"));
+        assert!(expire_peer_if_current(&state, "peer", "new-decision", 200, || Ok(())).unwrap());
     }
 }
 
@@ -308,12 +409,24 @@ async fn apply_grant(
     let now = unix_timestamp().map_err(ApiError::internal)?;
     verify_network_grant_for_node(&envelope, &state.0.verifier, &state.0.node_id, now)
         .map_err(|cause| ApiError::unauthorized("invalid_network_grant", cause))?;
+    // Capture the monotonic deadline before lock contention and kernel work so
+    // processing time does not extend the grant's lifetime.
+    let delay = u64::try_from(envelope.grant.expires_at.saturating_sub(now)).unwrap_or(0);
+    let expiry_deadline = tokio::time::Instant::now() + Duration::from_secs(delay);
     let peer = envelope.grant.wireguard_public_key.clone();
     let allowed_ip = format!("{}/32", envelope.grant.mesh_address);
     // Keep the peer registry locked from the capacity decision through the
     // successful kernel update and insertion. Otherwise concurrent grants can
     // both observe a free slot and exceed the configured bound.
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
+    let now = unix_timestamp().map_err(ApiError::internal)?;
+    if now < envelope.grant.not_before || now >= envelope.grant.expires_at {
+        return Err(ApiError::unauthorized(
+            "invalid_network_grant",
+            "grant expired while awaiting policy lock",
+        ));
+    }
+
     if policy.is_revoked(&envelope.grant.nonce, now)
         || state
             .0
@@ -360,23 +473,26 @@ async fn apply_grant(
     drop(policy);
     let interface = state.0.interface.clone();
     let expiry_state = state.clone();
-    let delay = u64::try_from(expires_at.saturating_sub(now)).unwrap_or(0);
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(delay)).await;
-        let should_remove = expiry_state
-            .0
-            .policy_state
-            .lock()
-            .map_or(true, |mut policy| {
-                policy.remove_if_current(&peer, &decision_id, expires_at)
-            });
-        if !should_remove {
-            return;
-        }
-        if let Err(cause) = run_wg(&["set", &interface, "peer", &peer, "remove"]) {
-            error!(%cause, %peer, "failed to expire WireGuard peer");
-        } else {
-            info!(%peer, "expired WireGuard peer");
+        tokio::time::sleep_until(expiry_deadline).await;
+        loop {
+            match expire_peer_if_current(
+                &expiry_state.0.policy_state,
+                &peer,
+                &decision_id,
+                expires_at,
+                || run_wg(&["set", &interface, "peer", &peer, "remove"]),
+            ) {
+                Ok(false) => return,
+                Ok(true) => {
+                    info!(%peer, "expired WireGuard peer");
+                    return;
+                }
+                Err(cause) => {
+                    error!(%cause, %peer, "failed to expire WireGuard peer; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
         }
     });
 
@@ -595,6 +711,14 @@ async fn apply_tcp_grant(
     )
     .map_err(|cause| ApiError::unauthorized("invalid_tcp_grant", cause))?;
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
+    let now = unix_timestamp().map_err(ApiError::internal)?;
+    if now < envelope.grant.not_before || now >= envelope.grant.expires_at {
+        return Err(ApiError::unauthorized(
+            "invalid_tcp_grant",
+            "grant expired while awaiting policy lock",
+        ));
+    }
+
     if state
         .0
         .revocations
