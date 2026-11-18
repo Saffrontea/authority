@@ -75,7 +75,7 @@ struct IssueMtlsCertificateRequest {
     public_key_pem: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct IssueMtlsCertificateResponse {
     certificate_pem: String,
     ca_certificate_pem: String,
@@ -88,13 +88,21 @@ async fn issue_mtls_certificate(
     State(state): State<AppState>,
     Json(request): Json<IssueMtlsCertificateRequest>,
 ) -> Result<Json<IssueMtlsCertificateResponse>, ApiError> {
+    issue_mtls_certificate_with_clock(&state, &request, unix_timestamp).map(Json)
+}
+
+fn issue_mtls_certificate_with_clock(
+    state: &AppState,
+    request: &IssueMtlsCertificateRequest,
+    clock: impl FnOnce() -> Result<i64, ApiError>,
+) -> Result<IssueMtlsCertificateResponse, ApiError> {
     verify_mtls_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_authorization", cause))?;
     let authorization = &request.authorization.authorization;
     if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
-    let now = unix_timestamp()?;
+    let now = clock()?;
     if now < authorization.not_before || now >= authorization.expires_at {
         return Err(ApiError::unauthorized("authorization_expired"));
     }
@@ -130,14 +138,14 @@ async fn issue_mtls_certificate(
                 .map_err(|error| error.to_string())
         })
         .map_err(ApiError::internal)?;
-    Ok(Json(IssueMtlsCertificateResponse {
+    Ok(IssueMtlsCertificateResponse {
         certificate_pem: String::from_utf8(certificate.to_pem().map_err(ApiError::internal)?)
             .map_err(ApiError::internal)?,
         ca_certificate_pem,
         decision_id: authorization.decision_id.clone(),
         identity_uri: authorization.identity_uri.clone(),
         expires_at: authorization.expires_at,
-    }))
+    })
 }
 
 fn build_mtls_certificate(
@@ -176,13 +184,21 @@ fn issue_ssh_certificate_inner(
     state: &AppState,
     request: &IssueSshCertificateRequest,
 ) -> Result<IssueSshCertificateResponse, ApiError> {
+    issue_ssh_certificate_with_clock(state, request, unix_timestamp)
+}
+
+fn issue_ssh_certificate_with_clock(
+    state: &AppState,
+    request: &IssueSshCertificateRequest,
+    clock: impl FnOnce() -> Result<i64, ApiError>,
+) -> Result<IssueSshCertificateResponse, ApiError> {
     verify_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_authorization", cause))?;
     let authorization = &request.authorization.authorization;
     if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
-    let now = unix_timestamp()?;
+    let now = clock()?;
     if now < authorization.not_before || now >= authorization.expires_at {
         return Err(ApiError::unauthorized("authorization_expired"));
     }
@@ -623,3 +639,7 @@ mod tests {
         (key, builder.build())
     }
 }
+
+#[cfg(test)]
+#[path = "consumer_properties.rs"]
+mod consumer_properties;

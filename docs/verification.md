@@ -15,7 +15,7 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | --- | --- | --- | --- |
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
-| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL consumer PBT | App-specific consumer context and universal representation correspondence |
+| Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL and app-context consumer PBT | Remaining consumer variants and universal representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live/timed TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
 
@@ -669,3 +669,55 @@ verifiers here, which check shape and signature; their application-specific
 clock, audience, CSR/local-key and certificate checks are separate consumer
 obligations and are not implied by this property. Existing LXC tests remain the
 system evidence for those concrete workflows.
+
+
+## Application consumer context and certificate material
+
+The issuer and node binaries now have property suites in their
+`consumer_properties.rs` modules, included in `verification:pbt`. They invoke the
+same private issuance/installation functions used by the HTTP handlers. A private
+clock callback supplies deterministic boundary instants; the HTTP path always
+uses `unix_timestamp`, after signature and audience checks in the same order as
+before. This adds no clock override to the API or environment. SSH certificate
+validation at the node now uses the same captured instant as authorization
+validation, rather than sampling a second implicit clock.
+
+The issuer suite projects claims, signs them with actual Ed25519, decodes request
+objects and runs the complete consumer path, including key parsing, fingerprint
+matching, durable nonce consumption and certificate construction. It varies IDs,
+principal sets, TTLs, time offsets, key choice and SSH versus mTLS. Wrong audience,
+inactive windows, substituted/malformed public keys and signature corruption must
+be rejected before consuming the valid nonce or advancing the serial. Valid
+requests succeed at not-before and the last valid second; replay fails.
+
+SSH output is parsed and CA-verified at the modeled time and must preserve the
+subject key, User certificate type, subject/device key ID, principals and exact
+validity. mTLS accepts public-key PEM (not a CSR); output must retain that key,
+CN/decision, exact URI/DNS SANs and validity. The actual OpenSSL chain verifier
+checks the generated certificate with client purpose and the modeled clock. Its
+recognized KeyUsage/ExtendedKeyUsage flags must be digital-signature/client-auth
+only. These are native library checks, not a formal proof of cryptography or all
+possible ASN.1 extensions.
+
+The node suite uses real CA-signed SSH certificates and the production install
+path. Every rejection must preserve the existing certificate file and terminal
+lease. It covers missing/corrupted authorization, issuer-audience substitution,
+inactive windows, local-key mismatch, malformed certificates, substituted subject
+keys, untrusted CAs, principal expansion, wider validity, Host certificate type
+and a key ID for a different subject/device. A matching certificate is installed,
+its token lease remains bounded by the authorized expiry, and valid reinstallation
+is idempotent.
+
+The suite found that the node accepted Host certificates and a mismatched key ID
+when CA, subject key, principal and interval matched. The install path now requires
+`CertType::User` and the issuer's exact `subject_user_id:device_id` key ID before
+writing files or installing a lease. The minimized regression seed is checked in
+under `bins/node-agent/proptest-regressions`.
+
+These properties extend the signed-wire checks, which alone validate only shape
+and signature for SSH/mTLS. They use real Ed25519 SSH material, P-256 mTLS keys,
+filesystem writes and replay ledgers, with a bounded generated domain and an
+injected consumer clock. They do not model arbitrary disk failure, clock rollback,
+all accepted key algorithms, an unimplemented mTLS node-installation workflow, or
+universally prove the application/codec/OS implementations. LXC E2E remains the
+network/system check for the concrete HTTP, OpenSSH and TCP workflows.

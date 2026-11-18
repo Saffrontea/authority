@@ -263,6 +263,14 @@ async fn install_ssh_certificate(
     State(state): State<AppState>,
     Json(request): Json<InstallCertificateRequest>,
 ) -> Result<Json<InstallCertificateResponse>, ApiError> {
+    install_ssh_certificate_with_clock(&state, &request, unix_timestamp).map(Json)
+}
+
+fn install_ssh_certificate_with_clock(
+    state: &AppState,
+    request: &InstallCertificateRequest,
+    clock: impl FnOnce() -> Result<i64, ApiError>,
+) -> Result<InstallCertificateResponse, ApiError> {
     let signed_authorization = request
         .authorization
         .as_ref()
@@ -270,7 +278,7 @@ async fn install_ssh_certificate(
     verify_authorization(signed_authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_node_authorization", cause))?;
     let authorization = &signed_authorization.authorization;
-    let now = unix_timestamp()?;
+    let now = clock()?;
     if authorization.audience != NODE_AGENT_AUDIENCE
         || now < authorization.not_before
         || now >= authorization.expires_at
@@ -296,13 +304,22 @@ async fn install_ssh_certificate(
         .map(|key| key.fingerprint(HashAlg::Sha256))
         .collect::<Vec<_>>();
     certificate
-        .validate(ca_fingerprints.iter())
+        .validate_at(
+            u64::try_from(now).map_err(|_| ApiError::forbidden("node_authorization_not_active"))?,
+            ca_fingerprints.iter(),
+        )
         .map_err(|cause| ApiError::unauthorized_with_log("untrusted_ssh_certificate", cause))?;
     let authorized_after = u64::try_from(authorization.not_before)
         .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;
     let authorized_before = u64::try_from(authorization.expires_at)
         .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;
-    if certificate.valid_principals() != authorization.principals
+    if certificate.cert_type() != ::ssh_key::certificate::CertType::User
+        || certificate.key_id()
+            != format!(
+                "{}:{}",
+                authorization.subject_user_id, authorization.device_id
+            )
+        || certificate.valid_principals() != authorization.principals
         || certificate.valid_after() != authorized_after
         || certificate.valid_before() != authorized_before
     {
@@ -311,7 +328,7 @@ async fn install_ssh_certificate(
     if let Some(parent) = state.certificate_path().parent() {
         fs::create_dir_all(parent).map_err(ApiError::internal)?;
     }
-    fs::write(state.certificate_path(), request.certificate).map_err(ApiError::internal)?;
+    fs::write(state.certificate_path(), &request.certificate).map_err(ApiError::internal)?;
     state
         .install_terminal_lease(TerminalLease {
             token_hash: authorization.nonce.clone(),
@@ -319,10 +336,10 @@ async fn install_ssh_certificate(
         })
         .map_err(ApiError::internal)?;
 
-    Ok(Json(InstallCertificateResponse {
+    Ok(InstallCertificateResponse {
         private_key_file: state.private_key_path().display().to_string(),
         certificate_file: state.certificate_path().display().to_string(),
-    }))
+    })
 }
 
 fn unix_timestamp() -> Result<i64, ApiError> {
@@ -359,6 +376,7 @@ fn is_base64url_character(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -415,3 +433,7 @@ impl IntoResponse for ApiError {
         (self.status, Json(json!({ "error": self.code }))).into_response()
     }
 }
+
+#[cfg(test)]
+#[path = "consumer_properties.rs"]
+mod consumer_properties;

@@ -21,3 +21,8 @@ tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+authority-projection-core.workspace = true
+proptest = "1"
+tempfile = "3"

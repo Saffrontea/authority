@@ -343,7 +343,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh client-reconnect"
 
 [tasks."verification:pbt"]
 description = "Check planning, containment, projection and durable-state properties"
-run = "cargo test -p authority-contracts-model -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger -p authority-network-agent"
+run = "cargo test -p authority-contracts-model -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger -p authority-network-agent -p authority-credential-issuer -p authority-node-agent"
 
 [tasks."verification:tla"]
 description = "Model-check revocation distribution safety and conditional liveness (requires Java 11+)"
