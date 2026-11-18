@@ -59,19 +59,33 @@ def main():
         assert lifecycle.count(restart) == 1
         models.append(("restart-without-cleanup", lifecycle.replace(restart,
             "Restart == /\\ ~ready /\\ ready' = TRUE /\\ UNCHANGED kernel"), "RegistryTracksKernel"))
+    timed = (ROOT / "formal/tla/TimedAdmission.tla").read_text()
+    timed_config = (ROOT / "formal/tla/TimedAdmission.cfg").read_text()
+    models.append(("timed-admission", timed, None))
+    if args.mutations:
+        timeout = "tcpActive' = {d \\in tcpActive: now' < TcpExpiries[d]}"
+        assert timed.count(timeout) == 1
+        models.append(("tcp-timeout-lost", timed.replace(timeout, "tcpActive' = tcpActive"), "NoExpiredTcp"))
+        guard = "TcpApply(d) == /\\ ready /\\ TcpLive(d) /\\ d \\notin tcpConsumed /\\ d \\notin tcpTombstones"
+        assert timed.count(guard) == 1
+        models.append(("tcp-revoked-grant-reinstalled", timed.replace(guard,
+            "TcpApply(d) == /\\ ready /\\ TcpLive(d)"), "NoTcpResurrection"))
+
     for name, model, expected_failure in models:
         with tempfile.TemporaryDirectory(prefix="authority-tlc-") as directory:
             directory = Path(directory)
-            module = "PeerLifecycle" if "MODULE PeerLifecycle" in model else "Revocation"
+            module = "TimedAdmission" if "MODULE TimedAdmission" in model else ("PeerLifecycle" if "MODULE PeerLifecycle" in model else "Revocation")
             (directory / f"{module}.tla").write_text(model)
-            selected_config = lifecycle_config if module == "PeerLifecycle" else config
+            if module == "TimedAdmission":
+                (directory / "PeerLifecycle.tla").write_text(lifecycle)
+            selected_config = timed_config if module == "TimedAdmission" else (lifecycle_config if module == "PeerLifecycle" else config)
             if name == "peer-lifecycle-same-deadline":
                 selected_config = selected_config.replace("LateDeadline = 3", "LateDeadline = 2")
             if name in {"peer-lifecycle-liveness", "expiry-without-fairness"}:
                 selected_config = selected_config.replace("SPECIFICATION Spec", "SPECIFICATION SpecFair")
                 selected_config += "\nPROPERTY EventuallyExpiredPeerRemoved\n"
             (directory / f"{module}.cfg").write_text(selected_config)
-            result = subprocess.run([java, "-XX:+UseParallelGC", "-jar", str(jar.resolve()),
+            result = subprocess.run([java, "-XX:+UseParallelGC", f"-Djava.io.tmpdir={directory}", "-jar", str(jar.resolve()),
                 "-workers", "2", "-metadir", str(directory / "states"), f"{module}.tla"],
                 cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 timeout=180)

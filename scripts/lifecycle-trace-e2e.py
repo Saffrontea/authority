@@ -2,8 +2,8 @@
 
 The live-binding oracle uses Revocation.tla's publish/consume/install/persist/
 complete transitions. Live snapshots and measured port admission are replayed
-through TLC; timed cases retain their separate oracle. This is correspondence
-testing, not a universal refinement proof.
+through TLC, as are timed WG/TCP snapshots and measured peer presence. This is
+correspondence testing, not a universal refinement proof.
 """
 import copy
 import json
@@ -16,6 +16,8 @@ import urllib.error
 import urllib.request
 
 from tla_replay import verify_live_trace
+from timed_trace import TimedTrace
+from timed_tla_replay import verify_timed_trace
 
 TRACE_TTL_SECONDS = 35
 PROBE_TIMEOUT_SECONDS = 0.25
@@ -277,14 +279,21 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
     trace = {'seed': seed, 'scenario': 'time-and-command-failures', 'scopes': {}, 'steps': []}
     traces.append(trace)
     started = time.monotonic()
+    shadow = TimedTrace(trace)
+    fault_active = False
 
     def task(name, check=True):
-        return subprocess.run(['mise', 'run', f'mesh:test:{name}'], check=check,
-                              stdout=subprocess.DEVNULL, stderr=None if check else subprocess.DEVNULL)
+        nonlocal fault_active
+        result = subprocess.run(['mise', 'run', f'mesh:test:{name}'], check=check,
+                                stdout=subprocess.DEVNULL, stderr=None if check else subprocess.DEVNULL)
+        if result.returncode == 0 and name in {'wg-fail', 'wg-restore'}:
+            fault_active = name == 'wg-fail'
+        return result
 
     def record(action, name, kind='wireguard.peer'):
         trace['steps'].append({'action': action, 'decision': name, 'adapter': kind,
-                               'elapsed_seconds': round(time.monotonic() - started, 3)})
+                               'elapsed_seconds': round(time.monotonic() - started, 3),
+                               'state_index': len(trace['states'])})
 
     def issue_named(name, ports, ttl, network=False):
         value = issue(ports, ttl=ttl, network=network)
@@ -297,6 +306,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         for key, kind in [('tcp_grant', 'tcp.port'), ('network_grant', 'wireguard.peer')]:
             if key in value:
                 deadlines[name, kind] = value[key]['grant']['expires_at']
+        shadow.register(name, value, ports)
         return value
 
     def apply(name, kind='wireguard.peer', status=200, error=None):
@@ -306,6 +316,10 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
             assert result['error'] == error
         if status == 200:
             model.install((name, kind))
+            shadow.action('TcpApply' if kind == 'tcp.port' else 'WgApply', name)
+        else:
+            shadow.action({'invalid_network_grant': 'RejectWgExpired', 'invalid_tcp_grant': 'RejectTcpExpired',
+                           'network_grant_revoked': 'RejectWgRevoked', 'tcp_grant_replayed': 'RejectTcpReplay'}[error], name)
         record('apply' if status == 200 else error, name, kind)
 
     def peer_present():
@@ -317,6 +331,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         return values[0] == 'present'
 
     def observe():
+        shadow.advance()
         now = time.time()
         # Time alone expires TCP authority; WG removal requires successful cleanup.
         model.active = {pair for pair in model.active
@@ -325,6 +340,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         actual = {value: allowed(2223 if value == 8080 else 2224, timeout=PROBE_TIMEOUT_SECONDS)
                   for value in (8080, 8081)}
         trace['steps'][-1].update(expected_ports=expected, actual_ports=actual)
+        shadow.observe(actual, None if fault_active else peer_present())
         assert actual == expected, f'seed={seed}, timed step={len(trace["steps"])-1}, {trace["steps"][-1]}'
 
     def after_expiry(pair, margin=0.3):
@@ -345,9 +361,12 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         try:
             notice = revoke(lease['decision_id'], ['wireguard.peer'])
             model.publish(('lease', 'wireguard.peer'))
+            shadow.action('WgPublish', 'lease')
             result = http(f'{agent}/v1/revocations', notice, 500)
             assert result['error'] == 'internal_error'
             model.tombstones.add(('lease', 'wireguard.peer'))
+            shadow.action('WgPersist', 'lease')
+            shadow.action('FailRevoke', 'lease')
             record('failed-cleanup-no-ack', 'lease')
             assert time.time() + 1 < deadlines['lease', 'tcp.port']
             observe()  # Existing peer and independent TCP scope remain installed.
@@ -357,6 +376,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         response = http(f'{agent}/v1/revocations', notice)
         assert response['peer_removed'], 'failed cleanup lost the peer registry entry'
         model.complete(('lease', 'wireguard.peer'))
+        shadow.action('WgComplete', 'lease')
         record('retry-cleanup', 'lease')
         observe()
         assert not peer_present()
@@ -383,6 +403,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         try:
             after_expiry(('timer', 'wireguard.peer'))
             wait(lambda: task('wg-expiry-observed', check=False).returncode == 0)
+            shadow.action('FailExpire', 'timer')
             record('timer-command-failed', 'timer')
             # WG uses the independently configured server TTL. Keep fresh TCP
             # authority so traffic proves the expired peer is still installed.
@@ -394,6 +415,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
             task('wg-restore')
         wait(lambda: not peer_present())
         model.active.discard(('timer', 'wireguard.peer'))
+        shadow.action('Expire', 'timer')
         record('timer-retry', 'timer')
         observe()
 
@@ -413,6 +435,7 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         # Earlier TCP leases may have expired during the independent WG TTL.
         issue_named('during-replacement', [port], TRACE_TTL_SECONDS)
         apply('during-replacement', 'tcp.port')
+        shadow.action('Expire', 'old-peer')
         record('stale-timer', 'old-peer')
         observe()
         assert time.time() + 0.5 < deadlines['new-peer', 'wireguard.peer']
@@ -420,11 +443,13 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         after_expiry(('new-peer', 'wireguard.peer'), 0.8)
         wait(lambda: not peer_present())
         model.active.discard(('new-peer', 'wireguard.peer'))
+        shadow.action('Expire', 'new-peer')
         record('current-timer', 'new-peer')
         observe()
 
         # Unclean process death reloads/compacts expired durable records. A dead
         # signed grant must remain invalid even after its replay record is gone.
+        shadow.action('Crash')
         task('crash')
         model.active.clear()
         record('crash-after-expiry', 'new-peer')
@@ -436,6 +461,8 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
                 return False
         wait(ready)
         task('ledgers-compacted')
+        shadow.action('Collect')
+        shadow.action('Recover')
         record('expired-ledgers-compacted', 'new-peer')
         for name in ('old-peer', 'new-peer', 'timer'):
             apply(name, status=401, error='invalid_network_grant')
@@ -452,13 +479,21 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
         wait(lambda: allowed(2223 if port == 8080 else 2224))
         observe()
         cleanup = revoke(fresh['decision_id'], ['wireguard.peer', 'tcp.port'])
+        shadow.action('WgPublish', 'post-gc')
+        shadow.action('TcpPublish', 'post-gc')
         http(f'{agent}/v1/revocations', cleanup)
+        shadow.action('WgPersist', 'post-gc')
+        shadow.action('TcpPersist', 'post-gc')
+        shadow.action('TcpComplete', 'post-gc')
+        shadow.action('WgComplete', 'post-gc')
         for kind in ('tcp.port', 'wireguard.peer'):
             model.publish(('post-gc', kind))
             model.complete(('post-gc', kind))
             record('cleanup', 'post-gc', kind)
         observe()
         assert not peer_present()
+        trace['completed'] = True
+        verify_timed_trace(trace)
         print(f'Timed lifecycle trace seed={seed}: {len(trace["steps"])} steps matched expiry, crash and WG command failures', flush=True)
     finally:
         task('wg-restore')

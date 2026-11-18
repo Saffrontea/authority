@@ -134,7 +134,7 @@ def verify_live_trace(trace, expected_failure=None):
         (path / 'Revocation.tla').write_text(source)
         (path / 'TraceReplay.tla').write_text(module)
         (path / 'TraceReplay.cfg').write_text(config)
-        result = subprocess.run([java, '-XX:+UseParallelGC', '-jar', str(jar), '-workers', '1',
+        result = subprocess.run([java, '-XX:+UseParallelGC', f'-Djava.io.tmpdir={path}', '-jar', str(jar), '-workers', '1',
                                  '-metadir', str(path / 'states'), 'TraceReplay.tla'],
                                 cwd=path, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 timeout=120)

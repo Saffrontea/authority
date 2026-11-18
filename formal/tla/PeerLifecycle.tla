@@ -1,7 +1,8 @@
 --------------------------- MODULE PeerLifecycle ---------------------------
 EXTENDS Naturals, FiniteSets
-CONSTANTS Decisions, None, Early, LateDeadline
-Deadline(d) == IF d = Early THEN 2 ELSE LateDeadline
+CONSTANTS Decisions, None, Early, LateDeadline, Expiries, MaxTime
+DemoExpiries == [d \in Decisions |-> IF d = Early THEN 2 ELSE LateDeadline]
+Deadline(d) == Expiries[d]
 VARIABLES now, ready, kernel, registry, consumed, tombstones, published,
           completed, timers, badCleanup
 vars == <<now, ready, kernel, registry, consumed, tombstones, published,
@@ -49,7 +50,7 @@ Expire(d) == /\ ready /\ d \in timers /\ ~Live(d)
 \* stuttering action lets mutation checks reject losing the retry obligation.
 FailExpire(d) == /\ ready /\ d \in timers /\ ~Live(d) /\ registry = d
                  /\ UNCHANGED vars
-Tick == /\ now < 3 /\ now' = now + 1
+Tick == /\ now < MaxTime /\ now' = now + 1
         /\ UNCHANGED <<ready, kernel, registry, consumed, tombstones, published,
                        completed, timers, badCleanup>>
 GC == /\ consumed' = {d \in consumed: Live(d)}
@@ -64,7 +65,7 @@ Restart == /\ ~ready /\ ready' = TRUE /\ kernel' = None
 Next == \/ \E d \in Decisions: Apply(d) \/ Burn(d) \/ Publish(d) \/ Persist(d)
                                    \/ Complete(d) \/ Expire(d) \/ FailExpire(d)
         \/ Tick \/ GC \/ Crash \/ Restart
-TypeOK == /\ now \in 0..3 /\ ready \in BOOLEAN
+TypeOK == /\ now \in 0..MaxTime /\ ready \in BOOLEAN
           /\ kernel \in Decisions \cup {None} /\ registry \in Decisions \cup {None}
           /\ consumed \subseteq Decisions /\ tombstones \subseteq Decisions
           /\ published \subseteq Decisions /\ completed \subseteq Decisions
@@ -79,5 +80,5 @@ Spec == Init /\ [][Next]_vars
 \* failures, scheduler delay or packet delivery follows from these assumptions.
 SpecFair == Spec /\ WF_vars(Tick) /\ WF_vars(Restart)
                  /\ \A d \in Decisions: WF_vars(Expire(d))
-EventuallyExpiredPeerRemoved == <> (now = 3 /\ kernel = None)
+EventuallyExpiredPeerRemoved == <> (now = MaxTime /\ kernel = None)
 =============================================================================

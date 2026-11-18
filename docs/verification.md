@@ -16,8 +16,8 @@ Each row identifies both current evidence and the remaining obligation. Protocol
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count and termination; independent/native PBT | Stable lexicographic tie-break proof; trusted collection/ID-view correspondence |
 | Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native PBT | Wire/consumer and representation correspondence |
-| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live system traces replayed by TLC | Timed trace replay, arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
-| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Timed TLC replay, broader arbitrary trace coverage, power-loss and other OS failure classes |
+| Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
+| HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live/timed TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
 
 ## Reproducible checks
 
@@ -493,7 +493,7 @@ probe results. It does not take the Python oracle's expected port result as an
 input. Semantic mutations must reject a changed actual port observation, omitted
 nonce consumption and receiver restart retaining state. Schema checks reject
 incomplete traces, unknown actions, unknown state fields, missing port probes and
-unsupported timed trace formats.
+unsupported schema versions.
 
 The E2E runner now requires Java/TLC and checks tool availability before changing
 LXC state. The same `TLA_JAVA` / `TLA_JAR` settings select the pinned checker for
@@ -503,10 +503,11 @@ both model checking and E2E replay. To replay an artifact later, set `TRACE_FILE
 python3 scripts/check-tla-traces.py --scenario live "$TRACE_FILE"
 ```
 
-The explicit `--scenario live` selects the supported projection when the artifact
-also contains time/failure traces. Without that selector, an unsupported trace
-fails the command; an empty selection fails too. Timed traces continue to use the
-Python/time-failure oracle and actual system probes, and are not TLC-replayed yet.
+The optional `--scenario live` selects the live projection; use
+`--scenario time-and-command-failures` for timed traces. With no selector, every
+trace in the artifact is checked. Unknown scenarios/versions fail rather than
+being skipped, and an empty selection fails too. Old timed artifacts without
+version 2 state/edge data cannot be upgraded by inference and fail the checker.
 The serialized states are reconstructed logical state from the harness, not raw
 receiver memory or DB snapshots. Thus this checks finite trace consistency and
 actual admission observations against the model, not a universal refinement of
@@ -559,3 +560,74 @@ fault is an actual executable-permission/spawn failure; it does not simulate all
 kernel syscall errors, partial kernel updates, disk failure or arbitrary scheduler
 stalls. Liveness remains conditional on eventual successful delivery and kernel
 operations.
+
+
+## Timed WG/TCP replay
+
+`formal/tla/TimedAdmission.tla` composes the actual peer lifecycle model with
+independent TCP kernel timeouts. The parent now takes an immutable `Expiries`
+function and `MaxTime`; its original finite configurations still use deadlines
+2/3 and a terminal clock of 3. This parameterization lets replay use the actual
+signed expiry seconds, translated to a local trace epoch, without changing the
+receiver clock or issuing shorter synthetic WG grants.
+
+The combined exhaustive safety configuration has two WG and two TCP decisions.
+It checks type constraints, peer/registry agreement while ready, no cross-decision
+cleanup or resurrection, live revocation durability, and no expired TCP rule in
+the active kernel set. Mutations must expose lost TCP timeout pruning and
+reinstallation of a revoked TCP decision. This finite configuration does not
+prove arbitrary catalog sizes or universal implementation refinement.
+
+`scripts/timed_trace.py` records a version 2 logical state history in each timed
+E2E trace. Integer clock ticks expire TCP rules independently of receiver readiness;
+WG expiry retains its pending peer until successful cleanup. TCP tombstone
+retention uses the notice deadline (the later bundle expiry), separately from
+TCP admission expiry; GC cannot drop a live notice just because its TCP rule
+has timed out. WG replacement keeps
+old timer identities, failed commands stutter, crash loses volatile registry/timers,
+startup collection drops expired durable records, and recovery clears installed
+peer/TCP state. The history keeps declared actions and immutable per-binding
+expiries. TCP port authority is taken from requested scopes and must match the
+issued grant, while expiry is taken from signed contracts.
+
+`scripts/timed_tla_replay.py` imports both actual TLA+ modules and replays every
+recorded edge against `NextTimed` and its declared action. Declared expired,
+revoked and replayed grant rejections additionally require their corresponding
+state guards. Unknown actions or state fields fail before TLC. As with live replay,
+the visited counter-indexed state count must equal the record count; invalid
+transitions deadlock, and replay-index fairness forces finite traversal.
+
+TLC computes port admission from the current physical peer binding and unexpired
+TCP rules and compares it with both actual socket probes. Successful direct kernel
+peer queries are checked separately against peer presence. During deliberate WG
+executable failure, that query is unavailable and explicitly marked unmeasured;
+port observations still occur, including a fresh TCP lease proving the expired
+peer remains installed until its timer retry succeeds. Startup GC, expired-signature
+rejection, retention of a live consumed TCP nonce, and fresh post-GC authorization
+are part of the replayed history.
+
+The independent fixture exercises replacement, ticks, failed expiry, expiry cleanup,
+crash, GC, recovery and revocation. It also keeps a TCP revocation tombstone
+after TCP expiry while the longer WG/notice interval remains live. Seven semantic mutations must expose changed
+port/peer observations, stale-timer deletion of a replacement, retaining an expired
+nonce at collection, accepting an expired grant, corrupting clock/TCP state, and
+accepting a consumed TCP grant. Schema counterexamples reject incomplete traces,
+invalid expiry values, unknown actions/fields and missing port probes. These checks
+are included in `verification:traces` and therefore `verification:check`.
+
+This validates finite logical reconstructions and actual admission/peer observations.
+Hidden memory state is inferred from successful operations and receiver ordering;
+it is not sampled or universally proved. Clock ticks are monotonic logical seconds;
+clock rollback, power loss, partial kernel updates and arbitrary OS failures remain
+outside these traces. The safety model preserves the existing boundary: WG cleanup
+progress is conditional on successful external operations, while TCP timeout is
+independently enforced in the kernel.
+
+
+TLC standard-library extraction uses a per-invocation Java temporary directory,
+which is removed with checker state. The browser E2E similarly owns an explicit
+Chrome user-data directory and removes it after closing its session/driver. Each
+run uses a fresh E2E username so virtual Passkeys do not accumulate on one account
+and hit browser authentication-list limits. This
+keeps repeated gate/E2E runs from accumulating browser profiles or sharing checker
+scratch files. Logical trace JSON artifacts remain available for replay.

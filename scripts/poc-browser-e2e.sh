@@ -9,6 +9,7 @@ driver_pid=''
 session=''
 log_file=''
 plain_key=''
+browser_profile=''
 
 cleanup() {
     if [[ -n "${session}" ]]; then
@@ -20,6 +21,7 @@ cleanup() {
     fi
     [[ -z "${log_file}" || ! -f "${log_file}" ]] || rm -f "${log_file}"
     [[ -z "${plain_key}" || ! -f "${plain_key}" ]] || rm -f "${plain_key}"
+    [[ -z "${browser_profile}" ]] || rm -rf -- "${browser_profile}"
 }
 trap cleanup EXIT INT TERM
 
@@ -168,7 +170,9 @@ for _ in {1..50}; do
 done
 curl --silent --fail "${DRIVER_ORIGIN}/status" >/dev/null || die 'ChromeDriver did not become ready'
 
-capabilities="$(jq -nc '{capabilities:{alwaysMatch:{browserName:"chrome","webauthn:virtualAuthenticators":true,"goog:chromeOptions":{binary:"/usr/bin/chromium",args:["--headless=new","--disable-gpu","--disable-dev-shm-usage","--no-first-run"]}}}}')"
+browser_profile="$(mktemp -d /tmp/authority-poc-browser.XXXXXX)"
+e2e_username="poc-e2e-${browser_profile##*.}"
+capabilities="$(jq -nc --arg profile "${browser_profile}" '{capabilities:{alwaysMatch:{browserName:"chrome","webauthn:virtualAuthenticators":true,"goog:chromeOptions":{binary:"/usr/bin/chromium",args:[("--user-data-dir=" + $profile),"--headless=new","--disable-gpu","--disable-dev-shm-usage","--no-first-run"]}}}}')"
 session="$(webdriver POST /session "${capabilities}" | jq -r '.sessionId')"
 webdriver POST "/session/${session}/webauthn/authenticator" \
     '{"protocol":"ctap2","transport":"internal","hasResidentKey":true,"hasUserVerification":true,"isUserConsenting":true,"isUserVerified":true}' >/dev/null
@@ -181,7 +185,7 @@ bootstrap_status="$(element_text '#bootstrap-status')"
     die "bootstrap capability was not visible: ${bootstrap_status}"
 [[ "$(element_displayed '#bootstrap-form')" == 'true' ]] ||
     die 'bootstrap form was hidden despite a valid bootstrap URL'
-set_value '#new-username' poc-e2e
+set_value '#new-username' "${e2e_username}"
 set_value '#display-name' 'Automated PoC'
 click '#register'
 printf '[poc:e2e] waiting for Passkey registration\n'
@@ -203,7 +207,7 @@ bootstrap_status="$(element_text '#bootstrap-status')"
     die "bootstrap identity disappeared after reload: ${bootstrap_status}"
 [[ "$(element_displayed '#bootstrap-form')" == 'false' ]] ||
     die 'bootstrap form reappeared after token consumption'
-set_value '#username' poc-e2e
+set_value '#username' "${e2e_username}"
 printf 'Bootstrap identity UI: capability, completion, and reload states verified\n'
 
 if [[ -n "${wireguard_public_key}" ]]; then
