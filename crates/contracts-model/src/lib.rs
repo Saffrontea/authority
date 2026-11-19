@@ -232,6 +232,89 @@ pub struct PolicySourceV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyAbilityV2 {
+    MeshMembership,
+    NetworkRouteAuthorization,
+    SshCredential,
+    MtlsCredential,
+    TcpAdmission,
+    NetworkReachability,
+    SshSession,
+    ServiceIdentity,
+    TcpConnection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyRefV2 {
+    pub policy_id: String,
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySourceV2 {
+    pub ability: PolicyAbilityV2,
+    pub policies: Vec<PolicyRefV2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyDecisionEvaluatedV2 {
+    pub decision_id: String,
+    pub intent: PolicyIntentV1,
+    pub required_abilities: Vec<PolicyAbilityV2>,
+    pub policy_sources: Vec<PolicySourceV2>,
+    pub adapter_grants: Vec<AdapterGrantV1>,
+}
+
+impl PolicyDecisionEvaluatedV2 {
+    /// Validate complete, unambiguous ability-level policy provenance.
+    /// # Errors
+    /// Rejects missing, duplicate or malformed policy sources and projections.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        let required: HashSet<_> = self.required_abilities.iter().collect();
+        let sourced: HashSet<_> = self
+            .policy_sources
+            .iter()
+            .map(|source| &source.ability)
+            .collect();
+        let outcomes: HashSet<_> = self.intent.outcomes.iter().collect();
+        if !valid_identifier(&self.decision_id)
+            || outcomes.is_empty()
+            || outcomes.len() != self.intent.outcomes.len()
+            || required.is_empty()
+            || required.len() != self.required_abilities.len()
+            || required != sourced
+            || sourced.len() != self.policy_sources.len()
+            || self.policy_sources.iter().any(|source| {
+                source.policies.is_empty()
+                    || source
+                        .policies
+                        .iter()
+                        .map(|policy| &policy.policy_id)
+                        .collect::<HashSet<_>>()
+                        .len()
+                        != source.policies.len()
+                    || source
+                        .policies
+                        .iter()
+                        .any(|policy| !valid_identifier(&policy.policy_id) || policy.revision < 1)
+            })
+            || self.adapter_grants.is_empty()
+            || self
+                .adapter_grants
+                .iter()
+                .any(|grant| !valid_identifier(&grant.audience) || grant.expires_at <= 0)
+        {
+            return Err(ContractError::InvalidPolicyDecision);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AdapterGrantKindV1 {
     #[serde(rename = "ssh.certificate")]
     SshCertificate,

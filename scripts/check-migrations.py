@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS = ROOT / "migrations"
 FILENAME = re.compile(r"^[0-9]{4}_[a-z0-9_]+\.sql$")
 FORBIDDEN = re.compile(
-    r"\b(?:BEGIN|COMMIT|TRUNCATE)\b|\bDROP\s+(?:TABLE|SCHEMA|COLUMN|INDEX|TYPE)\b",
+    r"\bTRUNCATE\b|\bDROP\s+(?:TABLE|SCHEMA|COLUMN|INDEX|TYPE)\b",
     re.IGNORECASE,
 )
 CROSS_SCHEMA_REFERENCE = re.compile(
@@ -36,7 +36,10 @@ def main() -> int:
             print(f"invalid migration filename: {path.name}", file=sys.stderr)
             return 1
         sql = path.read_text(encoding="utf-8")
-        forbidden = FORBIDDEN.search(sql)
+        # Transaction commands inside function bodies are PL/pgSQL block syntax.
+        # Destructive statements remain forbidden even within those bodies.
+        outside_functions = re.sub(r"\$\$[\s\S]*?\$\$", "", sql)
+        forbidden = FORBIDDEN.search(sql) or re.search(r"\b(?:BEGIN|COMMIT)\b", outside_functions, re.IGNORECASE)
         if forbidden:
             print(f"{path.name}: forbidden transaction/destructive operation {forbidden.group(0)!r}", file=sys.stderr)
             return 1

@@ -1,7 +1,7 @@
 //! Scoped authorization and finite normalization for the ability planner.
 //!
-//! Policy precedence is resolved before scope containment. Scopes from losing
-//! policies are never unioned with those of the winning capability source.
+//! Production evaluates concrete ability rules over every scope atom and time
+//! segment. The coarse capability evaluator is a separate model.
 
 use authority_contracts_model::protocol::valid_ttl_seconds;
 use std::{
@@ -638,7 +638,7 @@ fn permission(
 
 struct ScopeInstantiation {
     abilities: BTreeMap<Ability, ScopedAbility>,
-    permissions: BTreeMap<Ability, (ScopedAbility, PolicyRef)>,
+    permissions: BTreeMap<Ability, (ScopedAbility, BTreeSet<PolicyRef>)>,
 }
 
 fn scoped_abilities(
@@ -687,7 +687,7 @@ fn scoped_abilities(
                 ScopeError::ScopeDenied(kind.effective())
             });
         }
-        permissions.insert(kind, (grant, *source));
+        permissions.insert(kind, (grant, BTreeSet::from([*source])));
         abilities.insert(kind, ability);
     }
     Ok(ScopeInstantiation {
@@ -809,6 +809,261 @@ pub fn evaluate_scoped(
             .map(|source| format!("{}@{}", source.policy_id, source.revision))
             .collect::<Vec<_>>()
             .join("."),
+        realization,
+        evidence,
+    )?;
+    Ok((decision, plan))
+}
+
+fn applicable_ability_rules<'a>(
+    request: &AccessRequest,
+    snapshot: &'a crate::ability_policy::AbilityPolicySnapshot,
+    requested: &RequestedAccess,
+) -> Result<Vec<&'a crate::ability_policy::StoredAbilityPolicy>, ScopeError> {
+    if snapshot.identity.device_domain_id != request.domain_id
+        || snapshot.identity.device_owner_user_id != request.subject_user_id
+    {
+        return Err(DenialReason::DeviceMismatch.into());
+    }
+    if !snapshot.identity.device_active || !snapshot.identity.target_active {
+        return Err(DenialReason::Disabled.into());
+    }
+    let required = crate::plan(&request.intent);
+    if request.intent.outcomes.is_empty()
+        || requested.ssh.is_some() != required.contains(&Capability::SshIssue)
+        || requested.mtls.is_some() != required.contains(&Capability::MtlsIssue)
+        || requested.tcp.is_some() != required.contains(&Capability::TcpConnect)
+        || requested.network.is_some() != required.contains(&Capability::NetworkReach)
+    {
+        return Err(ScopeError::InvalidRequest);
+    }
+    if snapshot.rules.iter().any(|rule| {
+        rule.policy.revision < 1
+            || !rule.validity.contains(rule.validity)
+            || !rule.selector.is_valid()
+    }) {
+        return Err(DenialReason::InvalidPolicy.into());
+    }
+    let applicable = snapshot
+        .rules
+        .iter()
+        .filter(|rule| {
+            rule.domain_id == request.domain_id
+                && rule.subject_user_id == request.subject_user_id
+                && rule.target_node_id == request.target_node_id
+                && rule
+                    .required_device_id
+                    .is_none_or(|device| device == request.device_id)
+                && rule.enabled
+                && !rule.revoked
+        })
+        .collect();
+    Ok(applicable)
+}
+
+fn authorize_ability(
+    ability: &ScopedAbility,
+    rules: &[crate::ability_policy::AbilityRule],
+) -> Result<BTreeSet<PolicyRef>, ScopeError> {
+    use crate::ability_policy::{PermissionError, authorize};
+    let kind = ability.scope.kind();
+    match authorize(ability, rules) {
+        Ok(sources) => Ok(sources),
+        Err(PermissionError::InvalidRule) => Err(DenialReason::InvalidPolicy.into()),
+        Err(PermissionError::InvalidRequest) => Err(ScopeError::InvalidRequest),
+        Err(PermissionError::ExplicitDeny(_)) => {
+            Err(DenialReason::ExplicitAbilityDeny(kind).into())
+        }
+        Err(PermissionError::Uncovered) => {
+            let mut instant = ability.clone();
+            instant.validity.expires_at = instant.validity.not_before + 1;
+            Err(if authorize(&instant, rules).is_ok() {
+                ScopeError::LifetimeExceeded(kind.effective())
+            } else if rules.is_empty() {
+                ScopeError::Policy(DenialReason::MissingAbility(kind))
+            } else {
+                ScopeError::ScopeDenied(kind.effective())
+            })
+        }
+    }
+}
+
+struct AbilityInstantiation {
+    scoped: ScopeInstantiation,
+    denials: BTreeMap<Ability, ScopeError>,
+}
+
+fn ability_permissions(
+    request: &AccessRequest,
+    snapshot: &crate::ability_policy::AbilityPolicySnapshot,
+    requested: &RequestedAccess,
+    resources: &NetworkResources,
+    limits: LifetimeLimits,
+) -> Result<AbilityInstantiation, ScopeError> {
+    use crate::ability_policy::AbilityRule;
+    let applicable = applicable_ability_rules(request, snapshot, requested)?;
+    let default_scope = PolicyScope {
+        ssh_principals: applicable
+            .iter()
+            .filter(|rule| rule.effect == crate::Effect::Allow)
+            .filter_map(|rule| rule.selector.principals())
+            .flatten()
+            .cloned()
+            .collect(),
+        tcp_ports: BTreeSet::new(),
+    };
+    let mut abilities = BTreeMap::new();
+    let mut permissions = BTreeMap::new();
+    let mut denials = BTreeMap::new();
+    for kind in crate::realization::all_abilities() {
+        let present = match kind.effective() {
+            Ability::MeshMembership | Ability::NetworkReachability => requested.network.is_some(),
+            Ability::SshSession => requested.ssh.is_some(),
+            Ability::ServiceIdentity => requested.mtls.is_some(),
+            Ability::TcpConnection => requested.tcp.is_some(),
+            _ => false,
+        };
+        if !present {
+            continue;
+        }
+        let (scope, ttl) = requested_scope(kind, request, requested, resources, &default_scope)?;
+        let ability = ScopedAbility {
+            binding: binding(request),
+            validity: validity(request.evaluated_at, ttl)?,
+            scope,
+        };
+        if !validity(request.evaluated_at, limits.for_ability(kind))?.contains(ability.validity) {
+            return Err(ScopeError::LifetimeExceeded(kind.effective()));
+        }
+        if kind == Ability::MeshMembership
+            && !matches!(&ability.scope, AbilityScope::MeshMembership { wireguard_public_key, .. } if wireguard_public_key == &resources.registered_wireguard_key)
+        {
+            return Err(ScopeError::WireGuardKeyMismatch);
+        }
+        let rules: Vec<_> = applicable
+            .iter()
+            .filter(|rule| rule.selector.kind() == kind)
+            .filter_map(|rule| {
+                Some(AbilityRule {
+                    policy: rule.policy,
+                    priority: rule.priority,
+                    effect: rule.effect,
+                    authority: ScopedAbility {
+                        binding: binding(request),
+                        validity: rule.validity,
+                        scope: rule.selector.scope(&ability.scope)?,
+                    },
+                })
+            })
+            .collect();
+        if !ability.contains(&ability) {
+            return Err(ScopeError::InvalidRequest);
+        }
+        match authorize_ability(&ability, &rules) {
+            Ok(sources) => {
+                permissions.insert(kind, (ability.clone(), sources));
+            }
+            Err(error) => {
+                denials.insert(kind, error);
+            }
+        }
+        abilities.insert(kind, ability);
+    }
+    Ok(AbilityInstantiation {
+        scoped: ScopeInstantiation {
+            abilities,
+            permissions,
+        },
+        denials,
+    })
+}
+
+/// Production authorization over concrete ability rules. The complete candidate
+/// graph is instantiated before permission filtering, so denied derived effects
+/// cannot disappear from mandatory closure.
+/// # Errors
+/// Rejects identity, policy, scope, validity and solver failures.
+pub fn evaluate_ability_scoped(
+    request: &AccessRequest,
+    snapshot: &crate::ability_policy::AbilityPolicySnapshot,
+    requested: &RequestedAccess,
+    resources: &NetworkResources,
+    limits: LifetimeLimits,
+) -> Result<(crate::ability_policy::AbilityDecision, AuthorizedPlan), ScopeError> {
+    use crate::ability_policy::AbilityDecision;
+    let AbilityInstantiation {
+        scoped: ScopeInstantiation {
+            abilities,
+            permissions,
+        },
+        denials,
+    } = ability_permissions(request, snapshot, requested, resources, limits)?;
+    let goals: BTreeSet<_> = request
+        .intent
+        .outcomes
+        .iter()
+        .map(|outcome| match outcome {
+            Outcome::Ssh => Ability::SshSession,
+            Outcome::NetworkReachability => Ability::NetworkReachability,
+            Outcome::MtlsService => Ability::ServiceIdentity,
+            Outcome::TcpConnect => Ability::TcpConnection,
+        })
+        .map(|kind| {
+            abilities
+                .get(&kind)
+                .cloned()
+                .ok_or(ScopeError::InvalidRequest)
+        })
+        .collect::<Result<_, _>>()?;
+    let model = instantiate(request, &abilities, resources);
+    let realization = solve(
+        &model,
+        &Request {
+            goals: goals.clone(),
+            available: BTreeSet::new(),
+            permitted: permissions
+                .keys()
+                .map(|kind| abilities[kind].clone())
+                .collect(),
+            forbidden_mechanisms: BTreeSet::new(),
+            max_mechanisms: authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1,
+            max_states: crate::realization::ACCESS_PLANNING_STATES,
+        },
+        |_| true,
+    )
+    .map_err(|error| {
+        if error == authority_planning_core::PlanningError::NoSolution {
+            denials
+                .values()
+                .next()
+                .cloned()
+                .unwrap_or(ScopeError::Policy(DenialReason::NoRealization))
+        } else {
+            ScopeError::Policy(error.into())
+        }
+    })?;
+    let decision = AbilityDecision {
+        intent: request.intent.clone(),
+        sources: realization
+            .abilities
+            .iter()
+            .map(|ability| {
+                (
+                    ability.scope.kind(),
+                    permissions[&ability.scope.kind()].1.clone(),
+                )
+            })
+            .collect(),
+    };
+    let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
+    let evidence = crate::selection::PlanningEvidence::authorized(request, proof, resources);
+    if !evidence.is_consistent() {
+        return Err(ScopeError::InvalidRequest);
+    }
+    let plan = AuthorizedPlan::new(
+        binding(request),
+        request.evaluated_at,
+        decision.policy_reference(),
         realization,
         evidence,
     )?;

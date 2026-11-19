@@ -131,12 +131,376 @@ pub fn authorize(
     Ok(sources)
 }
 
+/// Key choice is explicit policy: request possession or an exact pinned key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum KeyBinding {
+    Request,
+    Pinned { value: String },
+}
+
+impl KeyBinding {
+    fn resolve(&self, requested: &str) -> String {
+        match self {
+            Self::Request => requested.to_owned(),
+            Self::Pinned { value } => value.clone(),
+        }
+    }
+}
+
+/// Resource and operation selectors stored as typed JSON, never capability strings.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AbilitySelector {
+    MeshMembership {
+        wireguard_public_key: String,
+        address: std::net::Ipv4Addr,
+    },
+    NetworkRouteAuthorization {
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+    },
+    NetworkReachability {
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+    },
+    SshCredential {
+        principals: BTreeSet<String>,
+        key: KeyBinding,
+        terminal_token: KeyBinding,
+    },
+    SshSession {
+        principals: BTreeSet<String>,
+        key: KeyBinding,
+        terminal_token: KeyBinding,
+    },
+    MtlsCredential {
+        service_audience: String,
+        key: KeyBinding,
+    },
+    ServiceIdentity {
+        service_audience: String,
+        key: KeyBinding,
+    },
+    TcpAdmission {
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+        ports: BTreeSet<u16>,
+    },
+    TcpConnection {
+        source: std::net::Ipv4Addr,
+        destination: std::net::Ipv4Addr,
+        ports: BTreeSet<u16>,
+    },
+}
+
+impl AbilitySelector {
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        let key_valid = |key: &KeyBinding| match key {
+            KeyBinding::Request => true,
+            KeyBinding::Pinned { value } => !value.is_empty(),
+        };
+        match self {
+            Self::SshCredential {
+                principals,
+                key,
+                terminal_token,
+            }
+            | Self::SshSession {
+                principals,
+                key,
+                terminal_token,
+            } => {
+                !principals.is_empty()
+                    && principals.iter().all(|principal| !principal.is_empty())
+                    && key_valid(key)
+                    && key_valid(terminal_token)
+            }
+            Self::TcpAdmission { ports, .. } | Self::TcpConnection { ports, .. } => {
+                !ports.is_empty()
+                    && ports.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
+                    && !ports.contains(&0)
+            }
+            Self::MtlsCredential {
+                service_audience,
+                key,
+            }
+            | Self::ServiceIdentity {
+                service_audience,
+                key,
+            } => !service_audience.is_empty() && key_valid(key),
+            Self::MeshMembership {
+                wireguard_public_key,
+                ..
+            } => !wireguard_public_key.is_empty(),
+            Self::NetworkRouteAuthorization { .. } | Self::NetworkReachability { .. } => true,
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> crate::realization::Ability {
+        use crate::realization::Ability;
+        match self {
+            Self::MeshMembership { .. } => Ability::MeshMembership,
+            Self::NetworkRouteAuthorization { .. } => Ability::NetworkRouteAuthorization,
+            Self::NetworkReachability { .. } => Ability::NetworkReachability,
+            Self::SshCredential { .. } => Ability::SshCredential,
+            Self::SshSession { .. } => Ability::SshSession,
+            Self::MtlsCredential { .. } => Ability::MtlsCredential,
+            Self::ServiceIdentity { .. } => Ability::ServiceIdentity,
+            Self::TcpAdmission { .. } => Ability::TcpAdmission,
+            Self::TcpConnection { .. } => Ability::TcpConnection,
+        }
+    }
+
+    pub(crate) fn principals(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            Self::SshCredential { principals, .. } | Self::SshSession { principals, .. } => {
+                Some(principals)
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve only explicitly request-bound key material. Resources and authority
+    /// kinds always come from the stored selector, even for deny rules.
+    pub(crate) fn scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
+        Some(match (self, requested) {
+            (
+                Self::MeshMembership {
+                    wireguard_public_key,
+                    address,
+                },
+                _,
+            ) => AbilityScope::MeshMembership {
+                wireguard_public_key: wireguard_public_key.clone(),
+                address: *address,
+            },
+            (
+                Self::NetworkRouteAuthorization {
+                    source,
+                    destination,
+                },
+                _,
+            ) => AbilityScope::NetworkRouteAuthorization {
+                source: *source,
+                destination: *destination,
+            },
+            (
+                Self::NetworkReachability {
+                    source,
+                    destination,
+                },
+                _,
+            ) => AbilityScope::NetworkReachability {
+                source: *source,
+                destination: *destination,
+            },
+            (
+                Self::TcpAdmission {
+                    source,
+                    destination,
+                    ports,
+                },
+                _,
+            ) => AbilityScope::TcpAdmission {
+                source: *source,
+                destination: *destination,
+                ports: ports.clone(),
+            },
+            (
+                Self::TcpConnection {
+                    source,
+                    destination,
+                    ports,
+                },
+                _,
+            ) => AbilityScope::TcpConnection {
+                source: *source,
+                destination: *destination,
+                ports: ports.clone(),
+            },
+            _ => return self.key_scope(requested),
+        })
+    }
+
+    fn key_scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
+        Some(match (self, requested) {
+            (
+                Self::SshCredential {
+                    principals,
+                    key,
+                    terminal_token,
+                },
+                AbilityScope::SshCredential {
+                    public_key_fingerprint,
+                    terminal_token_hash,
+                    ..
+                },
+            ) => AbilityScope::SshCredential {
+                public_key_fingerprint: key.resolve(public_key_fingerprint),
+                terminal_token_hash: terminal_token.resolve(terminal_token_hash),
+                principals: principals.clone(),
+            },
+            (
+                Self::SshSession {
+                    principals,
+                    key,
+                    terminal_token,
+                },
+                AbilityScope::SshSession {
+                    public_key_fingerprint,
+                    terminal_token_hash,
+                    ..
+                },
+            ) => AbilityScope::SshSession {
+                public_key_fingerprint: key.resolve(public_key_fingerprint),
+                terminal_token_hash: terminal_token.resolve(terminal_token_hash),
+                principals: principals.clone(),
+            },
+            (
+                Self::MtlsCredential {
+                    service_audience,
+                    key,
+                },
+                AbilityScope::MtlsCredential {
+                    client_spki_sha256,
+                    identity_uri,
+                    ..
+                },
+            ) => AbilityScope::MtlsCredential {
+                client_spki_sha256: key.resolve(client_spki_sha256),
+                identity_uri: identity_uri.clone(),
+                service_audience: service_audience.clone(),
+            },
+            (
+                Self::ServiceIdentity {
+                    service_audience,
+                    key,
+                },
+                AbilityScope::ServiceIdentity {
+                    client_spki_sha256,
+                    identity_uri,
+                    ..
+                },
+            ) => AbilityScope::ServiceIdentity {
+                client_spki_sha256: key.resolve(client_spki_sha256),
+                identity_uri: identity_uri.clone(),
+                service_audience: service_audience.clone(),
+            },
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredAbilityPolicy {
+    pub policy: PolicyRef,
+    pub domain_id: uuid::Uuid,
+    pub subject_user_id: uuid::Uuid,
+    pub required_device_id: Option<uuid::Uuid>,
+    pub target_node_id: uuid::Uuid,
+    pub enabled: bool,
+    pub revoked: bool,
+    pub priority: i32,
+    pub effect: Effect,
+    pub validity: Validity,
+    pub selector: AbilitySelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityPolicySnapshot {
+    pub identity: crate::IdentityFacts,
+    pub rules: Vec<StoredAbilityPolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AbilityDecision {
+    pub intent: crate::AccessIntent,
+    pub sources: std::collections::BTreeMap<crate::realization::Ability, BTreeSet<PolicyRef>>,
+}
+
+impl AbilityDecision {
+    /// Fixed-size commitment to the complete, canonically ordered policy set.
+    #[must_use]
+    pub fn policy_reference(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"authority:ability-policy-set:v1\0");
+        for policy in self.policies() {
+            digest.update(policy.policy_id.as_bytes());
+            digest.update(policy.revision.to_be_bytes());
+        }
+        format!("ability-policy-sha256:{:x}", digest.finalize())
+    }
+
+    #[must_use]
+    pub fn policies(&self) -> BTreeSet<PolicyRef> {
+        self.sources.values().flatten().copied().collect()
+    }
+}
+
+/// Evaluate trusted deployment alternatives using concrete ability policies.
+/// # Errors
+/// Returns a fail-closed denial and replayable candidate evidence.
+pub fn evaluate_selection(
+    request: &crate::AccessRequest,
+    snapshot: &AbilityPolicySnapshot,
+    requested: &crate::scoped::RequestedAccess,
+    resources: &crate::scoped::NetworkResources,
+    limits: crate::scoped::LifetimeLimits,
+    options: &crate::selection::SelectionOptions,
+) -> Result<(AbilityDecision, crate::scoped::AuthorizedPlan), crate::selection::SelectionFailure> {
+    crate::selection::evaluate_with(
+        request,
+        requested,
+        resources,
+        options,
+        |candidate, inputs| {
+            crate::scoped::evaluate_ability_scoped(candidate, snapshot, inputs, resources, limits)
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::scoped::AccessBinding;
     use proptest::prelude::*;
     use uuid::Uuid;
+
+    #[test]
+    fn stored_selectors_require_explicit_key_binding_and_preserve_pins() {
+        let requested = AbilityScope::SshCredential {
+            public_key_fingerprint: "request-key".into(),
+            principals: BTreeSet::from(["deploy".into()]),
+            terminal_token_hash: "request-token".into(),
+        };
+        let selector = AbilitySelector::SshCredential {
+            principals: BTreeSet::from(["deploy".into()]),
+            key: KeyBinding::Pinned {
+                value: "pinned-key".into(),
+            },
+            terminal_token: KeyBinding::Request,
+        };
+        assert_eq!(
+            selector.scope(&requested),
+            Some(AbilityScope::SshCredential {
+                public_key_fingerprint: "pinned-key".into(),
+                principals: BTreeSet::from(["deploy".into()]),
+                terminal_token_hash: "request-token".into(),
+            })
+        );
+        assert!(selector.scope(&requested.effective()).is_none());
+        for invalid in [
+            serde_json::json!({"kind":"ssh_credential", "principals":["deploy"]}),
+            serde_json::json!({"kind":"ssh_credential", "principals":["deploy"], "key":{"mode":"request"}, "terminal_token":{"mode":"request"}, "future":"ignored"}),
+            serde_json::json!({"kind":"future_ability"}),
+        ] {
+            assert!(serde_json::from_value::<AbilitySelector>(invalid).is_err());
+        }
+    }
 
     proptest! {
         #[test]

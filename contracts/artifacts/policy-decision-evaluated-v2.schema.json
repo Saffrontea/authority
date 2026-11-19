@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/policy-decision-evaluated-v2.schema.json",
+  "title": "PolicyDecisionEvaluatedV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "decision_id",
+    "intent",
+    "required_abilities",
+    "policy_sources",
+    "adapter_grants"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "outcomes",
+        "route"
+      ],
+      "properties": {
+        "outcomes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ssh",
+              "network.reachability",
+              "mtls.service",
+              "tcp.connect"
+            ]
+          }
+        },
+        "route": {
+          "enum": [
+            "direct",
+            "mesh_required"
+          ]
+        }
+      }
+    },
+    "policy_sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ability",
+          "policies"
+        ],
+        "properties": {
+          "ability": {
+            "type": "string",
+            "enum": [
+              "mesh_membership",
+              "network_route_authorization",
+              "ssh_credential",
+              "mtls_credential",
+              "tcp_admission",
+              "network_reachability",
+              "ssh_session",
+              "service_identity",
+              "tcp_connection"
+            ]
+          },
+          "policies": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "policy_id",
+                "revision"
+              ],
+              "properties": {
+                "policy_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "adapter_grants": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "audience",
+          "expires_at"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "ssh.certificate",
+              "wireguard.peer",
+              "ssh.session",
+              "mtls.client_certificate",
+              "tcp.port"
+            ]
+          },
+          "audience": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "expires_at": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    },
+    "required_abilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "mesh_membership",
+          "network_route_authorization",
+          "ssh_credential",
+          "mtls_credential",
+          "tcp_admission",
+          "network_reachability",
+          "ssh_session",
+          "service_identity",
+          "tcp_connection"
+        ]
+      }
+    }
+  }
+}

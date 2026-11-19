@@ -2,8 +2,9 @@ use std::{fs, path::Path};
 
 use authority_contracts_model::{
     AccessAuthorizationBundleV1, IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1,
-    NetworkAccessGrantV1, PolicyDecisionEvaluatedV1, SignedDecisionRevocationNoticeV1,
-    SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    NetworkAccessGrantV1, PolicyDecisionEvaluatedV1, PolicyDecisionEvaluatedV2,
+    SignedDecisionRevocationNoticeV1, SignedDecisionRevocationNoticeV2,
+    SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 
 #[test]
@@ -229,6 +230,18 @@ fn policy_decision_vectors_conform() {
             "invalid policy decision trace accepted: {}",
             path.display()
         );
+    }
+}
+
+#[test]
+fn ability_policy_decision_vectors_conform() {
+    for (kind, expected) in [("valid", true), ("invalid", false)] {
+        for path in contract_vectors("policy-decision-evaluated-v2", kind) {
+            let bytes = fs::read(&path).unwrap();
+            let valid = serde_json::from_slice::<PolicyDecisionEvaluatedV2>(&bytes)
+                .is_ok_and(|trace| trace.validate().is_ok());
+            assert_eq!(valid, expected, "{}", path.display());
+        }
     }
 }
 

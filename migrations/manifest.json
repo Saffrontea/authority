@@ -32,6 +32,9 @@
     },
     "0011_node_endpoint_facts.sql": {
       "sha256": "493777965d0391094a18c9b21cb9d69eac1e3b49ffbbe01b6cf13f964639bfe6"
+    },
+    "0012_ability_policies.sql": {
+      "sha256": "a7f8a092ba3411ff62756d4474d287d2146650d0840a682e425f306b4382e9f1"
     }
   }
 }

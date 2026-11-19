@@ -2,8 +2,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{
     AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, DecisionRevocationNoticeV2,
-    PolicyCapabilityV1, PolicyDecisionEvaluatedV1, PolicyIntentV1, PolicyOutcomeV1, PolicyRouteV1,
-    PolicySourceV1, SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV1,
+    PolicyAbilityV2, PolicyDecisionEvaluatedV2, PolicyIntentV1, PolicyOutcomeV1, PolicyRefV2,
+    PolicyRouteV1, PolicySourceV2, SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV1,
     SignedMtlsIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
@@ -223,7 +223,6 @@ async fn create_demo_access(
     let proposed_device_id = Uuid::new_v4();
     let target_device_id = Uuid::new_v4();
     let target_node_id = request.target_node_id;
-    let policy_id = Uuid::new_v4();
     let mut transaction = access_policy::begin_authorization(state.pool())
         .await
         .map_err(ApiError::internal)?;
@@ -289,24 +288,28 @@ async fn create_demo_access(
     )
     .bind(target_node_id)
     .bind(target_device_id)
-    .bind(target_mesh_address)
+    .bind(&target_mesh_address)
     .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
-    sqlx::query(
-        "INSERT INTO policy.access_policies \
-         (id, domain_id, subject_user_id, required_device_id, target_node_id, ssh_principal, capabilities, tcp_ports) \
-         VALUES ($1, $2, $3, $4, $5, 'deploy', \
-                 ARRAY['ssh.issue', 'mtls.issue', 'mesh.join', 'network.reach', 'tcp.connect'], ARRAY[8080,8081])",
-    )
-    .bind(policy_id)
-    .bind(state.domain_id())
-    .bind(request.user_id)
-    .bind(device_id)
-    .bind(target_node_id)
-    .execute(&mut *transaction)
-    .await
-    .map_err(ApiError::internal)?;
+    let request_key = json!({"mode":"request"});
+    let selectors = vec![
+        json!({"kind":"mesh_membership", "wireguard_public_key":client_wireguard_key, "address":client_mesh_address}),
+        json!({"kind":"network_route_authorization", "source":client_mesh_address, "destination":target_mesh_address}),
+        json!({"kind":"network_reachability", "source":client_mesh_address, "destination":target_mesh_address}),
+        json!({"kind":"ssh_credential", "principals":["deploy"], "key":request_key, "terminal_token":request_key}),
+        json!({"kind":"ssh_session", "principals":["deploy"], "key":request_key, "terminal_token":request_key}),
+        json!({"kind":"mtls_credential", "service_audience":crate::config::DEMO_SERVICE_AUDIENCE, "key":request_key}),
+        json!({"kind":"service_identity", "service_audience":crate::config::DEMO_SERVICE_AUDIENCE, "key":request_key}),
+        json!({"kind":"tcp_admission", "source":client_mesh_address, "destination":target_mesh_address, "ports":[8080,8081]}),
+        json!({"kind":"tcp_connection", "source":client_mesh_address, "destination":target_mesh_address, "ports":[8080,8081]}),
+    ];
+    for selector in selectors {
+        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect) VALUES ($1,$2,$3,$4,$5,$6,'allow')")
+            .bind(Uuid::new_v4()).bind(state.domain_id()).bind(request.user_id)
+            .bind(device_id).bind(target_node_id).bind(selector)
+            .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    }
     transaction.commit().await.map_err(ApiError::internal)?;
 
     Ok((
@@ -1452,12 +1455,13 @@ async fn record_access_decision(
         }
         if let Some(evaluated) = audit.evaluated {
             payload["policy"] = json!(policy_reference(&evaluated.decision));
-            payload["required_capabilities"] = json!(
+            payload["required_abilities"] = json!(
                 evaluated
                     .decision
-                    .required
-                    .iter()
-                    .map(|capability| capability.as_str())
+                    .sources
+                    .keys()
+                    .copied()
+                    .map(policy_ability)
                     .collect::<Vec<_>>()
             );
         }
@@ -1525,11 +1529,11 @@ async fn insert_access_bundle(
 }
 
 fn policy_decision_payload(
-    decision: &authority_policy_core::AccessDecision,
+    decision: &authority_policy_core::ability_policy::AbilityDecision,
     decision_id: &str,
     adapter_grants: Vec<AdapterGrantV1>,
 ) -> Result<Value, ApiError> {
-    let contract = PolicyDecisionEvaluatedV1 {
+    let contract = PolicyDecisionEvaluatedV2 {
         decision_id: decision_id.to_owned(),
         intent: PolicyIntentV1 {
             outcomes: decision
@@ -1550,18 +1554,24 @@ fn policy_decision_payload(
                 Route::MeshRequired => PolicyRouteV1::MeshRequired,
             },
         },
-        required_capabilities: decision
-            .required
-            .iter()
-            .map(|capability| policy_capability(*capability))
+        required_abilities: decision
+            .sources
+            .keys()
+            .copied()
+            .map(policy_ability)
             .collect(),
         policy_sources: decision
             .sources
             .iter()
-            .map(|(capability, policy)| PolicySourceV1 {
-                capability: policy_capability(*capability),
-                policy_id: policy.policy_id.to_string(),
-                revision: policy.revision,
+            .map(|(ability, sources)| PolicySourceV2 {
+                ability: policy_ability(*ability),
+                policies: sources
+                    .iter()
+                    .map(|policy| PolicyRefV2 {
+                        policy_id: policy.policy_id.to_string(),
+                        revision: policy.revision,
+                    })
+                    .collect(),
             })
             .collect(),
         adapter_grants,
@@ -1570,13 +1580,31 @@ fn policy_decision_payload(
     serde_json::to_value(contract).map_err(ApiError::internal)
 }
 
-fn policy_capability(capability: authority_policy_core::Capability) -> PolicyCapabilityV1 {
-    match capability {
-        authority_policy_core::Capability::MeshJoin => PolicyCapabilityV1::MeshJoin,
-        authority_policy_core::Capability::NetworkReach => PolicyCapabilityV1::NetworkReach,
-        authority_policy_core::Capability::SshIssue => PolicyCapabilityV1::SshIssue,
-        authority_policy_core::Capability::MtlsIssue => PolicyCapabilityV1::MtlsIssue,
-        authority_policy_core::Capability::TcpConnect => PolicyCapabilityV1::TcpConnect,
+fn policy_ability(ability: authority_policy_core::realization::Ability) -> PolicyAbilityV2 {
+    match ability {
+        authority_policy_core::realization::Ability::MeshMembership => {
+            PolicyAbilityV2::MeshMembership
+        }
+        authority_policy_core::realization::Ability::NetworkRouteAuthorization => {
+            PolicyAbilityV2::NetworkRouteAuthorization
+        }
+        authority_policy_core::realization::Ability::SshCredential => {
+            PolicyAbilityV2::SshCredential
+        }
+        authority_policy_core::realization::Ability::MtlsCredential => {
+            PolicyAbilityV2::MtlsCredential
+        }
+        authority_policy_core::realization::Ability::TcpAdmission => PolicyAbilityV2::TcpAdmission,
+        authority_policy_core::realization::Ability::NetworkReachability => {
+            PolicyAbilityV2::NetworkReachability
+        }
+        authority_policy_core::realization::Ability::SshSession => PolicyAbilityV2::SshSession,
+        authority_policy_core::realization::Ability::ServiceIdentity => {
+            PolicyAbilityV2::ServiceIdentity
+        }
+        authority_policy_core::realization::Ability::TcpConnection => {
+            PolicyAbilityV2::TcpConnection
+        }
     }
 }
 
@@ -1589,7 +1617,7 @@ async fn insert_decision_outbox(
         "INSERT INTO outbox.events \
          (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
          VALUES ($1, 'policy', 'access_decision', $2, \
-                 'policy.decision.evaluated', 1, $3, now())",
+                 'policy.decision.evaluated', 2, $3, now())",
     )
     .bind(Uuid::new_v4())
     .bind(decision_id)
@@ -1600,13 +1628,8 @@ async fn insert_decision_outbox(
     Ok(())
 }
 
-fn policy_reference(decision: &authority_policy_core::AccessDecision) -> String {
-    decision
-        .policies()
-        .into_iter()
-        .map(|policy| format!("{}@{}", policy.policy_id, policy.revision))
-        .collect::<Vec<_>>()
-        .join(".")
+fn policy_reference(decision: &authority_policy_core::ability_policy::AbilityDecision) -> String {
+    decision.policy_reference()
 }
 
 async fn load_passkeys(state: &AppState, user_id: Uuid) -> Result<Vec<Passkey>, ApiError> {
@@ -1842,7 +1865,7 @@ impl IntoResponse for ApiError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use authority_policy_core::{AccessDecision, Capability, PolicyRef};
+    use authority_policy_core::{PolicyRef, ability_policy::AbilityDecision, realization::Ability};
 
     use super::*;
 
@@ -1903,27 +1926,17 @@ mod tests {
     }
 
     #[test]
-    fn decision_audit_explains_intent_capabilities_sources_and_adapters() {
+    fn decision_audit_explains_intent_abilities_sources_and_adapters() {
         let policy = PolicyRef {
             policy_id: Uuid::new_v4(),
             revision: 7,
         };
-        let evaluated = AccessDecision {
-            realization: authority_policy_core::realization::realize(
-                &AccessIntent::ssh(Route::MeshRequired),
-                authority_policy_core::realization::all_abilities(),
-            )
-            .expect("built-in SSH plan"),
+        let evaluated = AbilityDecision {
             intent: AccessIntent::ssh(Route::MeshRequired),
-            required: BTreeSet::from([
-                Capability::MeshJoin,
-                Capability::NetworkReach,
-                Capability::SshIssue,
-            ]),
             sources: BTreeMap::from([
-                (Capability::MeshJoin, policy),
-                (Capability::NetworkReach, policy),
-                (Capability::SshIssue, policy),
+                (Ability::MeshMembership, BTreeSet::from([policy])),
+                (Ability::NetworkReachability, BTreeSet::from([policy])),
+                (Ability::SshSession, BTreeSet::from([policy])),
             ]),
         };
         let Ok(payload) = policy_decision_payload(
@@ -1946,7 +1959,7 @@ mod tests {
         };
         assert_eq!(payload["intent"]["route"], "mesh_required");
         assert_eq!(
-            payload["required_capabilities"].as_array().map(Vec::len),
+            payload["required_abilities"].as_array().map(Vec::len),
             Some(3)
         );
         assert_eq!(payload["policy_sources"].as_array().map(Vec::len), Some(3));

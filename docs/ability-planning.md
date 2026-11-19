@@ -126,28 +126,28 @@ Each also carries its independent `[not_before, expires_at)` validity interval.
 A policy grant contains a requested ability only when all identity/resource/key
 bindings match, its principal or port set includes the requested set, and its time
 interval contains the entire requested interval. Empty principals, empty TCP port
-sets, port zero and invalid intervals are rejected. The current policy vocabulary
-permits the authenticated device to select SSH and mTLS public keys; those selected
-keys are frozen into the authorized plan, not granted as an unbound wildcard.
+sets, port zero and invalid intervals are rejected. Stored key selectors explicitly
+choose request-bound possession or a pinned key. Selected keys are frozen into
+the authorized plan.
 
-Stored capability decoding is atomic and strict for both allow and deny rules.
-The accepted vocabulary is `ssh.issue`, `mesh.join`, `network.reach`, `mtls.issue`
-and `tcp.connect`, plus the explicit legacy aliases `ssh` and `wireguard` (the
-latter expands to mesh join and network reach). Unknown strings, wildcard spelling,
-case/whitespace variants and empty lists never produce partial or empty grants.
-If any policy row loaded for the request contains invalid capability vocabulary,
-the whole authorization is refused and audited as `invalid_policy`; the HTTP
-response remains `policy_denied`. This conservative check includes inactive rows
-returned by the policy lookup, so malformed stored configuration must be corrected
-rather than relying on rule ordering or activation state to ignore it.
+Production reads `policy.ability_policies`, whose JSON selectors distinguish all
+nine direct and derived authority kinds. Selectors bind resources, TCP port sets,
+SSH principal sets and mTLS service audiences. Unknown kinds, unknown fields,
+invalid scopes, effects or revisions refuse the whole snapshot as `invalid_policy`,
+including malformed inactive deny rows. Existing capability-policy rows are not
+converted or consulted by production. The capability evaluator remains a separate
+coarse model used by its own tests.
 
-Rule precedence remains per capability. Scope metadata is read only from that
-capability's winning policy ID and revision. It is never unioned with a losing
-policy's ports or principals, and a losing broad allow cannot rescue an insufficient
-winning scope. The winning deny continues to deny that capability as before.
+For each requested ability, policy precedence is resolved independently for every
+port/principal and every interval between policy boundaries: highest priority,
+then revision, deny-on-tie, then policy ID. All requested atoms and time segments
+must be allowed. Multiple rules can cover disjoint scope or time segments. A deny
+on one port cannot silently disappear behind a broad allow. Direct permission
+does not grant the corresponding derived authority. The entire graph is compiled
+before permission filtering, preserving forbidden mandatory effects for rejection.
 
 Every requested adapter lease must fit both the configured TTL limit and its
-winning policy's `valid_until`. Exceeding either is rejected, not silently shortened.
+covering policies' validity intervals. Exceeding either is rejected, not silently shortened.
 Integer timestamp conversion rounds policy starts up and policy deadlines down.
 Zero, negative and overflowing lifetimes fail closed. Adapter leases remain
 independent; expiry of an SSH or TCP lease does not change a separate mesh lease.
@@ -215,9 +215,12 @@ declare an existing route and TCP enforcement.
 
 Both authorization endpoints begin one `READ COMMITTED` PostgreSQL transaction
 before loading policy. The policy loader requires that transaction, rather than a
-pool, and locks all matching policy rows, the requesting device, target node and
-target device with `FOR SHARE`. Existing-row updates/deletes wait until the
-authorization finishes. Policy evaluation, scoped planning, local signing, decision
+pool. It acquires a shared transaction advisory lock keyed by domain, subject and
+target before reading policies. A database trigger acquires the exclusive version
+of that same lock on every policy insert, update and delete, including changes to
+the scope key. Writers moving a rule acquire both keys in numeric order. This
+prevents new deny rows from appearing between policy evaluation and issuance.
+The requesting device, target node and target device are locked with `FOR SHARE`. Policy evaluation, scoped planning, local signing, decision
 persistence, audit and outbox writes all occur before that transaction commits.
 Persistence helpers borrow it and receive scalar context instead of an application
 state/pool; they cannot independently commit the authorization.
@@ -228,16 +231,13 @@ projection/persistence/commit failure returns no grant. Deadlocks return
 `503 authorization_conflict`; a retry needs a fresh device proof.
 There is no reuse of a previously evaluated decision after a conflict.
 
-The single policy/identity SELECT observes a statement snapshot and locks existing
-rows with `FOR SHARE`; it does not block insertion of new policies. A policy inserted
-after that snapshot applies to subsequent authorizations, rather than changing
-the decision already being evaluated. Ordering new policy inserts against issuance
-would require a shared locking protocol on both the policy-writing and issuing
-paths. This boundary does not retroactively revoke already issued contracts when
-later policy changes commit; enforcement/revocation remains a separate concern.
+Policy rows use the advisory guard and ordinary MVCC reads, avoiding a policy
+row-lock/advisory-lock ordering cycle. The guard lasts through issuance, audit and
+commit. Later policy changes do not retroactively revoke already issued contracts;
+dependent invalidation remains a separate integration.
 
 The LXC concurrency regression checks the isolation level, observes real blocked
-writers through `pg_stat_activity` for policy/device/node changes, and forces an
+writers through `pg_stat_activity` for policy/device/node changes and deny insertion, and forces an
 outbox constraint error after audit/evidence writes. Separate connections cannot
 see an uncommitted decision, and rollback leaves neither audit nor outbox records.
 The writer's test changes are themselves rolled back.
@@ -287,13 +287,11 @@ production projection.
 
 ## Next extension
 
-Add further implemented adapters and deployment candidates with complete scoped
-effects. Stored policies still use the compatibility capability vocabulary and
-one SSH principal per row; policies do not yet expose a general ability-expression
-language or scope-specific deny precedence. The mTLS service audience remains
-trusted deployment configuration. Wildcard resources, CIDR containment, dynamic
-route discovery and mixed per-service routing are not modeled. Runtime enforcement
-and revocation continue to enforce the signed scopes.
+Persist authenticated enforcement observations and seed the solver with live roots;
+record their provenance in replay evidence, project only new grants, and publish
+dependent invalidations atomically. Environment declarations still need persisted
+source/revision/expiry metadata. Wildcard resources, CIDR containment, dynamic route
+discovery and mixed per-service routing are not modeled.
 
 ## Validation
 
@@ -315,14 +313,17 @@ the last independent root disappears. Mechanisms do not run during recomputation
 Mandatory effects are retained even when forbidden, so the solver can reject the
 complete closure rather than silently dropping an unauthorized effect.
 
-These are core APIs, not yet the control-plane storage integration. Production
-still reads capability policies and seeds planning with an empty available set.
-The next integration must persist concrete ability rules and authenticated
-enforcement observations, capture revision locks in the authorization transaction,
-record reused roots in replay evidence, project only new grants, and publish
-dependent invalidations atomically. An issued contract alone is insufficient
-evidence that a target installed a network grant. Existing LXC coverage exercises
-the current production path, not this future integration.
+Concrete ability policies are connected to the production DB, planner and audit.
+The `policy.decision.evaluated` event now uses the v2 ability-source contract;
+planning v2 records every winning policy reference per ability. Signed `policy_id`
+fields contain a domain-separated SHA-256 commitment to the canonical policy
+reference set, keeping the wire identifier bounded for any number of rules. Grants and adapter
+signing protocols retain their existing independent formats.
+
+Live-support recomputation remains a core API: production still seeds planning
+with an empty available set. An issued contract alone is insufficient evidence
+that a target installed a network grant. The next integration must authenticate
+and persist those observations before enabling reuse or dependent invalidation.
 
 Production error propagation now distinguishes `planning_search_limit` and
 `invalid_planning_catalog` from `no_authorized_realization`. All three fail closed;
@@ -363,13 +364,13 @@ agreement. It can also be invoked separately after the suite. The reconnect fixt
 resets only the PoC client's cached WireGuard transport after a revoked peer is
 re-authorized; it does not alter the target agent's granted membership or TCP rules.
 
-The strict stored-policy decoder also has a read-only LXC PostgreSQL regression
+The strict stored-ability-policy decoder also has a read-only LXC PostgreSQL regression
 that constructs typed rows without modifying stored policies. It verifies that a
-valid allow and an invalid deny cannot yield a partial snapshot, in either order:
+valid allow and an invalid ability selector in a deny cannot yield a partial snapshot, in either order:
 
 ```sh
 AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
-  cargo test -p authority-control-plane stored_policy_capabilities_fail_closed_in_postgres -- --ignored
+  cargo test -p authority-control-plane stored_ability_policies_fail_closed_in_postgres -- --ignored
 ```
 
 It uses the local development credential file (or `AUTHORITY_DB_PASSWORD` /
@@ -385,7 +386,7 @@ AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
 
 The derived-authority catalog is validated by the full verification gate with
 `PROPTEST_CASES=4096`, 38 expected-failure proof mutations, nine-kind atomic
-containment checks, five real PostgreSQL regressions, and LXC route modes with
+containment checks, real PostgreSQL regressions, and LXC route modes with
 seeds 7 (mesh/default deployment) and 42 (existing-route deployment). Both live
 runs verify v2 audit/outbox agreement with the actually issued TCP scopes. The DB
 regressions additionally check endpoint-manifest row locking and fail-closed

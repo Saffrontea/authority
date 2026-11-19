@@ -1,0 +1,40 @@
+{
+  "decision_id": "ability-decision-1",
+  "intent": {
+    "outcomes": [
+      "tcp.connect"
+    ],
+    "route": "direct"
+  },
+  "required_abilities": [
+    "tcp_admission",
+    "tcp_connection"
+  ],
+  "policy_sources": [
+    {
+      "ability": "tcp_admission",
+      "policies": [
+        {
+          "policy_id": "00000000-0000-0000-0000-000000000001",
+          "revision": 1
+        }
+      ]
+    },
+    {
+      "ability": "tcp_connection",
+      "policies": [
+        {
+          "policy_id": "00000000-0000-0000-0000-000000000001",
+          "revision": 1
+        }
+      ]
+    }
+  ],
+  "adapter_grants": [
+    {
+      "kind": "tcp.port",
+      "audience": "network-agent",
+      "expires_at": 200
+    }
+  ]
+}

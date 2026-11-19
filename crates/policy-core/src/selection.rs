@@ -154,7 +154,7 @@ impl CandidateEvaluation {
 pub struct AbilityEvidence {
     pub ability: ScopedAbility,
     pub permitted: ScopedAbility,
-    pub policy: PolicyRef,
+    pub policies: BTreeSet<PolicyRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -347,7 +347,8 @@ impl PlanEvidence {
                 || !record.permitted.contains(&record.ability)
                 || !scope_matches_resources(&record.ability.scope, resources, binding)
                 || !scope_matches_resources(&record.permitted.scope, resources, binding)
-                || record.policy.revision < 1
+                || record.policies.is_empty()
+                || record.policies.iter().any(|policy| policy.revision < 1)
                 || !kinds.insert(record.ability.scope.kind())
                 || !record
                     .ability
@@ -492,7 +493,7 @@ pub(crate) fn plan_evidence(
     plan: &Plan<ScopedAbility, AccessMechanism>,
     model: &Model<ScopedAbility, AccessMechanism>,
     goals: &BTreeSet<ScopedAbility>,
-    permissions: &BTreeMap<Ability, (ScopedAbility, PolicyRef)>,
+    permissions: &BTreeMap<Ability, (ScopedAbility, BTreeSet<PolicyRef>)>,
 ) -> Result<PlanEvidence, ScopeError> {
     let index: BTreeMap<_, _> = plan
         .abilities
@@ -515,13 +516,13 @@ pub(crate) fn plan_evidence(
         .abilities
         .iter()
         .map(|ability| {
-            let (permitted, policy) = permissions
+            let (permitted, policies) = permissions
                 .get(&ability.scope.kind())
                 .ok_or(ScopeError::InvalidRequest)?;
             Ok(AbilityEvidence {
                 ability: ability.clone(),
                 permitted: permitted.clone(),
-                policy: *policy,
+                policies: policies.clone(),
             })
         })
         .collect::<Result<_, ScopeError>>()?;
@@ -598,6 +599,22 @@ pub fn evaluate_selection(
     limits: LifetimeLimits,
     options: &SelectionOptions,
 ) -> Result<(AccessDecision, AuthorizedPlan), SelectionFailure> {
+    evaluate_with(
+        request,
+        requested,
+        resources,
+        options,
+        |candidate, inputs| evaluate_scoped(candidate, snapshot, scopes, inputs, resources, limits),
+    )
+}
+
+pub(crate) fn evaluate_with<D>(
+    request: &AccessRequest,
+    requested: &RequestedAccess,
+    resources: &NetworkResources,
+    options: &SelectionOptions,
+    evaluate: impl Fn(&AccessRequest, &RequestedAccess) -> Result<(D, AuthorizedPlan), ScopeError>,
+) -> Result<(D, AuthorizedPlan), SelectionFailure> {
     if matches!(options.choice, RouteChoice::Exact(route) if route != request.intent.route) {
         return Err(SelectionFailure::rejected(
             request,
@@ -618,14 +635,7 @@ pub fn evaluate_selection(
         }
         let (candidate_request, inputs) =
             candidate_inputs(request, requested, candidate, options.choice);
-        match evaluate_scoped(
-            &candidate_request,
-            snapshot,
-            scopes,
-            &inputs,
-            resources,
-            limits,
-        ) {
+        match evaluate(&candidate_request, &inputs) {
             Ok((decision, plan)) => {
                 let count = plan.realization().mechanisms.len();
                 evaluations.push(CandidateEvaluation {
@@ -715,7 +725,7 @@ impl PlanEvidence {
             .map(|entry| {
                 (
                     entry.ability.scope.kind(),
-                    (entry.permitted.clone(), entry.policy),
+                    (entry.permitted.clone(), entry.policies.clone()),
                 )
             })
             .collect();

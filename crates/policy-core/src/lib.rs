@@ -221,6 +221,10 @@ pub enum DenialReason {
     ExplicitDeny(Capability),
     #[error("no applicable policy grants a required capability")]
     MissingCapability(Capability),
+    #[error("a concrete ability is explicitly denied")]
+    ExplicitAbilityDeny(realization::Ability),
+    #[error("no applicable policy grants a concrete ability")]
+    MissingAbility(realization::Ability),
 }
 
 impl DenialReason {
@@ -237,6 +241,8 @@ impl DenialReason {
             Self::Disabled => "device_or_target_disabled",
             Self::ExplicitDeny(_) => "explicit_deny",
             Self::MissingCapability(_) => "missing_capability",
+            Self::ExplicitAbilityDeny(_) => "explicit_ability_deny",
+            Self::MissingAbility(_) => "missing_ability",
         }
     }
 
@@ -244,6 +250,9 @@ impl DenialReason {
     #[must_use]
     pub const fn capability(&self) -> Option<Capability> {
         match self {
+            Self::ExplicitAbilityDeny(ability) | Self::MissingAbility(ability) => {
+                Some(ability.permission())
+            }
             Self::ExplicitDeny(capability) | Self::MissingCapability(capability) => {
                 Some(*capability)
             }

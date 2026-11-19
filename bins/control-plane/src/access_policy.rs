@@ -1,17 +1,19 @@
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeSet;
 
 use authority_policy_core::{
-    AccessDecision, AccessIntent, AccessRequest, DenialReason, Effect, IdentityFacts, PolicyRef,
-    PolicyRule, PolicySnapshot,
-    capabilities::{CapabilityParseError, parse_capabilities},
-    scoped::{AuthorizedPlan, LifetimeLimits, NetworkResources, PolicyScope, RequestedAccess},
-    selection::{SelectionFailure, SelectionOptions, evaluate_selection},
+    AccessIntent, AccessRequest, DenialReason, Effect, IdentityFacts, PolicyRef,
+    ability_policy::{
+        AbilityDecision, AbilityPolicySnapshot, StoredAbilityPolicy, evaluate_selection,
+    },
+    scoped::{AuthorizedPlan, LifetimeLimits, NetworkResources, RequestedAccess, Validity},
+    selection::{SelectionFailure, SelectionOptions},
 };
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 pub struct AuthorizedAccess {
-    pub decision: AccessDecision,
+    pub decision: AbilityDecision,
     pub plan: AuthorizedPlan,
 }
 
@@ -20,18 +22,10 @@ pub enum AuthorizationOutcome {
     Denied(Box<SelectionFailure>),
 }
 
-struct StoredRule {
-    rule: PolicyRule,
-    scope: PolicyScope,
-}
-
 #[derive(Debug)]
 enum PolicyReadError {
     Storage(sqlx::Error),
-    InvalidCapabilities {
-        policy_id: Uuid,
-        cause: CapabilityParseError,
-    },
+    InvalidPolicy { policy_id: Uuid, cause: String },
 }
 
 impl From<sqlx::Error> for PolicyReadError {
@@ -59,28 +53,34 @@ pub async fn authorize(
     limits: LifetimeLimits,
     selection: &SelectionOptions,
 ) -> Result<AuthorizationOutcome, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(policy.ability_policy_lock_key($1, $2, $3))")
+        .bind(request.domain_id)
+        .bind(request.subject_user_id)
+        .bind(request.target_node_id)
+        .execute(&mut **transaction)
+        .await?;
     let rows = sqlx::query(
         "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
                 policy.required_device_id, policy.target_node_id, policy.enabled, \
-                policy.effect, policy.priority, policy.revision, policy.capabilities, \
+                policy.effect, policy.priority, policy.revision, policy.selector, \
                 EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
                 CEIL(EXTRACT(EPOCH FROM policy.valid_from))::bigint AS valid_from, \
                 FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
-                policy.ssh_principal, policy.tcp_ports, host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
+                host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
                 client.status = 'active' AS device_active, \
                 target.status = 'active' AND target_device.status = 'active' \
                     AND target_device.domain_id = policy.domain_id AS target_active, \
                 target.endpoint_facts, client.wireguard_public_key, \
                 host(client.mesh_address) AS device_mesh_address \
-         FROM policy.access_policies AS policy \
+         FROM policy.ability_policies AS policy \
          JOIN device.devices AS client ON client.id = $3 \
          JOIN device.nodes AS target ON target.id = $4 \
          JOIN device.devices AS target_device ON target_device.id = target.device_id \
          WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
            AND policy.target_node_id = $4 \
          ORDER BY policy.id, policy.revision \
-         FOR SHARE OF policy, client, target, target_device",
+         FOR SHARE OF client, target, target_device",
     )
     .bind(request.domain_id)
     .bind(request.subject_user_id)
@@ -125,31 +125,19 @@ pub async fn authorize(
     let stored = match rows.iter().map(stored_rule).collect::<Result<Vec<_>, _>>() {
         Ok(stored) => stored,
         Err(PolicyReadError::Storage(cause)) => return Err(cause),
-        Err(PolicyReadError::InvalidCapabilities { policy_id, cause }) => {
-            tracing::warn!(%policy_id, %cause, "invalid stored policy capabilities; refusing authorization");
+        Err(PolicyReadError::InvalidPolicy { policy_id, cause }) => {
+            tracing::warn!(%policy_id, %cause, "invalid stored ability policy; refusing authorization");
             return Ok(AuthorizationOutcome::Denied(Box::new(
                 SelectionFailure::policy(&request, selection, DenialReason::InvalidPolicy),
             )));
         }
     };
-    let scopes: BTreeMap<_, _> = stored
-        .iter()
-        .map(|item| {
-            (
-                PolicyRef {
-                    policy_id: item.rule.policy_id,
-                    revision: item.rule.revision,
-                },
-                item.scope.clone(),
-            )
-        })
-        .collect();
-    let snapshot = PolicySnapshot {
+    let snapshot = AbilityPolicySnapshot {
         identity,
-        rules: stored.into_iter().map(|item| item.rule).collect(),
+        rules: stored,
     };
     match evaluate_selection(
-        &request, &snapshot, &scopes, requested, &resources, limits, selection,
+        &request, &snapshot, requested, &resources, limits, selection,
     ) {
         Ok((decision, plan)) => Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
             decision,
@@ -159,42 +147,51 @@ pub async fn authorize(
     }
 }
 
-fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredRule, PolicyReadError> {
+fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredAbilityPolicy, PolicyReadError> {
+    let policy_id = row.try_get("id")?;
+    let invalid = |cause: &str| PolicyReadError::InvalidPolicy {
+        policy_id,
+        cause: cause.to_owned(),
+    };
     let effect = match row.try_get::<String, _>("effect")?.as_str() {
         "allow" => Effect::Allow,
-        _ => Effect::Deny,
+        "deny" => Effect::Deny,
+        _ => return Err(invalid("unknown effect")),
     };
-    let policy_id = row.try_get("id")?;
-    let capabilities: Vec<String> = row.try_get("capabilities")?;
-    let grants = parse_capabilities(capabilities.iter().map(String::as_str))
-        .map_err(|cause| PolicyReadError::InvalidCapabilities { policy_id, cause })?;
-    let tcp_ports: Vec<i32> = row.try_get("tcp_ports")?;
-    let tcp_ports = tcp_ports
-        .into_iter()
-        .map(u16::try_from)
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?;
-    Ok(StoredRule {
-        rule: PolicyRule {
+    let selector = serde_json::from_value(row.try_get("selector")?).map_err(|cause| {
+        PolicyReadError::InvalidPolicy {
             policy_id,
-            domain_id: row.try_get("domain_id")?,
-            subject_user_id: row.try_get("subject_user_id")?,
-            required_device_id: row.try_get("required_device_id")?,
-            target_node_id: row.try_get("target_node_id")?,
-            enabled: row.try_get("enabled")?,
-            effect,
-            priority: row.try_get("priority")?,
+            cause: cause.to_string(),
+        }
+    })?;
+    let rule = StoredAbilityPolicy {
+        policy: PolicyRef {
+            policy_id,
             revision: row.try_get("revision")?,
-            grants,
-            revoked_at: row.try_get("revoked_at")?,
-            valid_from: row.try_get("valid_from")?,
-            valid_until: row.try_get("valid_until")?,
         },
-        scope: PolicyScope {
-            ssh_principals: BTreeSet::from([row.try_get("ssh_principal")?]),
-            tcp_ports,
+        domain_id: row.try_get("domain_id")?,
+        subject_user_id: row.try_get("subject_user_id")?,
+        required_device_id: row.try_get("required_device_id")?,
+        target_node_id: row.try_get("target_node_id")?,
+        enabled: row.try_get("enabled")?,
+        revoked: row.try_get::<Option<i64>, _>("revoked_at")?.is_some(),
+        effect,
+        priority: row.try_get("priority")?,
+        selector,
+        validity: Validity {
+            not_before: row.try_get::<Option<i64>, _>("valid_from")?.unwrap_or(0),
+            expires_at: row
+                .try_get::<Option<i64>, _>("valid_until")?
+                .unwrap_or(i64::MAX),
         },
-    })
+    };
+    if !rule.selector.is_valid()
+        || !rule.validity.contains(rule.validity)
+        || rule.policy.revision < 1
+    {
+        return Err(invalid("invalid selector, revision or validity"));
+    }
+    Ok(rule)
 }
 
 pub fn request(
@@ -217,7 +214,7 @@ pub fn request(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use authority_policy_core::{Capability, Route, scoped::RequestedTcp};
+    use authority_policy_core::{Route, realization::Ability, scoped::RequestedTcp};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
     use std::time::Duration;
 
@@ -254,15 +251,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[ignore = "requires AUTHORITY_DB_HOST and the LXC PostgreSQL development credentials"]
-    async fn stored_policy_capabilities_fail_closed_in_postgres() {
+    async fn stored_ability_policies_fail_closed_in_postgres() {
         let pool = lxc_pool(1).await;
         let mut transaction = pool.begin().await.unwrap();
         sqlx::query("SET TRANSACTION READ ONLY")
             .execute(&mut *transaction)
             .await
             .unwrap();
-        let query = "SELECT $1::text AS effect, $2::text[] AS capabilities, \
-            ARRAY[8080]::integer[] AS tcp_ports, 'deploy'::text AS ssh_principal, \
+        let query = "SELECT $1::text AS effect, $2::jsonb AS selector, \
             '00000000-0000-0000-0000-000000000001'::uuid AS id, \
             '00000000-0000-0000-0000-000000000002'::uuid AS domain_id, \
             '00000000-0000-0000-0000-000000000003'::uuid AS subject_user_id, \
@@ -272,24 +268,20 @@ pub(crate) mod tests {
             NULL::bigint AS revoked_at, NULL::bigint AS valid_from, NULL::bigint AS valid_until";
         let allow = sqlx::query(query)
             .bind("allow")
-            .bind(vec!["ssh.issue".to_owned()])
+            .bind(serde_json::json!({"kind":"tcp_connection", "source":"10.0.0.1", "destination":"10.0.0.2", "ports":[8080]}))
             .fetch_one(&mut *transaction)
             .await
             .unwrap();
         assert!(stored_rule(&allow).is_ok());
         for effect in ["allow", "deny"] {
-            for capabilities in [
-                vec!["ssh.isssue"],
-                vec!["ssh.issue", "unknown.capability"],
-                vec![],
+            for selector in [
+                serde_json::json!({"kind":"unknown"}),
+                serde_json::json!({"kind":"tcp_connection", "source":"10.0.0.1", "destination":"10.0.0.2", "ports":[]}),
+                serde_json::json!({"kind":"tcp_connection", "source":"10.0.0.1", "destination":"10.0.0.2", "ports":[8080], "future":"ignored"}),
             ] {
-                let values = capabilities
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
                 let invalid = sqlx::query(query)
                     .bind(effect)
-                    .bind(values)
+                    .bind(selector)
                     .fetch_one(&mut *transaction)
                     .await
                     .unwrap();
@@ -300,14 +292,23 @@ pub(crate) mod tests {
                         .into_iter()
                         .map(stored_rule)
                         .collect::<Result<Vec<_>, _>>();
-                    assert!(matches!(
-                        parsed,
-                        Err(PolicyReadError::InvalidCapabilities { .. })
-                    ));
+                    assert!(matches!(parsed, Err(PolicyReadError::InvalidPolicy { .. })));
                 }
             }
         }
         transaction.rollback().await.unwrap();
+    }
+
+    async fn wait_for_lock(pool: &PgPool, pid: i32) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')",
+                ).bind(pid).fetch_one(pool).await.unwrap();
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("concurrent transaction must wait on the authority guard");
     }
 
     async fn writer_waits(
@@ -333,28 +334,70 @@ pub(crate) mod tests {
             transaction.rollback().await.unwrap();
         });
         let pid = receiver.await.unwrap();
-        let blocked = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')"
-                ).bind(pid).fetch_one(&observer).await.unwrap();
-                if waiting { break; }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }).await;
-        assert!(
-            blocked.is_ok(),
-            "concurrent policy/identity writer must wait for the authorization transaction"
-        );
+        wait_for_lock(&observer, pid).await;
         writer
+    }
+
+    #[tokio::test]
+    #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
+    async fn waiting_authorization_reads_the_committed_deny_under_read_committed() {
+        let pool = lxc_pool(4).await;
+        let (request, _) = live_tcp_request(&pool).await;
+        let mut writer = begin_authorization(&pool).await.unwrap();
+        let deny_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,selector,'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind'='tcp_connection' LIMIT 1")
+            .bind(deny_id).bind(request.domain_id).bind(request.subject_user_id).bind(request.target_node_id)
+            .execute(&mut *writer).await.unwrap();
+        let reader_pool = pool.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut tx = begin_authorization(&reader_pool).await.unwrap();
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+            sender.send(pid).unwrap();
+            let outcome = authorize(
+                &mut tx,
+                request,
+                &RequestedAccess {
+                    tcp: Some(RequestedTcp {
+                        ports: BTreeSet::from([8080]),
+                        ttl_seconds: 10,
+                    }),
+                    ..RequestedAccess::default()
+                },
+                LifetimeLimits {
+                    ssh_seconds: 60,
+                    network_seconds: 300,
+                },
+                &SelectionOptions::exact(Route::Direct),
+            )
+            .await;
+            tx.rollback().await.unwrap();
+            outcome
+        });
+        wait_for_lock(&pool, receiver.await.unwrap()).await;
+        writer.commit().await.unwrap();
+        let outcome = reader.await.unwrap();
+        // Remove this test's committed deny before inspecting the result.
+        sqlx::query("DELETE FROM policy.ability_policies WHERE id=$1")
+            .bind(deny_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let AuthorizationOutcome::Denied(reason) = outcome.unwrap() else {
+            panic!("a reader waiting behind a committed deny must not use an older snapshot");
+        };
+        assert_eq!(reason.code(), "explicit_ability_deny");
     }
 
     async fn live_tcp_request(pool: &PgPool) -> (AccessRequest, Uuid) {
         let row = sqlx::query(
             "SELECT p.domain_id, p.subject_user_id, p.required_device_id, p.target_node_id, n.device_id AS target_device_id \
-             FROM policy.access_policies p JOIN device.devices d ON d.id = p.required_device_id \
+             FROM policy.ability_policies p JOIN device.devices d ON d.id = p.required_device_id \
              JOIN device.nodes n ON n.id = p.target_node_id \
-             WHERE p.enabled AND p.effect = 'allow' AND 'tcp.connect' = ANY(p.capabilities) \
+             WHERE p.enabled AND p.effect = 'allow' AND p.selector->>'kind' = 'tcp_connection' \
                AND d.owner_user_id = p.subject_user_id AND d.status = 'active' \
              ORDER BY p.id DESC LIMIT 1"
         ).fetch_one(pool).await.expect("run poc:e2e to bootstrap a policy first");
@@ -388,11 +431,12 @@ pub(crate) mod tests {
             ..RequestedAccess::default()
         };
         let updates = [
-            "UPDATE policy.access_policies SET enabled = enabled WHERE id = $1",
+            "UPDATE policy.ability_policies SET enabled = enabled WHERE id = $1",
             "UPDATE device.devices SET status = status WHERE id = $1",
             "UPDATE device.nodes SET status = status WHERE id = $1",
             "UPDATE device.nodes SET endpoint_facts = endpoint_facts WHERE id = $1",
             "UPDATE device.devices SET status = status WHERE id = $1",
+            "INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect) SELECT md5(random()::text)::uuid,domain_id,subject_user_id,required_device_id,target_node_id,selector,'deny' FROM policy.ability_policies WHERE id = $1",
         ];
         for (index, update) in updates.into_iter().enumerate() {
             let mut transaction = begin_authorization(&pool).await.unwrap();
@@ -417,7 +461,12 @@ pub(crate) mod tests {
                 panic!("expected valid demo authorization");
             };
             let id = match index {
-                0 => authorized.decision.sources[&Capability::TcpConnect].policy_id,
+                0 | 5 => {
+                    authorized.decision.sources[&Ability::TcpConnection]
+                        .first()
+                        .unwrap()
+                        .policy_id
+                }
                 1 => request.device_id,
                 2 | 3 => request.target_node_id,
                 _ => target_device_id,
@@ -469,6 +518,74 @@ pub(crate) mod tests {
             );
         }
     }
+    #[tokio::test]
+    #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
+    async fn concrete_ability_denies_are_atomic_and_scope_specific_in_postgres() {
+        let pool = lxc_pool(2).await;
+        let (request, _) = live_tcp_request(&pool).await;
+        let mut tx = begin_authorization(&pool).await.unwrap();
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,jsonb_set(selector,'{ports}','[8081]'::jsonb),'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind'='tcp_connection' LIMIT 1")
+            .bind(id).bind(request.domain_id).bind(request.subject_user_id).bind(request.target_node_id)
+            .execute(&mut *tx).await.unwrap();
+        for (ports, allowed) in [
+            (BTreeSet::from([8080]), true),
+            (BTreeSet::from([8081]), false),
+            (BTreeSet::from([8080, 8081]), false),
+        ] {
+            let result = authorize(
+                &mut tx,
+                request.clone(),
+                &RequestedAccess {
+                    tcp: Some(RequestedTcp {
+                        ports,
+                        ttl_seconds: 10,
+                    }),
+                    ..RequestedAccess::default()
+                },
+                LifetimeLimits {
+                    ssh_seconds: 60,
+                    network_seconds: 300,
+                },
+                &SelectionOptions::exact(Route::Direct),
+            )
+            .await
+            .unwrap();
+            match result {
+                AuthorizationOutcome::Allowed(_) => assert!(allowed),
+                AuthorizationOutcome::Denied(reason) => {
+                    assert!(!allowed);
+                    assert_eq!(reason.code(), "explicit_ability_deny");
+                }
+            }
+        }
+        sqlx::query("UPDATE policy.ability_policies SET selector = '{\"kind\":\"future_ability\"}'::jsonb WHERE id=$1")
+            .bind(id).execute(&mut *tx).await.unwrap();
+        let outcome = authorize(
+            &mut tx,
+            request,
+            &RequestedAccess {
+                tcp: Some(RequestedTcp {
+                    ports: BTreeSet::from([8080]),
+                    ttl_seconds: 10,
+                }),
+                ..RequestedAccess::default()
+            },
+            LifetimeLimits {
+                ssh_seconds: 60,
+                network_seconds: 300,
+            },
+            &SelectionOptions::exact(Route::Direct),
+        )
+        .await
+        .unwrap();
+        let AuthorizationOutcome::Denied(reason) = outcome else {
+            panic!("unknown deny must reject the whole snapshot");
+        };
+        assert_eq!(reason.code(), "invalid_policy");
+        tx.rollback().await.unwrap();
+    }
+
     #[tokio::test]
     #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
     async fn endpoint_manifests_are_explicit_and_unknown_facts_fail_closed() {

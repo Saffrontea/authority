@@ -376,7 +376,7 @@
       "required": [
         "ability",
         "permitted",
-        "policy"
+        "policies"
       ],
       "properties": {
         "ability": {
@@ -385,8 +385,13 @@
         "permitted": {
           "$ref": "#/$defs/scoped_ability"
         },
-        "policy": {
-          "$ref": "#/$defs/policy"
+        "policies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/policy"
+          }
         }
       }
     },

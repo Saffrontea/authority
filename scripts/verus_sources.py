@@ -408,14 +408,15 @@ def factory_source():
         self.evidence.candidates = candidates;'''
     if re.sub(r"\s+", "", setter) != re.sub(r"\s+", "", expected_setter):
         raise SystemExit("selection setter changed; prove invariant preservation")
-    _, evaluate = block(production, "pub fn evaluate_scoped(")
-    call = evaluate.find("let plan = AuthorizedPlan::new(")
-    if call < 0:
-        raise SystemExit("evaluate_scoped must use the checked plan constructor")
-    opening = evaluate.index("(", call)
-    end = delimiter_end(evaluate, opening, "(", ")")
-    if re.sub(r"\s+", "", evaluate[end:]) != "?;Ok((decision,plan))":
-        raise SystemExit("plan modified after checked construction; extend factory proof")
+    for entrypoint in ("evaluate_scoped", "evaluate_ability_scoped"):
+        _, evaluate = block(production, "pub fn " + entrypoint + "(")
+        call = evaluate.find("let plan = AuthorizedPlan::new(")
+        if call < 0:
+            raise SystemExit("evaluate_scoped must use the checked plan constructor")
+        opening = evaluate.index("(", call)
+        end = delimiter_end(evaluate, opening, "(", ")")
+        if re.sub(r"\s+", "", evaluate[end:]) != "?;Ok((decision,plan))":
+            raise SystemExit("plan modified after checked construction; extend factory proof")
     _, body = block(implementation, "fn new(")
     body = body.replace("Ok(Self {", "Ok(AuthorizedPlan {")
     pattern = re.search(r"realization\s*\.abilities\s*\.iter\(\)\s*\.any\(", body)

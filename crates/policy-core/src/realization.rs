@@ -1,7 +1,7 @@
 //! The current access catalog, separate from the protocol-independent solver.
 //!
 //! This coarse topology is instantiated with identity/resource/principal/port/time
-//! scopes by `scoped::evaluate_scoped` in the production authorization path.
+//! scopes by `scoped::evaluate_ability_scoped` in the production authorization path.
 //! The compatibility enums alone do not authorize adapter contract material.
 
 use std::collections::BTreeSet;
@@ -22,7 +22,8 @@ pub enum AbilityDimension {
     Application,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Ability {
     MeshMembership,
     NetworkRouteAuthorization,
