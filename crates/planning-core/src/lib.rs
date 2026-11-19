@@ -186,3 +186,94 @@ mod closure_properties {
         }
     }
 }
+
+/// Trusted immutable environment requirements, separate from granted authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conditional<T, F> {
+    pub value: T,
+    pub requires_facts: BTreeSet<F>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalModel<A, M, F> {
+    pub mechanisms: Vec<Conditional<Mechanism<A, M>, F>>,
+    pub derivations: Vec<Conditional<Derivation<A>, F>>,
+}
+
+impl<A: Clone, M: Clone, F: Ord> ConditionalModel<A, M, F> {
+    /// Compiles a trusted environment snapshot into the ordinary monotone model.
+    /// Facts never enter the authority set or satisfy an ability prerequisite.
+    #[must_use]
+    pub fn instantiate(&self, facts: &BTreeSet<F>) -> Model<A, M> {
+        Model {
+            mechanisms: self
+                .mechanisms
+                .iter()
+                .filter(|edge| edge.requires_facts.is_subset(facts))
+                .map(|edge| edge.value.clone())
+                .collect(),
+            derivations: self
+                .derivations
+                .iter()
+                .filter(|edge| edge.requires_facts.is_subset(facts))
+                .map(|edge| edge.value.clone())
+                .collect(),
+        }
+    }
+}
+
+/// A grounded derivation firing; indices refer to the exact compiled model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivationStep {
+    pub after_mechanisms: usize,
+    pub rule: usize,
+}
+
+/// Replay the complete mandatory closure of an executable plan.
+/// # Errors
+/// Rejects duplicate IDs, non-executable steps, or an omitted/invented effect.
+pub fn explain<A: Ord + Clone, M: Ord + Clone>(
+    model: &Model<A, M>,
+    available: &BTreeSet<A>,
+    plan: &Plan<A, M>,
+) -> Result<Vec<DerivationStep>, PlanningError> {
+    let catalog: BTreeMap<_, _> = model
+        .mechanisms
+        .iter()
+        .map(|edge| (&edge.id, edge))
+        .collect();
+    if catalog.len() != model.mechanisms.len() {
+        return Err(PlanningError::DuplicateMechanism);
+    }
+    let mut abilities = available.clone();
+    let mut evidence = Vec::new();
+    let mut selected = BTreeSet::new();
+    for at in 0..=plan.mechanisms.len() {
+        loop {
+            let before = abilities.len();
+            for (rule, edge) in model.derivations.iter().enumerate() {
+                if edge.requires.is_subset(&abilities) && !edge.provides.is_subset(&abilities) {
+                    abilities.extend(edge.provides.iter().cloned());
+                    evidence.push(DerivationStep {
+                        after_mechanisms: at,
+                        rule,
+                    });
+                }
+            }
+            if before == abilities.len() {
+                break;
+            }
+        }
+        if let Some(id) = plan.mechanisms.get(at) {
+            let edge = catalog.get(id).ok_or(PlanningError::NoSolution)?;
+            if !selected.insert(id) || !edge.requires.is_subset(&abilities) {
+                return Err(PlanningError::NoSolution);
+            }
+            abilities.extend(edge.provides.iter().cloned());
+        }
+    }
+    if abilities != plan.abilities {
+        return Err(PlanningError::NoSolution);
+    }
+    Ok(evidence)
+}

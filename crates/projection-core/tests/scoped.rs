@@ -27,6 +27,14 @@ fn authorize_selected(
     requested: &RequestedAccess,
     options: Option<&SelectionOptions>,
 ) -> (AuthorizedPlan, CommonDecisionClaims) {
+    try_authorize_selected(intent, requested, options).unwrap()
+}
+
+fn try_authorize_selected(
+    intent: AccessIntent,
+    requested: &RequestedAccess,
+    options: Option<&SelectionOptions>,
+) -> Result<(AuthorizedPlan, CommonDecisionClaims), authority_policy_core::scoped::ScopeError> {
     let request = AccessRequest {
         domain_id: Uuid::from_u128(1),
         subject_user_id: Uuid::from_u128(2),
@@ -76,6 +84,7 @@ fn authorize_selected(
         },
     )]);
     let resources = NetworkResources {
+        environment: authority_policy_core::realization::endpoint_facts(),
         source_address: "10.77.0.1".parse().unwrap(),
         target_address: "10.77.0.2".parse().unwrap(),
         registered_wireguard_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
@@ -89,9 +98,9 @@ fn authorize_selected(
         evaluate_selection(
             &request, &snapshot, &scopes, requested, &resources, limits, options,
         )
-        .unwrap()
+        .map_err(|failure| failure.reason)?
     } else {
-        evaluate_scoped(&request, &snapshot, &scopes, requested, &resources, limits).unwrap()
+        evaluate_scoped(&request, &snapshot, &scopes, requested, &resources, limits)?
     };
     let common = CommonDecisionClaims {
         decision_id: "0123456789abcdef0123456789abcdef".into(),
@@ -103,7 +112,7 @@ fn authorize_selected(
         policy_id: plan.policy_reference().into(),
         issued_at: request.evaluated_at,
     };
-    (plan, common)
+    Ok((plan, common))
 }
 
 #[test]
@@ -315,7 +324,12 @@ proptest::proptest! {
             network: Some(RequestedNetwork { wireguard_public_key: None, ttl_seconds: network_ttl }),
             ..RequestedAccess::default()
         };
-        let (plan, common) = authorize(AccessIntent::infrastructure(Route::MeshRequired), &requested);
+        let outcome = try_authorize_selected(AccessIntent::infrastructure(Route::MeshRequired), &requested,None);
+        if network_ttl < ssh_ttl.max(mtls_ttl) {
+            prop_assert!(outcome.is_err());
+            return Ok(());
+        }
+        let (plan,common) = outcome.unwrap();
         prop_assert!(plan.issued_at() >= 0);
         for ability in &plan.realization().abilities {
             prop_assert_eq!(ability.binding, plan.binding());

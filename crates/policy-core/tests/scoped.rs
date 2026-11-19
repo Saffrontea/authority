@@ -117,6 +117,7 @@ impl Fixture {
                 ..RequestedAccess::default()
             },
             resources: NetworkResources {
+                environment: authority_policy_core::realization::endpoint_facts(),
                 source_address: "10.77.0.1".parse().unwrap(),
                 target_address: "10.77.0.2".parse().unwrap(),
                 registered_wireguard_key: "registered-device-key".into(),
@@ -157,7 +158,7 @@ fn automatic_selection_chooses_the_smallest_authorized_implementation() {
     );
     assert_eq!(
         plan.evidence().candidates[1].result,
-        CandidateResult::Authorized { mechanism_count: 3 }
+        CandidateResult::Authorized { mechanism_count: 2 }
     );
     assert!(plan.evidence().is_consistent());
     let serialized = serde_json::to_vec(plan.evidence()).unwrap();
@@ -183,8 +184,11 @@ fn automatic_selection_falls_back_when_the_existing_route_is_not_declared() {
     );
     let proof = plan.evidence().plan.as_ref().unwrap();
     assert_eq!(proof.steps[0].mechanism, AccessMechanism::WireGuardPeer);
-    assert!(!proof.steps[1].requires.is_empty());
-    assert_eq!(proof.steps[2].mechanism, AccessMechanism::TcpAdmission);
+    assert_eq!(proof.steps.len(), 2);
+    assert_eq!(proof.steps[0].provides.len(), 2);
+    assert_eq!(proof.steps[1].mechanism, AccessMechanism::TcpAdmission);
+    assert_eq!(proof.derivations.len(), 2);
+    assert_eq!(proof.derivations[1].requires.len(), 2);
 }
 
 #[test]
@@ -281,7 +285,7 @@ fn tcp_plan_binds_only_requested_ports_resource_identity_and_interval() {
         plan.realization().mechanisms,
         vec![AccessMechanism::TcpAdmission]
     );
-    assert_eq!(plan.realization().abilities.len(), 1);
+    assert_eq!(plan.realization().abilities.len(), 2);
     let ability = plan.realization().abilities.first().unwrap();
     assert_eq!(
         ability.validity,
@@ -414,7 +418,7 @@ fn mesh_key_is_registered_and_each_adapter_keeps_its_own_deadline() {
     for ability in &plan.realization().abilities {
         assert_eq!(
             ability.validity.expires_at,
-            if ability.scope.kind() == Ability::TcpConnection {
+            if ability.scope.kind().effective() == Ability::TcpConnection {
                 120
             } else {
                 400
@@ -541,5 +545,121 @@ proptest! {
         let mut rebound = c;
         rebound.binding.target_node_id = Uuid::from_u128(99);
         prop_assert!(!a.contains(&rebound));
+    }
+}
+
+#[test]
+fn endpoint_facts_and_every_grounded_derivation_are_required() {
+    let mut fixture = Fixture::tcp();
+    let (_, plan) = fixture.authorize().unwrap();
+    assert!(plan.evidence().is_consistent());
+    assert_eq!(plan.evidence().version, 2);
+    let proof = plan.evidence().plan.as_ref().unwrap();
+    assert_eq!(proof.derivations.len(), 1);
+    assert!(
+        plan.realization()
+            .abilities
+            .iter()
+            .any(|a| matches!(a.scope, AbilityScope::TcpAdmission { .. }))
+    );
+    let mut omitted = plan.evidence().clone();
+    omitted.plan.as_mut().unwrap().derivations.clear();
+    assert!(!omitted.is_consistent());
+    let mut ungrounded = plan.evidence().clone();
+    ungrounded.plan.as_mut().unwrap().derivations[0].after_mechanisms = 0;
+    assert!(!ungrounded.is_consistent());
+    let mut substituted = plan.evidence().clone();
+    for entry in &mut substituted.plan.as_mut().unwrap().abilities {
+        if let AbilityScope::TcpAdmission { ports, .. } = &mut entry.ability.scope {
+            *ports = BTreeSet::from([8081]);
+        }
+    }
+    assert!(!substituted.is_consistent());
+    fixture.resources.environment.clear();
+    assert!(fixture.authorize().is_err());
+    let mut removed_fact = plan.evidence().clone();
+    removed_fact.resources.as_mut().unwrap().environment.clear();
+    assert!(!removed_fact.is_consistent());
+}
+
+#[test]
+fn usable_authority_cannot_outlive_its_transport_prerequisite() {
+    let mut fixture = Fixture::tcp();
+    fixture.request.intent = AccessIntent::tcp(Route::MeshRequired);
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 10,
+    });
+    assert!(fixture.authorize().is_err()); // TCP asks for 20 seconds.
+    fixture.requested.network.as_mut().unwrap().ttl_seconds = 20;
+    let (_, plan) = fixture.authorize().unwrap();
+    assert!(plan.evidence().is_consistent());
+    fixture
+        .resources
+        .environment
+        .remove(&authority_policy_core::realization::EndpointFact::MeshRouteConfigured);
+    assert!(fixture.authorize().is_err());
+}
+
+#[test]
+fn a_direct_route_is_an_explicit_trusted_environment_condition() {
+    let mut fixture = Fixture::tcp();
+    fixture
+        .resources
+        .environment
+        .remove(&authority_policy_core::realization::EndpointFact::ExistingRouteConfigured);
+    assert!(fixture.authorize().is_err());
+    fixture.requested.network = Some(RequestedNetwork {
+        wireguard_public_key: None,
+        ttl_seconds: 20,
+    });
+    let (_, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
+    assert_eq!(plan.evidence().selected, Some(CandidateId::WireGuardMesh));
+    assert!(plan.evidence().is_consistent());
+}
+
+#[test]
+fn credential_trust_facts_are_specific_to_the_selected_service() {
+    use authority_policy_core::{Outcome, realization::EndpointFact, scoped::RequestedMtls};
+    for (outcome, required, unrelated) in [
+        (
+            Outcome::Ssh,
+            EndpointFact::SshCaTrusted,
+            EndpointFact::MtlsCaTrusted,
+        ),
+        (
+            Outcome::MtlsService,
+            EndpointFact::MtlsCaTrusted,
+            EndpointFact::SshCaTrusted,
+        ),
+    ] {
+        let mut fixture = Fixture::tcp();
+        fixture.snapshot.rules[0]
+            .grants
+            .insert(Capability::MtlsIssue);
+        fixture.request.intent = AccessIntent {
+            outcomes: BTreeSet::from([outcome]),
+            route: Route::Direct,
+        };
+        fixture.requested = RequestedAccess::default();
+        if outcome == Outcome::Ssh {
+            fixture.requested.ssh = Some(RequestedSsh {
+                public_key_fingerprint: "ssh-key".into(),
+                principals: None,
+                terminal_token_hash: "terminal".into(),
+                ttl_seconds: 20,
+            });
+        } else {
+            fixture.requested.mtls = Some(RequestedMtls {
+                client_spki_sha256: "mtls-key".into(),
+                ttl_seconds: 20,
+            });
+        }
+        fixture.resources.environment.remove(&unrelated);
+        let (_, plan) = fixture.authorize().unwrap();
+        assert!(plan.evidence().is_consistent());
+        assert_eq!(plan.evidence().plan.as_ref().unwrap().derivations.len(), 1);
+        fixture.resources.environment.remove(&required);
+        assert!(fixture.authorize().is_err());
     }
 }

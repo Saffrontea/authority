@@ -9,7 +9,7 @@ use std::{
     net::Ipv4Addr,
 };
 
-use authority_planning_core::{Mechanism, Model, Plan, Request, solve};
+use authority_planning_core::{Derivation, Mechanism, Model, Plan, Request, solve};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::{
     AccessDecision, AccessRequest, Capability, DenialReason, Outcome, PolicyRef, PolicySnapshot,
     evaluate,
-    realization::{Ability, AccessMechanism, catalog},
+    realization::{Ability, AccessMechanism},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -68,7 +68,16 @@ pub enum AbilityScope {
         source: Ipv4Addr,
         destination: Ipv4Addr,
     },
+    NetworkRouteAuthorization {
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+    },
     SshSession {
+        public_key_fingerprint: String,
+        principals: BTreeSet<String>,
+        terminal_token_hash: String,
+    },
+    SshCredential {
         public_key_fingerprint: String,
         principals: BTreeSet<String>,
         terminal_token_hash: String,
@@ -78,7 +87,17 @@ pub enum AbilityScope {
         identity_uri: String,
         service_audience: String,
     },
+    MtlsCredential {
+        client_spki_sha256: String,
+        identity_uri: String,
+        service_audience: String,
+    },
     TcpConnection {
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        ports: BTreeSet<u16>,
+    },
+    TcpAdmission {
         source: Ipv4Addr,
         destination: Ipv4Addr,
         ports: BTreeSet<u16>,
@@ -91,12 +110,99 @@ impl AbilityScope {
         match self {
             Self::MeshMembership { .. } => Ability::MeshMembership,
             Self::NetworkReachability { .. } => Ability::NetworkReachability,
+            Self::NetworkRouteAuthorization { .. } => Ability::NetworkRouteAuthorization,
             Self::SshSession { .. } => Ability::SshSession,
+            Self::SshCredential { .. } => Ability::SshCredential,
             Self::ServiceIdentity { .. } => Ability::ServiceIdentity,
+            Self::MtlsCredential { .. } => Ability::MtlsCredential,
             Self::TcpConnection { .. } => Ability::TcpConnection,
+            Self::TcpAdmission { .. } => Ability::TcpAdmission,
         }
     }
 
+    /// The effective scope corresponding to direct credential/rule authority.
+    #[must_use]
+    pub fn effective(&self) -> Self {
+        match self {
+            Self::NetworkRouteAuthorization {
+                source,
+                destination,
+            } => Self::NetworkReachability {
+                source: *source,
+                destination: *destination,
+            },
+            Self::SshCredential {
+                public_key_fingerprint,
+                principals,
+                terminal_token_hash,
+            } => Self::SshSession {
+                public_key_fingerprint: public_key_fingerprint.clone(),
+                principals: principals.clone(),
+                terminal_token_hash: terminal_token_hash.clone(),
+            },
+            Self::MtlsCredential {
+                client_spki_sha256,
+                identity_uri,
+                service_audience,
+            } => Self::ServiceIdentity {
+                client_spki_sha256: client_spki_sha256.clone(),
+                identity_uri: identity_uri.clone(),
+                service_audience: service_audience.clone(),
+            },
+            Self::TcpAdmission {
+                source,
+                destination,
+                ports,
+            } => Self::TcpConnection {
+                source: *source,
+                destination: *destination,
+                ports: ports.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    fn direct(self) -> Self {
+        match self {
+            Self::NetworkReachability {
+                source,
+                destination,
+            } => Self::NetworkRouteAuthorization {
+                source,
+                destination,
+            },
+            Self::SshSession {
+                public_key_fingerprint,
+                principals,
+                terminal_token_hash,
+            } => Self::SshCredential {
+                public_key_fingerprint,
+                principals,
+                terminal_token_hash,
+            },
+            Self::ServiceIdentity {
+                client_spki_sha256,
+                identity_uri,
+                service_audience,
+            } => Self::MtlsCredential {
+                client_spki_sha256,
+                identity_uri,
+                service_audience,
+            },
+            Self::TcpConnection {
+                source,
+                destination,
+                ports,
+            } => Self::TcpAdmission {
+                source,
+                destination,
+                ports,
+            },
+            other => other,
+        }
+    }
+
+    #[allow(clippy::match_same_arms)] // Separate authority kinds keep value-level proof branches explicit.
     fn contains(&self, requested: &Self) -> bool {
         match (self, requested) {
             (
@@ -118,12 +224,49 @@ impl AbilityScope {
                     && selected.is_subset(principals)
             }
             (
+                Self::SshCredential {
+                    public_key_fingerprint,
+                    principals,
+                    terminal_token_hash,
+                },
+                Self::SshCredential {
+                    public_key_fingerprint: key,
+                    principals: selected,
+                    terminal_token_hash: token,
+                },
+            ) => {
+                public_key_fingerprint == key
+                    && terminal_token_hash == token
+                    && !selected.is_empty()
+                    && selected.iter().all(|principal| !principal.is_empty())
+                    && selected.is_subset(principals)
+            }
+            (
                 Self::TcpConnection {
                     source,
                     destination,
                     ports,
                 },
                 Self::TcpConnection {
+                    source: from,
+                    destination: to,
+                    ports: selected,
+                },
+            ) => {
+                source == from
+                    && destination == to
+                    && !selected.is_empty()
+                    && selected.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
+                    && !selected.contains(&0)
+                    && selected.is_subset(ports)
+            }
+            (
+                Self::TcpAdmission {
+                    source,
+                    destination,
+                    ports,
+                },
+                Self::TcpAdmission {
                     source: from,
                     destination: to,
                     ports: selected,
@@ -166,6 +309,8 @@ pub struct NetworkResources {
     pub registered_wireguard_key: String,
     /// Trusted deployment configuration, not a client-selected audience.
     pub service_audience: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub environment: BTreeSet<crate::realization::EndpointFact>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -182,7 +327,7 @@ pub struct LifetimeLimits {
 
 impl LifetimeLimits {
     const fn for_ability(self, ability: Ability) -> i64 {
-        if matches!(ability, Ability::SshSession) {
+        if matches!(ability, Ability::SshSession | Ability::SshCredential) {
             self.ssh_seconds
         } else {
             self.network_seconds
@@ -395,7 +540,7 @@ fn requested_scope(
     resources: &NetworkResources,
     policy: &PolicyScope,
 ) -> Result<(AbilityScope, i64), ScopeError> {
-    Ok(match kind {
+    let (scope, ttl) = match kind.effective() {
         Ability::MeshMembership | Ability::NetworkReachability => {
             let input = requested
                 .network
@@ -455,7 +600,16 @@ fn requested_scope(
                 input.ttl_seconds,
             )
         }
-    })
+        _ => return Err(ScopeError::InvalidRequest),
+    };
+    Ok((
+        if kind == kind.effective() {
+            scope
+        } else {
+            scope.direct()
+        },
+        ttl,
+    ))
 }
 
 fn permission(
@@ -467,10 +621,13 @@ fn permission(
     let mut grant = ability.clone();
     grant.validity = validity;
     match &mut grant.scope {
-        AbilityScope::SshSession { principals, .. } => {
+        AbilityScope::SshSession { principals, .. }
+        | AbilityScope::SshCredential { principals, .. } => {
             principals.clone_from(&policy.ssh_principals);
         }
-        AbilityScope::TcpConnection { ports, .. } => ports.clone_from(&policy.tcp_ports),
+        AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => {
+            ports.clone_from(&policy.tcp_ports);
+        }
         AbilityScope::MeshMembership {
             wireguard_public_key,
             ..
@@ -522,13 +679,13 @@ fn scoped_abilities(
         };
         let grant = permission(&ability, policy, resources, permitted_time);
         if !grant.validity.contains(ability.validity) {
-            return Err(ScopeError::LifetimeExceeded(kind));
+            return Err(ScopeError::LifetimeExceeded(kind.effective()));
         }
         if !grant.contains(&ability) {
             return Err(if kind == Ability::MeshMembership {
                 ScopeError::WireGuardKeyMismatch
             } else {
-                ScopeError::ScopeDenied(kind)
+                ScopeError::ScopeDenied(kind.effective())
             });
         }
         permissions.insert(kind, (grant, *source));
@@ -540,32 +697,49 @@ fn scoped_abilities(
     })
 }
 
-fn instantiate(
+pub(crate) fn instantiate(
     request: &AccessRequest,
     abilities: &BTreeMap<Ability, ScopedAbility>,
+    resources: &NetworkResources,
 ) -> Model<ScopedAbility, AccessMechanism> {
-    let mechanisms = catalog(request.intent.route)
-        .mechanisms
-        .into_iter()
-        .filter_map(|mechanism| {
-            Some(Mechanism {
-                id: mechanism.id,
-                requires: mechanism
-                    .requires
-                    .iter()
-                    .map(|kind| abilities.get(kind).cloned())
-                    .collect::<Option<_>>()?,
-                provides: mechanism
-                    .provides
-                    .iter()
-                    .map(|kind| abilities.get(kind).cloned())
-                    .collect::<Option<_>>()?,
-            })
-        })
-        .collect();
+    let catalog = crate::realization::conditional_catalog(request.intent.route)
+        .instantiate(&resources.environment);
+    let scope = |kinds: &BTreeSet<Ability>| {
+        kinds
+            .iter()
+            .map(|kind| abilities.get(kind).cloned())
+            .collect::<Option<BTreeSet<_>>>()
+    };
     Model {
-        mechanisms,
-        derivations: Vec::new(),
+        mechanisms: catalog
+            .mechanisms
+            .into_iter()
+            .filter_map(|edge| {
+                Some(Mechanism {
+                    id: edge.id,
+                    requires: scope(&edge.requires)?,
+                    provides: scope(&edge.provides)?,
+                })
+            })
+            .collect(),
+        derivations: catalog
+            .derivations
+            .into_iter()
+            .filter_map(|edge| {
+                let requires = scope(&edge.requires)?;
+                let provides = scope(&edge.provides)?;
+                if !provides.iter().all(|output| {
+                    requires.iter().all(|input| {
+                        input.binding == output.binding && input.validity.contains(output.validity)
+                    }) && requires
+                        .iter()
+                        .any(|input| input.scope.effective() == output.scope)
+                }) {
+                    return None;
+                }
+                Some(Derivation { requires, provides })
+            })
+            .collect(),
     }
 }
 
@@ -608,7 +782,7 @@ pub fn evaluate_scoped(
                 .ok_or(ScopeError::InvalidRequest)
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let model = instantiate(request, &abilities);
+    let model = instantiate(request, &abilities, resources);
     let realization = solve(
         &model,
         &Request {
@@ -623,6 +797,10 @@ pub fn evaluate_scoped(
     )
     .map_err(|_| ScopeError::Policy(DenialReason::NoRealization))?;
     let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
+    let evidence = crate::selection::PlanningEvidence::authorized(request, proof, resources);
+    if !evidence.is_consistent() {
+        return Err(ScopeError::InvalidRequest);
+    }
     let plan = AuthorizedPlan::new(
         binding(request),
         request.evaluated_at,
@@ -633,7 +811,7 @@ pub fn evaluate_scoped(
             .collect::<Vec<_>>()
             .join("."),
         realization,
-        crate::selection::PlanningEvidence::authorized(request, proof, resources),
+        evidence,
     )?;
     Ok((decision, plan))
 }

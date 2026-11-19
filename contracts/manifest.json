@@ -47,6 +47,10 @@
     "artifacts/policy-plan-evaluated-v1.schema.json": {
       "version": 1,
       "sha256": "d0cbcb059c511dd9f98c5a51f3e72c42782e7c8268d540529a6df3b46594a439"
+    },
+    "artifacts/policy-plan-evaluated-v2.schema.json": {
+      "version": 2,
+      "sha256": "d9032ee890ae4c0ac66ec73947fcb5f066a9c9ba63524ebf631423408685931e"
     }
   }
 }

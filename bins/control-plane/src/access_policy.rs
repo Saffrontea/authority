@@ -71,7 +71,7 @@ pub async fn authorize(
                 client.status = 'active' AS device_active, \
                 target.status = 'active' AND target_device.status = 'active' \
                     AND target_device.domain_id = policy.domain_id AS target_active, \
-                client.wireguard_public_key, \
+                target.endpoint_facts, client.wireguard_public_key, \
                 host(client.mesh_address) AS device_mesh_address \
          FROM policy.access_policies AS policy \
          JOIN device.devices AS client ON client.id = $3 \
@@ -100,7 +100,16 @@ pub async fn authorize(
         device_active: first.try_get("device_active")?,
         target_active: first.try_get("target_active")?,
     };
+    let environment = first
+        .try_get::<Vec<String>, _>("endpoint_facts")?
+        .into_iter()
+        .map(|fact| {
+            serde_json::from_value(serde_json::Value::String(fact))
+                .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))
+        })
+        .collect::<Result<_, _>>()?;
     let resources = NetworkResources {
+        environment,
         registered_wireguard_key: String::from_utf8(first.try_get("wireguard_public_key")?)
             .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?,
         source_address: first
@@ -382,6 +391,7 @@ pub(crate) mod tests {
             "UPDATE policy.access_policies SET enabled = enabled WHERE id = $1",
             "UPDATE device.devices SET status = status WHERE id = $1",
             "UPDATE device.nodes SET status = status WHERE id = $1",
+            "UPDATE device.nodes SET endpoint_facts = endpoint_facts WHERE id = $1",
             "UPDATE device.devices SET status = status WHERE id = $1",
         ];
         for (index, update) in updates.into_iter().enumerate() {
@@ -409,7 +419,7 @@ pub(crate) mod tests {
             let id = match index {
                 0 => authorized.decision.sources[&Capability::TcpConnect].policy_id,
                 1 => request.device_id,
-                2 => request.target_node_id,
+                2 | 3 => request.target_node_id,
                 _ => target_device_id,
             };
             let writer = writer_waits(&pool, update, id).await;
@@ -457,6 +467,60 @@ pub(crate) mod tests {
                 remaining, 0,
                 "failed decision must leave neither audit nor outbox behind"
             );
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
+    async fn endpoint_manifests_are_explicit_and_unknown_facts_fail_closed() {
+        let pool = lxc_pool(2).await;
+        let (request, _) = live_tcp_request(&pool).await;
+        let inputs = RequestedAccess {
+            tcp: Some(RequestedTcp {
+                ports: BTreeSet::from([8080]),
+                ttl_seconds: 10,
+            }),
+            ..RequestedAccess::default()
+        };
+        for (facts, expected) in [
+            (vec![], "deny"),
+            (vec!["tcp_enforcement"], "deny"),
+            (
+                vec!["tcp_enforcement", "existing_route_configured"],
+                "allow",
+            ),
+            (
+                vec![
+                    "tcp_enforcement",
+                    "existing_route_configured",
+                    "future.fact",
+                ],
+                "invalid",
+            ),
+        ] {
+            let mut tx = begin_authorization(&pool).await.unwrap();
+            sqlx::query("UPDATE device.nodes SET endpoint_facts=$2 WHERE id=$1")
+                .bind(request.target_node_id)
+                .bind(facts)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let result = authorize(
+                &mut tx,
+                request.clone(),
+                &inputs,
+                LifetimeLimits {
+                    ssh_seconds: 60,
+                    network_seconds: 300,
+                },
+                &SelectionOptions::exact(Route::Direct),
+            )
+            .await;
+            match expected {
+                "allow" => assert!(matches!(result, Ok(AuthorizationOutcome::Allowed(_)))),
+                "deny" => assert!(matches!(result, Ok(AuthorizationOutcome::Denied(_)))),
+                _ => assert!(matches!(result, Err(sqlx::Error::Decode(_)))),
+            }
+            tx.rollback().await.unwrap();
         }
     }
 }

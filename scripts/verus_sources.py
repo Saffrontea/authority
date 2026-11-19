@@ -94,7 +94,7 @@ def scopes_source():
     protocol = (ROOT / "crates/contracts-model/src/protocol.rs").read_text()
     scope_declaration, _ = block(source, "pub enum AbilityScope {")
     variants = re.findall(r"^    (\w+) \{", scope_declaration, re.MULTILINE)
-    if set(variants) != {"MeshMembership", "NetworkReachability", "SshSession", "ServiceIdentity", "TcpConnection"} or len(variants) != 5:
+    if set(variants) != {"MeshMembership", "NetworkReachability", "SshSession", "ServiceIdentity", "TcpConnection", "NetworkRouteAuthorization", "SshCredential", "MtlsCredential", "TcpAdmission"} or len(variants) != 9:
         raise SystemExit("scope variants changed; extend the authority model and proofs")
     declarations = []
     for signature in ["pub struct AccessBinding {", "pub struct Validity {",

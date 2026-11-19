@@ -414,7 +414,7 @@ BEGIN
     SELECT 1 FROM outbox.events p
     WHERE p.event_type = 'policy.plan.evaluated'
       AND p.payload #>> '{planning,binding,subject_user_id}' = actor
-      AND (p.contract_version <> 1 OR p.payload #>> '{planning,version}' IS DISTINCT FROM '1'
+      AND (p.contract_version NOT IN (1,2) OR p.payload #>> '{planning,version}' IS DISTINCT FROM p.contract_version::text
         OR NOT EXISTS (SELECT 1 FROM audit.events a WHERE a.action = 'access.plan'
           AND a.actor_id = actor AND a.payload = p.payload))
   ) OR EXISTS (

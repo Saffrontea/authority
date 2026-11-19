@@ -34,15 +34,15 @@ pub open spec fn material_agrees(scope: AbilityScope, material: ScopeProjection)
     match (scope, material) {
         (AbilityScope::MeshMembership { wireguard_public_key, address }, ScopeProjection::Network(request)) =>
             request.wireguard_public_key == wireguard_public_key && request.mesh_address == ip_text(address),
-        (AbilityScope::NetworkReachability { .. }, ScopeProjection::None) => true,
-        (AbilityScope::SshSession { public_key_fingerprint, principals, terminal_token_hash }, ScopeProjection::Ssh(request)) =>
+        (AbilityScope::NetworkReachability { .. } | AbilityScope::NetworkRouteAuthorization { .. } | AbilityScope::SshSession { .. } | AbilityScope::ServiceIdentity { .. } | AbilityScope::TcpConnection { .. }, ScopeProjection::None) => true,
+        (AbilityScope::SshCredential { public_key_fingerprint, principals, terminal_token_hash }, ScopeProjection::Ssh(request)) =>
             request.public_key_fingerprint == public_key_fingerprint && request.terminal_token_hash == terminal_token_hash
                 && request.principals.to_set() == principals && request.principals.len() == principals.len()
                 && request.principals.no_duplicates(),
-        (AbilityScope::ServiceIdentity { client_spki_sha256, identity_uri, service_audience }, ScopeProjection::Mtls(request)) =>
+        (AbilityScope::MtlsCredential { client_spki_sha256, identity_uri, service_audience }, ScopeProjection::Mtls(request)) =>
             request.client_spki_sha256 == client_spki_sha256 && request.identity_uri == identity_uri
                 && request.service_audience == service_audience,
-        (AbilityScope::TcpConnection { source, destination, ports }, ScopeProjection::Tcp(request)) =>
+        (AbilityScope::TcpAdmission { source, destination, ports }, ScopeProjection::Tcp(request)) =>
             request.source_address == ip_text(source) && request.destination_address == ip_text(destination)
                 && request.destination_ports.to_set() == ports && request.destination_ports.len() == ports.len()
                 && request.destination_ports.no_duplicates(),
@@ -54,12 +54,12 @@ pub proof fn scope_materialization_refines_authorized_scope(scope: AbilityScope)
     ensures material_agrees(scope, project_scope(scope)),
 {
     match scope {
-        AbilityScope::SshSession { principals, .. } => {
+        AbilityScope::SshCredential { principals, .. } => {
             principals.lemma_to_seq_to_set_id();
             principals.lemma_to_seq_no_duplicates();
             principals.lemma_to_seq_len();
         },
-        AbilityScope::TcpConnection { ports, .. } => {
+        AbilityScope::TcpAdmission { ports, .. } => {
             ports.lemma_to_seq_to_set_id();
             ports.lemma_to_seq_no_duplicates();
             ports.lemma_to_seq_len();

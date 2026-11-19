@@ -25,6 +25,10 @@ pub enum AbilityDimension {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ability {
     MeshMembership,
+    NetworkRouteAuthorization,
+    SshCredential,
+    MtlsCredential,
+    TcpAdmission,
     NetworkReachability,
     SshSession,
     ServiceIdentity,
@@ -35,10 +39,25 @@ impl Ability {
     #[must_use]
     pub const fn dimension(self) -> AbilityDimension {
         match self {
-            Self::MeshMembership | Self::NetworkReachability => AbilityDimension::Network,
-            Self::TcpConnection => AbilityDimension::Transport,
-            Self::ServiceIdentity => AbilityDimension::Identity,
+            Self::MeshMembership | Self::NetworkReachability | Self::NetworkRouteAuthorization => {
+                AbilityDimension::Network
+            }
+            Self::TcpConnection | Self::TcpAdmission => AbilityDimension::Transport,
+            Self::ServiceIdentity | Self::MtlsCredential | Self::SshCredential => {
+                AbilityDimension::Identity
+            }
             Self::SshSession => AbilityDimension::Application,
+        }
+    }
+
+    #[must_use]
+    pub const fn effective(self) -> Self {
+        match self {
+            Self::NetworkRouteAuthorization => Self::NetworkReachability,
+            Self::SshCredential => Self::SshSession,
+            Self::MtlsCredential => Self::ServiceIdentity,
+            Self::TcpAdmission => Self::TcpConnection,
+            other => other,
         }
     }
 
@@ -48,10 +67,10 @@ impl Ability {
     pub const fn permission(self) -> Capability {
         match self {
             Self::MeshMembership => Capability::MeshJoin,
-            Self::NetworkReachability => Capability::NetworkReach,
-            Self::SshSession => Capability::SshIssue,
-            Self::ServiceIdentity => Capability::MtlsIssue,
-            Self::TcpConnection => Capability::TcpConnect,
+            Self::NetworkReachability | Self::NetworkRouteAuthorization => Capability::NetworkReach,
+            Self::SshSession | Self::SshCredential => Capability::SshIssue,
+            Self::ServiceIdentity | Self::MtlsCredential => Capability::MtlsIssue,
+            Self::TcpConnection | Self::TcpAdmission => Capability::TcpConnect,
         }
     }
 }
@@ -76,6 +95,10 @@ pub type AccessPlan = Plan<Ability, AccessMechanism>;
 #[must_use]
 pub fn all_abilities() -> BTreeSet<Ability> {
     BTreeSet::from([
+        Ability::NetworkRouteAuthorization,
+        Ability::SshCredential,
+        Ability::MtlsCredential,
+        Ability::TcpAdmission,
         Ability::MeshMembership,
         Ability::NetworkReachability,
         Ability::SshSession,
@@ -84,7 +107,7 @@ pub fn all_abilities() -> BTreeSet<Ability> {
     ])
 }
 
-pub(crate) fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
+pub(crate) fn legacy_catalog(route: Route) -> Model<Ability, AccessMechanism> {
     let mesh = route == Route::MeshRequired;
     let service_requires = if mesh {
         BTreeSet::from([Ability::NetworkReachability])
@@ -159,4 +182,129 @@ pub fn realize(
         },
         |_| true,
     )
+}
+
+/// Operator-declared endpoint configuration, never a client-provided permission.
+/// These describe support/trust, not current network or process liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointFact {
+    SshCaTrusted,
+    MtlsCaTrusted,
+    TcpEnforcement,
+    MeshRouteConfigured,
+    ExistingRouteConfigured,
+}
+
+#[must_use]
+pub fn endpoint_facts() -> BTreeSet<EndpointFact> {
+    BTreeSet::from([
+        EndpointFact::SshCaTrusted,
+        EndpointFact::MtlsCaTrusted,
+        EndpointFact::TcpEnforcement,
+        EndpointFact::MeshRouteConfigured,
+        EndpointFact::ExistingRouteConfigured,
+    ])
+}
+
+pub(crate) fn conditional_catalog(
+    route: Route,
+) -> authority_planning_core::ConditionalModel<Ability, AccessMechanism, EndpointFact> {
+    use authority_planning_core::{Conditional, ConditionalModel, Derivation};
+    let direct = |ability| match ability {
+        Ability::NetworkReachability => Ability::NetworkRouteAuthorization,
+        Ability::SshSession => Ability::SshCredential,
+        Ability::ServiceIdentity => Ability::MtlsCredential,
+        Ability::TcpConnection => Ability::TcpAdmission,
+        other => other,
+    };
+    let mechanisms = legacy_catalog(route)
+        .mechanisms
+        .into_iter()
+        .filter(|edge| {
+            !matches!(
+                (route, edge.id),
+                (Route::MeshRequired, AccessMechanism::NetworkRoute)
+                    | (Route::Direct, AccessMechanism::WireGuardPeer)
+            )
+        })
+        .map(|mut edge| {
+            // Acquiring a credential/admission rule does not require a live route.
+            // Reachability is a prerequisite of the derived usable authority instead.
+            if matches!(
+                edge.id,
+                AccessMechanism::SshCertificate
+                    | AccessMechanism::MtlsCertificate
+                    | AccessMechanism::TcpAdmission
+            ) {
+                edge.requires.clear();
+            }
+            edge.provides = edge.provides.into_iter().map(direct).collect();
+            if route == Route::MeshRequired && edge.id == AccessMechanism::WireGuardPeer {
+                edge.provides.insert(Ability::NetworkRouteAuthorization);
+            }
+            Conditional {
+                value: edge,
+                requires_facts: BTreeSet::new(),
+            }
+        })
+        .collect();
+    let derivations = [
+        (
+            Ability::NetworkRouteAuthorization,
+            Ability::NetworkReachability,
+            None,
+        ),
+        (
+            Ability::SshCredential,
+            Ability::SshSession,
+            Some(EndpointFact::SshCaTrusted),
+        ),
+        (
+            Ability::MtlsCredential,
+            Ability::ServiceIdentity,
+            Some(EndpointFact::MtlsCaTrusted),
+        ),
+        (
+            Ability::TcpAdmission,
+            Ability::TcpConnection,
+            Some(EndpointFact::TcpEnforcement),
+        ),
+    ]
+    .into_iter()
+    .map(|(input, output, fact)| {
+        let mut requires = BTreeSet::from([input]);
+        if route == Route::MeshRequired {
+            if output == Ability::NetworkReachability {
+                requires.insert(Ability::MeshMembership);
+            } else {
+                requires.insert(Ability::NetworkReachability);
+            }
+        }
+        let fact = if output == Ability::NetworkReachability && route == Route::MeshRequired {
+            Some(EndpointFact::MeshRouteConfigured)
+        } else {
+            fact
+        };
+        let mut requires_facts: BTreeSet<_> = fact.into_iter().collect();
+        if route == Route::Direct {
+            requires_facts.insert(EndpointFact::ExistingRouteConfigured);
+        }
+        Conditional {
+            value: Derivation {
+                requires,
+                provides: BTreeSet::from([output]),
+            },
+            requires_facts,
+        }
+    })
+    .collect();
+    ConditionalModel {
+        mechanisms,
+        derivations,
+    }
+}
+
+pub(crate) fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
+    conditional_catalog(route).instantiate(&endpoint_facts())
 }

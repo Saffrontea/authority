@@ -79,20 +79,20 @@ pub open spec fn network_scope(c: NetworkAccessGrantV1, s: AbilityScope) -> bool
         c.wireguard_public_key == wireguard_public_key && c.mesh_address == ip_text(address), _ => false }
 }
 pub open spec fn tcp_scope(c: TcpAccessGrantV1, s: AbilityScope) -> bool {
-    match s { AbilityScope::TcpConnection { source, destination, ports } =>
+    match s { AbilityScope::TcpAdmission { source, destination, ports } =>
         c.source_address == ip_text(source) && c.destination_address == ip_text(destination)
             && c.destination_ports.to_set() == ports && c.destination_ports.no_duplicates(), _ => false }
 }
 pub open spec fn ssh_scope(c: IssuanceAuthorizationV1, s: AbilityScope) -> bool {
-    match s { AbilityScope::SshSession { public_key_fingerprint, principals, .. } =>
+    match s { AbilityScope::SshCredential { public_key_fingerprint, principals, .. } =>
         c.ssh_public_key_fingerprint == public_key_fingerprint && c.principals.to_set() == principals
             && c.principals.no_duplicates(), _ => false }
 }
 pub open spec fn ssh_install_scope(c: IssuanceAuthorizationV1, s: AbilityScope) -> bool {
-    ssh_scope(c, s) && match s { AbilityScope::SshSession { terminal_token_hash, .. } => c.nonce == terminal_token_hash, _ => false }
+    ssh_scope(c, s) && match s { AbilityScope::SshCredential { terminal_token_hash, .. } => c.nonce == terminal_token_hash, _ => false }
 }
 pub open spec fn mtls_scope(c: MtlsIssuanceAuthorizationV1, s: AbilityScope) -> bool {
-    match s { AbilityScope::ServiceIdentity { client_spki_sha256, identity_uri, service_audience } =>
+    match s { AbilityScope::MtlsCredential { client_spki_sha256, identity_uri, service_audience } =>
         c.client_spki_sha256 == client_spki_sha256 && c.identity_uri == identity_uri && c.service_audience == service_audience, _ => false }
 }
 

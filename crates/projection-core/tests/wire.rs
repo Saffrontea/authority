@@ -47,7 +47,9 @@ struct Case {
     service: String,
 }
 
-fn authorize(case: &Case) -> (AuthorizedPlan, CommonDecisionClaims) {
+fn authorize(
+    case: &Case,
+) -> Result<(AuthorizedPlan, CommonDecisionClaims), authority_policy_core::scoped::ScopeError> {
     let [domain_id, subject_user_id, device_id, target_node_id] = case.ids.map(Uuid::from_u128);
     let mut outcomes = BTreeSet::new();
     for (bit, outcome) in [
@@ -117,6 +119,7 @@ fn authorize(case: &Case) -> (AuthorizedPlan, CommonDecisionClaims) {
     )]);
     let requested = requested(case);
     let resources = NetworkResources {
+        environment: authority_policy_core::realization::endpoint_facts(),
         source_address: "10.77.0.1".parse().unwrap(),
         target_address: "10.77.0.2".parse().unwrap(),
         registered_wireguard_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
@@ -132,8 +135,7 @@ fn authorize(case: &Case) -> (AuthorizedPlan, CommonDecisionClaims) {
             ssh_seconds: 60,
             network_seconds: 300,
         },
-    )
-    .unwrap();
+    )?;
     let common = CommonDecisionClaims {
         decision_id: format!("{:032x}", case.ids[0]),
         issuer: format!("domain-authority:{domain_id}"),
@@ -144,7 +146,7 @@ fn authorize(case: &Case) -> (AuthorizedPlan, CommonDecisionClaims) {
         policy_id: plan.policy_reference().into(),
         issued_at: case.now,
     };
-    (plan, common)
+    Ok((plan, common))
 }
 
 fn requested(case: &Case) -> RequestedAccess {
@@ -288,7 +290,12 @@ proptest! {
         service in "[a-z][a-z0-9-]{0,15}",
     ) {
         let case = Case { ids, now, mask, ttls: [ttls.0, ttls.1, ttls.2, ttls.3], principals, ports, service };
-        let (plan, common) = authorize(&case);
+        let outcome = authorize(&case);
+        if case.mask & 8 != 0 && [(1,case.ttls[0]),(2,case.ttls[1]),(4,case.ttls[2])].iter().any(|(bit,ttl)|case.mask & bit != 0 && *ttl > case.ttls[3]) {
+            prop_assert!(outcome.is_err());
+            return Ok(());
+        }
+        let (plan, common) = outcome.unwrap();
         let projected = project_authorized(&common, &plan).unwrap();
         let mut envelopes = Vec::new();
         macro_rules! add { ($field:ident, $family:expr, $sign:ident) => {

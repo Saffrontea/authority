@@ -80,7 +80,8 @@ rejected = browser('window.authorityRequestTcpAuthorization([8082],false,10)'
                    '.then(value=>done({unexpected:value})).catch(error=>done({denial:error.message}));', [])
 assert 'tcp_port_denied' in rejected.get('denial', ''), rejected
 
-combined = issue([8080], network=True)
+# These witnesses must outlive the separate short-expiry test below.
+combined = issue([8080], ttl=40, network=True)
 assert combined['decision_id'] == combined['tcp_grant']['grant']['decision_id']
 assert combined['decision_id'] == combined['network_grant']['grant']['nonce']
 assert 'ssh_authorization' not in combined and 'mtls_authorization' not in combined
@@ -92,7 +93,7 @@ wait(lambda: allowed(2223))
 assert not allowed(2224), 'unselected port was admitted'
 
 # TCP-only selection emits no peer or credential contracts.
-other = issue([8081])
+other = issue([8081], ttl=40)
 assert set(other) == {'decision_id', 'tcp_grant'}, other
 http(f'{agent}/v1/tcp-grants', other['tcp_grant'])
 wait(lambda: allowed(2224))

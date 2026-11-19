@@ -29,6 +29,9 @@
     },
     "0010_shared_ca_binding.sql": {
       "sha256": "509caebc171cd4f9ed7d1f58d0c903ac99f15d86fc8c39394205cb4d0e53d702"
+    },
+    "0011_node_endpoint_facts.sql": {
+      "sha256": "493777965d0391094a18c9b21cb9d69eac1e3b49ffbbe01b6cf13f964639bfe6"
     }
   }
 }

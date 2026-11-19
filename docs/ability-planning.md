@@ -41,7 +41,7 @@ allowed plan may use fewer mechanisms. Final constraint predicates may depend on
 the selected mechanism set and abilities, but not their execution order. Mechanism
 exclusions and maximum plan size are also supported. Exhausting the explicit search
 budget returns an error, never an allow decision. Search is exponential in the
-worst case; each solve over the current five-mechanism access catalog has a
+worst case; each solve over the bounded access catalog retains a
 32-state budget. Deployment selection evaluates at most two candidate catalogs.
 
 Models must declare complete effects. The solver proves properties of that model;
@@ -52,27 +52,63 @@ mutable external facts require other validation or a richer transition model.
 
 ## Current access integration
 
-`policy-core::realization` owns the initial access catalog and separates abilities
-from the legacy policy capability vocabulary:
+The current catalog distinguishes direct authority from its usable effect:
 
-| Ability | Dimension | Mechanism | Existing permission |
+| Mechanism | Direct authority | Mandatory derived authority | Trusted environment |
 | --- | --- | --- | --- |
-| Mesh membership | Network | WireGuard peer | `mesh.join` |
-| Network reachability | Network | Network route | `network.reach` |
-| SSH session | Application | SSH certificate | `ssh.issue` |
-| Service identity | Identity | mTLS certificate | `mtls.issue` |
-| TCP connection | Transport | TCP admission | `tcp.connect` |
+| WireGuard peer grant | Mesh membership and network route authorization | Network reachability | Mesh route configured |
+| Existing route reuse | Network route authorization | Network reachability | Existing route configured |
+| SSH certificate | SSH credential | SSH session authority | Target trusts the configured SSH CA; route prerequisite |
+| mTLS certificate | mTLS credential | Service identity authority | Target trusts the configured mTLS CA; route prerequisite |
+| TCP admission | TCP admission authority | TCP connection authority | Target enforces admission; route prerequisite |
 
-OSI informs the network and transport dimensions. Identity is kept explicit,
-rather than assigning it an artificial OSI layer. These dimensions are descriptive
-metadata; sharing a layer never creates an implication between abilities.
+For mesh plans, usable SSH/mTLS/TCP authority requires **both** its direct
+credential/admission authority and network reachability. For direct plans it
+requires the explicit `existing_route_configured` environment fact. WireGuard
+provides membership and route authorization in one real grant: the mesh catalog
+no longer counts a separate `NetworkRoute` step with no projection. Direct plans
+reuse an external route and do not select a WireGuard peer. These are nine distinct
+scoped authority kinds; direct and derived kinds cannot contain one another.
 
-Mesh-required service mechanisms depend on network reachability, which depends
-on mesh membership. Direct requests retain the existing API assumption that the
-route is externally available. A TCP-only request does not create mesh membership.
-This catalog preserves the current intent semantics. Deployment selection can
-compare the existing-route and WireGuard implementations; other protocols are
-not assumed to be interchangeable.
+OSI describes the network/transport dimensions; identity and application remain
+separate dimensions. A layer label alone never introduces a derivation. Legacy
+policy vocabulary remains accepted: each winning permission explicitly covers
+its corresponding direct and effective authority, with identical scope limits.
+Unknown capabilities or endpoint facts are rejected, not discarded.
+
+`ConditionalModel` adds environment guards to mechanisms and derivations. Its
+`instantiate` method accepts a trusted immutable fact snapshot and produces the
+ordinary finite model consumed by the existing solver. Facts never enter the
+ability set, grant permissions, or satisfy authority prerequisites themselves.
+The conditional catalog currently uses `ssh_ca_trusted`, `mtls_ca_trusted`,
+`tcp_enforcement`, `mesh_route_configured`, and `existing_route_configured`.
+
+Production reads these operator-declared facts from `device.nodes.endpoint_facts`
+in the same locked READ COMMITTED snapshot as policy and target metadata. They
+are not request fields. The default is an empty manifest, so an upgraded node
+requires explicit configuration before usable authority can be derived. The PoC's
+privileged bootstrap declares its installed fixture configuration. These are
+configuration assertions, not live probes or automatic discovery of CA trust;
+operators must keep them consistent with deployment changes.
+
+Every derived output retains the direct input's subject/device/domain/target,
+key, audience, principal/port set and validity. All authorization prerequisites
+must cover the entire derived interval. A shorter transport lease therefore
+rejects a longer usable-authority request, without silently shortening it.
+Credential and transport expiration/revocation remain independently enforced.
+
+`explain` independently replays executable steps and complete mandatory closure,
+recording each derivation and the step after which its prerequisites exist. It
+rejects invented, omitted and ungrounded effects. Production verifies this evidence
+before returning an immutable authorized plan; projection emits material from
+direct authority nodes only, avoiding duplicate or substituted credentials.
+
+Planning evidence v2 records both kinds and the grounded derivation trace, plus
+the environment snapshot. Replay checks the complete catalog-level closure as
+well as scoped edges: omitting an output cannot disable the very rule that would
+have produced it. V1 records retain their frozen legacy catalog and serialization;
+they are not reinterpreted using the new graph. V2 has a separate contract artifact
+and outbox contract version. Unknown future versions fail closed.
 
 `policy-core::scoped::evaluate_scoped` first resolves existing policy precedence
 and identity checks, then instantiates scoped abilities and the access catalog.
@@ -115,8 +151,8 @@ winning policy's `valid_until`. Exceeding either is rejected, not silently short
 Integer timestamp conversion rounds policy starts up and policy deadlines down.
 Zero, negative and overflowing lifetimes fail closed. Adapter leases remain
 independent; expiry of an SSH or TCP lease does not change a separate mesh lease.
-The graph models authorization dependencies, not a guarantee that a runtime
-transport remains available for a credential's entire validity period.
+The graph models scoped usable authority at authorization time, not a guarantee
+that runtime transport or an endpoint remains live for an entire lease.
 
 The result contains an immutable `AuthorizedPlan`. Its bindings, material, scoped
 abilities, intervals and policy provenance are private; callers can inspect them
@@ -152,8 +188,8 @@ The initial implementations are:
 These are complete alternative implementations using the existing adapters. This
 version does not combine different transport choices per service in a hybrid plan.
 It also does not infer that a network path exists from a client's request. Exact
-route selections retain the existing externally-provided-route assumption and
-never fall back. An exact choice that contradicts the request is rejected.
+route selections never fall back and still require their explicit trusted route
+configuration fact. An exact choice that contradicts the request is rejected.
 
 The TCP endpoint supports explicit opt-in with `automatic_route: true`. It cannot
 be combined with `include_network: true`, which remains a mandatory mesh request.
@@ -172,7 +208,8 @@ WireGuard public key. The declaration must match the requesting device's assigne
 source, registered key and target address. A mesh candidate must match the
 configured mesh target. These are trusted deployment declarations, not live
 reachability probes, discoveries of active peers, or mechanisms for bypassing
-network policy. Explicit legacy TCP-only requests are unchanged.
+network policy. The legacy TCP-only request format is unchanged; its target must now explicitly
+declare an existing route and TCP enforcement.
 
 ## Authorization transaction
 
@@ -220,13 +257,13 @@ The generic planning engine remains independent of protocol/storage adapters.
 ## Planning audit
 
 Completed authorizations and policy-planning denials write an `access.plan` audit record and a
-`policy.plan.evaluated` v1 outbox event inside the same authorization transaction.
+`policy.plan.evaluated` v2 outbox event inside the same authorization transaction.
 A storage or evidence-validation failure aborts that transaction. The existing
 `policy.decision.evaluated` v1 event and signed adapter contracts are unchanged.
 Its concrete evaluated intent describes the selected candidate; the new planning
 event separately records the original exact/automatic selection mode.
 
-The new [contract artifact](../contracts/artifacts/policy-plan-evaluated-v1.schema.json)
+The new [contract artifact](../contracts/artifacts/policy-plan-evaluated-v2.schema.json)
 contains the decision/attempt ID and versioned planning evidence:
 
 - Authenticated domain, subject, device, target, evaluation time and outcomes.
@@ -235,7 +272,8 @@ contains the decision/attempt ID and versioned planning evidence:
 - The selected candidate and deterministic selection rule.
 - The selected scoped abilities, their containing effective permissions and the
   winning policy IDs/revisions.
-- Goal indices and executable steps with prerequisite/provided ability indices.
+- Goal indices, executable steps, environment facts, and grounded derivations
+  with prerequisite/provided ability indices.
 
 Successful events use the signed authorization's decision ID. Denials receive an
 attempt ID and contain candidate reasons without a fabricated successful plan.
@@ -313,3 +351,12 @@ test and a demo policy bootstrapped by `poc:e2e`:
 AUTHORITY_DB_HOST=$(mise run db:status | awk '/^ip: / { print $2 }') \
   cargo test -p authority-control-plane authorization_transaction_locks_and_rolls_back_in_postgres -- --ignored
 ```
+
+The derived-authority catalog is validated by the full verification gate with
+`PROPTEST_CASES=4096`, 38 expected-failure proof mutations, nine-kind atomic
+containment checks, five real PostgreSQL regressions, and LXC route modes with
+seeds 7 (mesh/default deployment) and 42 (existing-route deployment). Both live
+runs verify v2 audit/outbox agreement with the actually issued TCP scopes. The DB
+regressions additionally check endpoint-manifest row locking and fail-closed
+handling of missing or unknown environment facts. Workspace clippy passes with
+warnings denied.

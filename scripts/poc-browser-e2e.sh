@@ -13,10 +13,15 @@ browser_profile=''
 
 cleanup() {
     if [[ -n "${session}" ]]; then
-        curl --silent --request DELETE "${DRIVER_ORIGIN}/session/${session}" >/dev/null 2>&1 || true
+        curl --silent --max-time 3 --request DELETE "${DRIVER_ORIGIN}/session/${session}" >/dev/null 2>&1 || true
     fi
     if [[ -n "${driver_pid}" ]]; then
-        kill "${driver_pid}" 2>/dev/null || true
+        kill -TERM -- "-${driver_pid}" 2>/dev/null || true
+        for _ in {1..30}; do
+            kill -0 "${driver_pid}" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-${driver_pid}" 2>/dev/null || true
         wait "${driver_pid}" 2>/dev/null || true
     fi
     [[ -z "${log_file}" || ! -f "${log_file}" ]] || rm -f "${log_file}"
@@ -34,13 +39,14 @@ die() {
 }
 
 webdriver() {
-    local method="$1" path="$2" body="${3:-}" response value_error
+    local method="$1" path="$2" body="${3:-}" response value_error deadline=15
+    if [[ "${method}" == POST && "${path}" == /session ]]; then deadline=45; fi
     if [[ -n "${body}" ]]; then
-        response="$(curl --silent --show-error --max-time 15 \
+        response="$(curl --silent --show-error --max-time "${deadline}" \
             --request "${method}" --header 'content-type: application/json' \
             --data "${body}" "${DRIVER_ORIGIN}${path}")" || die "WebDriver ${method} ${path}: transport failed"
     else
-        response="$(curl --silent --show-error --max-time 15 \
+        response="$(curl --silent --show-error --max-time "${deadline}" \
             --request "${method}" "${DRIVER_ORIGIN}${path}")" || die "WebDriver ${method} ${path}: transport failed"
     fi
     value_error="$(jq -r '.value.error? // empty' <<<"${response}")"
@@ -160,7 +166,7 @@ if [[ -n "${wireguard_public_key}" ]]; then
     printf '[poc:e2e] target network-agent identity ready\n'
 fi
 
-chromedriver --port=9515 --allowed-ips=127.0.0.1 --log-level=WARNING >"${log_file}" 2>&1 &
+setsid chromedriver --port=9515 --allowed-ips=127.0.0.1 --log-level=WARNING >"${log_file}" 2>&1 &
 driver_pid=$!
 printf '[poc:e2e] starting ChromeDriver\n'
 for _ in {1..50}; do

@@ -209,3 +209,39 @@ proptest! {
         prop_assert_eq!(result, solve(&reversed, &query, |_| true));
     }
 }
+
+#[test]
+fn facts_gate_composition_without_granting_authority_and_explanations_are_grounded() {
+    use authority_planning_core::{Conditional, ConditionalModel, explain};
+    let model = ConditionalModel {
+        mechanisms: vec![Conditional {
+            value: mechanism(0, &[], &[1]),
+            requires_facts: BTreeSet::new(),
+        }],
+        derivations: vec![Conditional {
+            value: Derivation {
+                requires: BTreeSet::from([1]),
+                provides: BTreeSet::from([2]),
+            },
+            requires_facts: BTreeSet::from([9]),
+        }],
+    };
+    let without = model.instantiate(&BTreeSet::new());
+    assert_eq!(
+        solve(&without, &request(&[2], &[1, 2]), |_| true),
+        Err(PlanningError::NoSolution)
+    );
+    let compiled = model.instantiate(&BTreeSet::from([9]));
+    let plan = solve(&compiled, &request(&[2], &[1, 2]), |_| true).unwrap();
+    assert!(!plan.abilities.contains(&9));
+    let trace = explain(&compiled, &BTreeSet::new(), &plan).unwrap();
+    assert_eq!(trace.len(), 1);
+    assert_eq!(trace[0].after_mechanisms, 1);
+    let mut omitted = plan.clone();
+    omitted.abilities.remove(&2);
+    assert!(explain(&compiled, &BTreeSet::new(), &omitted).is_err());
+    assert_eq!(
+        solve(&compiled, &request(&[1], &[1]), |_| true),
+        Err(PlanningError::NoSolution)
+    );
+}

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8820abccce2deadb47851449fc45d2f593fad988f7b4723c59c760f379e4b5b9 # shrinks to ssh_ttl = 1, mtls_ttl = 140, network_ttl = 1

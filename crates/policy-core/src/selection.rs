@@ -172,6 +172,16 @@ pub struct PlanEvidence {
     pub abilities: Vec<AbilityEvidence>,
     pub goals: Vec<usize>,
     pub steps: Vec<StepEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub derivations: Vec<DerivedEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DerivedEvidence {
+    pub after_mechanisms: usize,
+    pub requires: Vec<usize>,
+    pub provides: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,7 +205,11 @@ impl PlanningEvidence {
     /// evidence replay, not authorization against current policy or live routing.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
-        if self.version != authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1
+        if ![
+            authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1,
+            authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2,
+        ]
+        .contains(&self.version)
             || self.evaluated_at < 0
             || self.outcomes.is_empty()
             || self.selection_rule != authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1
@@ -253,6 +267,7 @@ impl PlanningEvidence {
                             selected,
                             &self.outcomes,
                             resources,
+                            self.version,
                         )
                     })
             }
@@ -287,7 +302,7 @@ impl PlanningEvidence {
 
     fn base(request: &AccessRequest, choice: RouteChoice) -> Self {
         Self {
-            version: authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1,
+            version: authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2,
             binding: binding(request),
             evaluated_at: request.evaluated_at,
             outcomes: request.intent.outcomes.clone(),
@@ -330,6 +345,7 @@ impl PlanEvidence {
         selected: CandidateId,
         outcomes: &BTreeSet<Outcome>,
         resources: &NetworkResources,
+        version: u8,
     ) -> bool {
         let mut kinds = BTreeSet::new();
         for record in &self.abilities {
@@ -375,7 +391,13 @@ impl PlanEvidence {
         if index_kinds(&self.goals) != Some(goals) {
             return false;
         }
-        let model = crate::realization::catalog(selected.route());
+        if version == authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2 {
+            return self.consistent_derived(binding, evaluated_at, selected, outcomes, resources);
+        }
+        if !self.derivations.is_empty() || !resources.environment.is_empty() {
+            return false;
+        }
+        let model = crate::realization::legacy_catalog(selected.route());
         let mut executed = BTreeSet::new();
         let mut available = BTreeSet::new();
         for step in &self.steps {
@@ -406,6 +428,15 @@ fn scope_matches_resources(
     binding: AccessBinding,
 ) -> bool {
     use crate::scoped::AbilityScope;
+    if matches!(
+        scope.kind(),
+        Ability::NetworkRouteAuthorization
+            | Ability::SshCredential
+            | Ability::MtlsCredential
+            | Ability::TcpAdmission
+    ) {
+        return scope_matches_resources(&scope.effective(), resources, binding);
+    }
     match scope {
         AbilityScope::MeshMembership {
             wireguard_public_key,
@@ -417,6 +448,15 @@ fn scope_matches_resources(
         AbilityScope::NetworkReachability {
             source,
             destination,
+        }
+        | AbilityScope::NetworkRouteAuthorization {
+            source,
+            destination,
+        }
+        | AbilityScope::TcpAdmission {
+            source,
+            destination,
+            ..
         }
         | AbilityScope::TcpConnection {
             source,
@@ -432,6 +472,7 @@ fn scope_matches_resources(
                 && *identity_uri == binding.identity_uri()
         }
         AbilityScope::SshSession { .. } => true,
+        AbilityScope::SshCredential { .. } | AbilityScope::MtlsCredential { .. } => false,
     }
 }
 
@@ -534,7 +575,20 @@ pub(crate) fn plan_evidence(
             })
         })
         .collect::<Result<_, ScopeError>>()?;
+    let derivations = authority_planning_core::explain(model, &BTreeSet::new(), plan)
+        .map_err(|_| ScopeError::InvalidRequest)?
+        .into_iter()
+        .map(|step| {
+            let rule = &model.derivations[step.rule];
+            Ok(DerivedEvidence {
+                after_mechanisms: step.after_mechanisms,
+                requires: indices(&rule.requires)?,
+                provides: indices(&rule.provides)?,
+            })
+        })
+        .collect::<Result<_, ScopeError>>()?;
     Ok(PlanEvidence {
+        derivations,
         abilities,
         goals: indices(goals)?,
         steps,
@@ -644,4 +698,73 @@ pub fn evaluate_selection(
         reason,
         evidence: Box::new(evidence),
     })
+}
+
+impl PlanEvidence {
+    fn consistent_derived(
+        &self,
+        binding: AccessBinding,
+        evaluated_at: i64,
+        selected: CandidateId,
+        outcomes: &BTreeSet<Outcome>,
+        resources: &NetworkResources,
+    ) -> bool {
+        let kind_model = crate::realization::conditional_catalog(selected.route())
+            .instantiate(&resources.environment);
+        let kind_plan = Plan {
+            mechanisms: self.steps.iter().map(|step| step.mechanism).collect(),
+            abilities: self
+                .abilities
+                .iter()
+                .map(|entry| entry.ability.scope.kind())
+                .collect(),
+        };
+        if authority_planning_core::explain(&kind_model, &BTreeSet::new(), &kind_plan).is_err() {
+            return false;
+        }
+        let abilities: BTreeMap<_, _> = self
+            .abilities
+            .iter()
+            .map(|entry| (entry.ability.scope.kind(), entry.ability.clone()))
+            .collect();
+        let request = AccessRequest {
+            domain_id: binding.domain_id,
+            subject_user_id: binding.subject_user_id,
+            device_id: binding.device_id,
+            target_node_id: binding.target_node_id,
+            evaluated_at,
+            intent: crate::AccessIntent {
+                outcomes: outcomes.clone(),
+                route: selected.route(),
+            },
+        };
+        let model = crate::scoped::instantiate(&request, &abilities, resources);
+        let plan = Plan {
+            mechanisms: self.steps.iter().map(|step| step.mechanism).collect(),
+            abilities: abilities.values().cloned().collect(),
+        };
+        let permissions = self
+            .abilities
+            .iter()
+            .map(|entry| {
+                (
+                    entry.ability.scope.kind(),
+                    (entry.permitted.clone(), entry.policy),
+                )
+            })
+            .collect();
+        let goals = self
+            .goals
+            .iter()
+            .map(|index| {
+                self.abilities
+                    .get(*index)
+                    .map(|entry| entry.ability.clone())
+            })
+            .collect::<Option<BTreeSet<_>>>();
+        let Some(goals) = goals else {
+            return false;
+        };
+        plan_evidence(&plan, &model, &goals, &permissions).is_ok_and(|expected| expected == *self)
+    }
 }

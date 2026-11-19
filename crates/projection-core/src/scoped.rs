@@ -86,8 +86,12 @@ fn project_scope(scope: &AbilityScope) -> ScopeProjection {
             wireguard_public_key: wireguard_public_key.clone(),
             mesh_address: address.to_string(),
         }),
-        AbilityScope::NetworkReachability { .. } => ScopeProjection::None,
-        AbilityScope::SshSession {
+        AbilityScope::NetworkReachability { .. }
+        | AbilityScope::NetworkRouteAuthorization { .. }
+        | AbilityScope::SshSession { .. }
+        | AbilityScope::ServiceIdentity { .. }
+        | AbilityScope::TcpConnection { .. } => ScopeProjection::None,
+        AbilityScope::SshCredential {
             public_key_fingerprint,
             principals,
             terminal_token_hash,
@@ -96,7 +100,7 @@ fn project_scope(scope: &AbilityScope) -> ScopeProjection {
             principals: principals.iter().cloned().collect(),
             terminal_token_hash: terminal_token_hash.clone(),
         }),
-        AbilityScope::ServiceIdentity {
+        AbilityScope::MtlsCredential {
             client_spki_sha256,
             identity_uri,
             service_audience,
@@ -105,7 +109,7 @@ fn project_scope(scope: &AbilityScope) -> ScopeProjection {
             identity_uri: identity_uri.clone(),
             service_audience: service_audience.clone(),
         }),
-        AbilityScope::TcpConnection {
+        AbilityScope::TcpAdmission {
             source,
             destination,
             ports,

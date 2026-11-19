@@ -2,7 +2,8 @@
 //! or selected-set deduplication. Bitsets intentionally differ from production.
 use std::collections::BTreeSet;
 
-use authority_planning_core::{Derivation, Mechanism, Model, PlanningError, Request, solve};
+use authority_planning_core::{Conditional, ConditionalModel, explain};
+use authority_planning_core::{Derivation, Mechanism, PlanningError, Request, solve};
 use proptest::prelude::*;
 
 #[derive(Debug)]
@@ -12,6 +13,7 @@ struct Reference<'a> {
     goals: u8,
     permitted: u8,
     forbidden: u8,
+    enabled: u8,
     required: u8,
     even: bool,
     max_mechanisms: usize,
@@ -62,7 +64,10 @@ impl Reference<'_> {
         }
         for (index, &(requires, provides)) in self.mechanisms.iter().enumerate() {
             let id = u8::try_from(index).unwrap();
-            if (selected | self.forbidden) & (1 << id) == 0 && abilities & requires == requires {
+            if self.enabled & (1 << id) != 0
+                && (selected | self.forbidden) & (1 << id) == 0
+                && abilities & requires == requires
+            {
                 prefix.push(id);
                 self.enumerate(prefix, selected | (1 << id), abilities | provides, best);
                 prefix.pop();
@@ -80,6 +85,9 @@ proptest! {
     fn sound_complete_minimal_with_composition_and_constraints(
         mechanisms in prop::collection::vec((0_u8..64, 0_u8..64), 0..=6),
         derivations in prop::collection::vec((0_u8..64, 0_u8..64), 0..=6),
+        mechanism_facts in prop::collection::vec(0_u8..64,6),
+        derivation_facts in prop::collection::vec(0_u8..64,6),
+        environment in 0_u8..64,
         available in 0_u8..64, goals in 0_u8..64,
         permitted in prop_oneof![Just(63_u8), 0_u8..64],
         forbidden in prop_oneof![Just(0_u8), 0_u8..64],
@@ -87,20 +95,20 @@ proptest! {
         even in any::<bool>(), max_mechanisms in 0_usize..=6,
         budget in 0_usize..=64,
     ) {
+        let enabled = mechanisms.iter().enumerate().fold(0u8,|mask,(i,_)|if mechanism_facts[i] & environment == mechanism_facts[i] {mask | (1 << i)}else{mask});
+        let active_derivations:Vec<_> = derivations.iter().enumerate().filter(|(i,_)|derivation_facts[*i] & environment == derivation_facts[*i]).map(|(_,rule)|*rule).collect();
         let reference = Reference {
-            mechanisms: &mechanisms, derivations: &derivations,
-            goals, permitted, forbidden, required, even, max_mechanisms,
+            mechanisms: &mechanisms, derivations: &active_derivations,
+            goals, permitted, forbidden, enabled, required, even, max_mechanisms,
         };
         let mut expected = None;
         reference.enumerate(&mut vec![], 0, available, &mut expected);
-        let mut model = Model {
-            mechanisms: mechanisms.iter().enumerate().map(|(id, &(requires, provides))| Mechanism {
-                id: u8::try_from(id).unwrap(), requires: bits(requires), provides: bits(provides),
-            }).collect(),
-            derivations: derivations.iter().map(|&(requires, provides)| Derivation {
-                requires: bits(requires), provides: bits(provides),
-            }).collect(),
+
+        let conditional = ConditionalModel {
+            mechanisms:mechanisms.iter().enumerate().map(|(id,&(requires,provides))|Conditional {value:Mechanism {id:u8::try_from(id).unwrap(),requires:bits(requires),provides:bits(provides)},requires_facts:bits(mechanism_facts[id])}).collect(),
+            derivations:derivations.iter().enumerate().map(|(id,&(requires,provides))|Conditional {value:Derivation {requires:bits(requires),provides:bits(provides)},requires_facts:bits(derivation_facts[id])}).collect(),
         };
+        let mut model=conditional.instantiate(&bits(environment));
         let mut request = Request {
             goals: bits(goals), available: bits(available), permitted: bits(permitted),
             forbidden_mechanisms: bits(forbidden), max_mechanisms,
@@ -116,6 +124,7 @@ proptest! {
             None => prop_assert_eq!(&actual, &Err(PlanningError::NoSolution)),
             Some(order) => {
                 let plan = actual.as_ref().unwrap();
+                prop_assert!(explain(&model,&request.available,plan).is_ok());
                 prop_assert_eq!(&plan.mechanisms, order);
                 let mut observed = reference.closure(available);
                 let mut selected = 0_u8;

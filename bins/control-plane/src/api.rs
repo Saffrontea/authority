@@ -282,10 +282,10 @@ async fn create_demo_access(
     .await?;
     sqlx::query(
         "INSERT INTO device.nodes \
-         (id, device_id, hostname, mesh_address, ssh_principals, status) \
-         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active') \
+         (id, device_id, hostname, mesh_address, ssh_principals, status, endpoint_facts) \
+         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active', ARRAY['ssh_ca_trusted','mtls_ca_trusted','tcp_enforcement','mesh_route_configured','existing_route_configured']) \
          ON CONFLICT (id) DO UPDATE SET device_id = EXCLUDED.device_id, \
-             mesh_address = EXCLUDED.mesh_address, status = 'active'",
+             mesh_address = EXCLUDED.mesh_address, status = 'active', endpoint_facts = EXCLUDED.endpoint_facts",
     )
     .bind(target_node_id)
     .bind(target_device_id)

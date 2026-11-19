@@ -42,11 +42,12 @@ pub async fn insert(
     sqlx::query(
         "INSERT INTO outbox.events \
          (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) \
-         VALUES ($1, 'policy', 'access_decision', $2, 'policy.plan.evaluated', 1, $3, now())",
+         VALUES ($1, 'policy', 'access_decision', $2, 'policy.plan.evaluated', $4, $3, now())",
     )
     .bind(Uuid::new_v4())
     .bind(decision_id)
     .bind(payload)
+    .bind(i16::from(evidence.version))
     .execute(&mut **transaction)
     .await?;
     Ok(())

@@ -13,12 +13,13 @@ completeness with a sufficient budget, minimum mechanism count, canonical
 lexicographic tie-breaking and termination.
 Private checked construction establishes the projection invariant; concrete closure
 refines the least fixed point. Standard-library/encoding representation internals remain outside these proofs.
-Each row identifies both current evidence and the remaining obligation. Protocol schemas and signed bytes remain unchanged.
+Each row identifies both current evidence and the remaining obligation. Signed adapter schemas and bytes remain unchanged; planning audit evidence adds a v2 schema.
 
 | Target | Required property | Current evidence | Remaining obligation |
 | --- | --- | --- | --- |
 | Ability graph / solver (Verus) | Soundness, completeness, minimum mechanism count | Source-derived closure and BFS transition proofs: soundness, bounded completeness, minimum mechanism count, canonical tie-break and termination; lexicographic representative dominance; independent/native PBT | Trusted collection/ID-view correspondence |
-| Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all five variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
+| Conditional graph / provenance | Facts cannot substitute for authority; every effect has a grounded cause | Independent exhaustive-order PBT with fact guards; exact closure replay; service-specific trust, missing-route, lifetime and omitted/substituted-effect regressions | Truth/completeness of operator declarations and adapter effect catalogs; general Rust-to-spec refinement of environment compilation |
+| Scope containment (Verus / Kani) | No authority expansion, interval containment | Verus source-derived proofs for all nine direct/effective variants, binding preservation, temporal authority non-expansion and transitivity; actual TTL predicate proof; atomic-authority PBT | Standard-library/encoding representation refinement beyond the documented value abstraction |
 | Contract projection (Verus / Kani) | Contract authority agrees with the authorized scope | Checked factory discharges pipeline invariant; source-derived constructor/selection/collection/final-origin proofs; native signed-JSON/OpenSSL and app-context consumer PBT | Remaining consumer variants and universal representation correspondence |
 | Revocation / distribution (TLA+) | Concurrency, reorder, retry, revocation safety | TLC safety and conditional liveness over 2 decisions × 2 adapters; peer lifecycle safety and conditional finite-workload expiry liveness, with GC/replacement/restart; counterexample mutations; live/timed system traces replayed by TLC | Arbitrary lifecycle trace generation and refinement beyond the tested scenarios |
 | HTTP / DB / adapters (E2E / PBT) | Formal model and real system correspondence | LXC E2E and DB concurrency/rollback regressions; generated live/time/failure HTTP/DB/TCP/WG traces, live/timed TLC replay, SIGKILL recovery and command-failure tests; native authority/time/durable-state PBT | Broader arbitrary trace coverage, power-loss and other OS failure classes |
@@ -73,7 +74,7 @@ lexicographic representative replacement/order (including the same 20), and 66 f
 the source-derived BFS (which rechecks closure and lexicographic obligations). Counts include generated
 obligations and are not independent end-to-end guarantees.
 
-`mise run verification:verus:mutations` also requires proof failures for thirty-six
+`mise run verification:verus:mutations` also requires proof failures for thirty-eight
 unsafe changes: widening deadlines, allowing unauthorized effects, selecting a
 nonminimal solution, expanding TCP ports or SSH principals, dropping binding
 checks, reversing lifetime subtraction, unchecked expiry addition, rebinding a

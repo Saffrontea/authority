@@ -48,3 +48,11 @@ it cannot construct an authorized plan for projection. Existing signed contract
 fields, audiences, nonces and lifetime semantics are unchanged. Automatic route
 selection is an explicitly proof-bound HTTP request option; it cannot turn a
 server-unavailable or policy-denied route into an authorized implementation.
+
+`PolicyPlanEvaluatedV2` separates direct credential/admission authority from derived
+usable authority. It adds an operator-declared environment snapshot and grounded
+derivation steps (`after_mechanisms`, prerequisite and output indices). Replay
+requires the complete mandatory closure and rejects missing facts, omitted effects,
+unexecuted causes, or scope/lifetime substitution. Its outbox contract version is
+2. V1 artifacts and records retain their original graph and serialization. Both
+versions remain unsigned audit evidence and cannot be submitted as authorization.
