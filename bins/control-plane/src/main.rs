@@ -1,6 +1,7 @@
 mod access_policy;
 mod api;
 mod config;
+mod grant_ledger;
 mod planning_audit;
 mod revocation_delivery;
 mod state;

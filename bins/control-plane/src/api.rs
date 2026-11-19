@@ -1156,6 +1156,9 @@ async fn persist_revocation(
         .await?
         .ok_or_else(|| ApiError::internal("conflicting revocation disappeared"));
     }
+    crate::grant_ledger::revoke(&mut transaction, notice)
+        .await
+        .map_err(ApiError::internal)?;
     if notice
         .adapter_kinds
         .contains(&AdapterGrantKindV1::MtlsClientCertificate)
@@ -1487,6 +1490,12 @@ async fn record_access_decision(
     if let Some(bundle) = audit.authorization {
         insert_decision_outbox(transaction, &bundle.decision_id, &payload).await?;
         insert_access_bundle(transaction, bundle).await?;
+        let evaluated = audit
+            .evaluated
+            .ok_or_else(|| ApiError::internal("issued bundle lacks an authorized plan"))?;
+        crate::grant_ledger::record(transaction, &bundle.decision_id, &evaluated.plan)
+            .await
+            .map_err(ApiError::database)?;
     }
     if let Some(evidence) = audit
         .planning
@@ -2161,7 +2170,7 @@ async fn issue_tcp_authorization(
         request.target_node_id,
         &response,
         &trace,
-        evaluated.plan.evidence(),
+        &evaluated.plan,
     )
     .await?;
     transaction.commit().await.map_err(ApiError::database)?;
@@ -2211,7 +2220,7 @@ async fn persist_tcp_authorization(
     target_node_id: Uuid,
     response: &TcpAuthorizationResponse,
     trace: &Value,
-    planning: &PlanningEvidence,
+    plan: &AuthorizedPlan,
 ) -> Result<(), ApiError> {
     insert_decision_outbox(transaction, &response.decision_id, trace).await?;
     sqlx::query(
@@ -2231,7 +2240,10 @@ async fn persist_tcp_authorization(
         VALUES ($1, 'policy', 'access_decision', $2, 'access.tcp_authorization.issued', 1, $3, now())")
         .bind(Uuid::new_v4()).bind(&response.decision_id).bind(serde_json::to_value(response).map_err(ApiError::internal)?)
         .execute(&mut **transaction).await.map_err(ApiError::database)?;
-    crate::planning_audit::insert(transaction, &response.decision_id, planning, None)
+    crate::grant_ledger::record(transaction, &response.decision_id, plan)
+        .await
+        .map_err(ApiError::database)?;
+    crate::planning_audit::insert(transaction, &response.decision_id, plan.evidence(), None)
         .await
         .map_err(ApiError::database)?;
     Ok(())

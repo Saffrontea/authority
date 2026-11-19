@@ -35,6 +35,9 @@
     },
     "0012_ability_policies.sql": {
       "sha256": "a7f8a092ba3411ff62756d4474d287d2146650d0840a682e425f306b4382e9f1"
+    },
+    "0013_issued_ability_grants.sql": {
+      "sha256": "369a68f7e84cf10cd4744ef56ca4d97e8b9ee94f58c5e59d4e3e1ba7538c160a"
     }
   }
 }

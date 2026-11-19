@@ -244,6 +244,27 @@ The writer's test changes are themselves rolled back.
 
 ## Shared definitions
 
+### Issuance provenance
+
+`policy.issued_ability_grants` stores the concrete binding, scope, validity and
+winning policy references for newly issued mesh membership, SSH credentials,
+mTLS credentials and TCP admission. Only direct material provided by an executed
+step is recorded; derived effects and reused inputs do not become newly issued
+grants. These rows commit with the signed authorization's audit and outbox.
+An outbox failure rolls back the grant records as well.
+
+Publishing a signed revocation updates the matching ledger rows in the same
+transaction. Domain, target, decision and adapter scope constrain the update;
+revoking a WireGuard peer does not revoke an independent TCP admission record.
+Revoking the SSH terminal capability invalidates the corresponding combined SSH
+credential scope too, because that scope binds the terminal token.
+
+These are issuance records, not installation receipts. They do not seed the
+solver. Authenticated target observations, revision/epoch tracking and dependent
+invalidation still need to be connected before enabling reuse. Current DB
+regressions cover issuance/audit/outbox rollback, revocation visibility and
+adapter-specific invalidation.
+
 `contracts-model::protocol` owns wire audiences, lifetime/port bounds and v1
 planning-evidence bounds. Producers, verifiers, projection and policy scope checks
 reuse them, and conformance tests compare the numeric bounds with the immutable

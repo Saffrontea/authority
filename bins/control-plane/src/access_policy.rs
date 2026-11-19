@@ -392,7 +392,7 @@ pub(crate) mod tests {
         assert_eq!(reason.code(), "explicit_ability_deny");
     }
 
-    async fn live_tcp_request(pool: &PgPool) -> (AccessRequest, Uuid) {
+    pub(crate) async fn live_tcp_request(pool: &PgPool) -> (AccessRequest, Uuid) {
         let row = sqlx::query(
             "SELECT p.domain_id, p.subject_user_id, p.required_device_id, p.target_node_id, n.device_id AS target_device_id \
              FROM policy.ability_policies p JOIN device.devices d ON d.id = p.required_device_id \
