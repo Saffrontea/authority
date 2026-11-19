@@ -794,7 +794,7 @@ pub fn evaluate_scoped(
         },
         |_| true,
     )
-    .map_err(|_| ScopeError::Policy(DenialReason::NoRealization))?;
+    .map_err(|error| ScopeError::Policy(DenialReason::from(error)))?;
     let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
     let evidence = crate::selection::PlanningEvidence::authorized(request, proof, resources);
     if !evidence.is_consistent() {

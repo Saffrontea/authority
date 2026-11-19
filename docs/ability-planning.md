@@ -297,6 +297,37 @@ and revocation continue to enforce the signed scopes.
 
 ## Validation
 
+### Concrete permission and live-support primitives
+
+`policy_core::ability_policy::authorize` evaluates concrete `ScopedAbility`
+rules independently for direct and derived authority. It splits port/principal
+sets and the requested interval at rule boundaries, then selects a winner for
+every atom and segment by priority, revision, deny-on-tie and policy ID. Every
+segment must be allowed. Evidence includes all winning policy references;
+disjoint rules can cover a request without hiding a narrow deny. Bindings,
+keys, resources and authority kinds must match through scoped containment.
+
+`planning_core::support::recompute` accepts authenticated observations of roots
+and environment facts, with owner, source, current revision, revocation and a
+half-open validity interval. It recomputes the least fixed point from remaining
+live roots. Alternative roots preserve authority; cycles cannot preserve it after
+the last independent root disappears. Mechanisms do not run during recomputation.
+Mandatory effects are retained even when forbidden, so the solver can reject the
+complete closure rather than silently dropping an unauthorized effect.
+
+These are core APIs, not yet the control-plane storage integration. Production
+still reads capability policies and seeds planning with an empty available set.
+The next integration must persist concrete ability rules and authenticated
+enforcement observations, capture revision locks in the authorization transaction,
+record reused roots in replay evidence, project only new grants, and publish
+dependent invalidations atomically. An issued contract alone is insufficient
+evidence that a target installed a network grant. Existing LXC coverage exercises
+the current production path, not this future integration.
+
+Production error propagation now distinguishes `planning_search_limit` and
+`invalid_planning_catalog` from `no_authorized_realization`. All three fail closed;
+budget exhaustion is not evidence that no solution exists.
+
 Planner tests cover alternative routes, unauthorized side effects, mandatory
 composition closure, multi-input dependencies, cycles, scoped identity/resource
 separation, final constraints, deterministic ordering and budget failures. A

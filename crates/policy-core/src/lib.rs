@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod ability_policy;
 pub mod capabilities;
 pub mod realization;
 pub mod scoped;
@@ -206,6 +207,10 @@ pub enum DenialReason {
     InvalidPolicy,
     #[error("no authorized realization satisfies the requested intent")]
     NoRealization,
+    #[error("planning search budget exhausted; authorization was not established")]
+    PlanningSearchLimit,
+    #[error("planning catalog contains duplicate mechanism identifiers")]
+    InvalidPlanningCatalog,
     #[error("no policy applies to the requested access")]
     NoApplicablePolicy,
     #[error("device identity does not match the authenticated subject")]
@@ -226,6 +231,8 @@ impl DenialReason {
             Self::InvalidPolicy => "invalid_policy",
             Self::NoApplicablePolicy => "no_applicable_policy",
             Self::NoRealization => "no_authorized_realization",
+            Self::PlanningSearchLimit => "planning_search_limit",
+            Self::InvalidPlanningCatalog => "invalid_planning_catalog",
             Self::DeviceMismatch => "device_mismatch",
             Self::Disabled => "device_or_target_disabled",
             Self::ExplicitDeny(_) => "explicit_deny",
@@ -243,8 +250,22 @@ impl DenialReason {
             Self::InvalidPolicy
             | Self::NoApplicablePolicy
             | Self::NoRealization
+            | Self::PlanningSearchLimit
+            | Self::InvalidPlanningCatalog
             | Self::DeviceMismatch
             | Self::Disabled => None,
+        }
+    }
+}
+
+impl From<authority_planning_core::PlanningError> for DenialReason {
+    fn from(error: authority_planning_core::PlanningError) -> Self {
+        match error {
+            authority_planning_core::PlanningError::NoSolution => Self::NoRealization,
+            authority_planning_core::PlanningError::SearchLimit => Self::PlanningSearchLimit,
+            authority_planning_core::PlanningError::DuplicateMechanism => {
+                Self::InvalidPlanningCatalog
+            }
         }
     }
 }
@@ -310,7 +331,10 @@ pub fn evaluate(
         .into_iter()
         .filter(|ability| sources.contains_key(&ability.permission()))
         .collect();
-    let realization = realize(&request.intent, permitted).map_err(|_| {
+    let realization = realize(&request.intent, permitted).map_err(|error| {
+        if error != authority_planning_core::PlanningError::NoSolution {
+            return DenialReason::from(error);
+        }
         // Preserve existing capability-level diagnostics for the built-in catalog.
         // A search failure itself can never produce an allow decision.
         plan(&request.intent)

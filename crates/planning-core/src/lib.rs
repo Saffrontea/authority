@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use thiserror::Error;
 
+pub mod support;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mechanism<A, M> {
     pub id: M,
