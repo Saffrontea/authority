@@ -334,10 +334,23 @@ DATABASE_SCRIPT
   attach "${TARGET_NAME}" sh -seu <<CONTAINER_SCRIPT
 umask 077
 mkdir -p /var/lib/authority
+refresh_server_certificate=0
 if [ ! -s /var/lib/authority/mtls-server-key.pem ]; then
- openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+  -out /var/lib/authority/mtls-server-key.pem.new
+ mv /var/lib/authority/mtls-server-key.pem.new /var/lib/authority/mtls-server-key.pem
+ refresh_server_certificate=1
+fi
+# DHCP may assign a new underlay address after a container restart. Refresh the
+# serving certificate while retaining the node's existing private key.
+if [ "\${refresh_server_certificate}" = 1 ] \
+ || [ ! -s /var/lib/authority/mtls-server-cert.pem ] \
+ || ! openssl x509 -in /var/lib/authority/mtls-server-cert.pem -noout -checkip "${target_underlay}" >/dev/null 2>&1 \
+ || ! openssl x509 -in /var/lib/authority/mtls-server-cert.pem -noout -checkend 0 >/dev/null 2>&1; then
+ openssl req -x509 -new -key /var/lib/authority/mtls-server-key.pem -days 365 \
   -subj /CN=authority-target -addext basicConstraints=CA:FALSE -addext extendedKeyUsage=serverAuth -addext keyUsage=digitalSignature -addext subjectAltName=DNS:authority-target,IP:${target_underlay} \
-  -keyout /var/lib/authority/mtls-server-key.pem -out /var/lib/authority/mtls-server-cert.pem
+  -out /var/lib/authority/mtls-server-cert.pem.new
+ mv /var/lib/authority/mtls-server-cert.pem.new /var/lib/authority/mtls-server-cert.pem
 fi
 rm -f /run/authority-mtls-db-partition
 cat > /etc/systemd/system/authority-mtls-db-proxy.service <<UNIT

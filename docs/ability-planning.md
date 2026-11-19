@@ -381,7 +381,9 @@ AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS=10.77.0.1 mise run poc:e2e
 Each run finishes with `db:verify-planning`: a read-only PostgreSQL check of the
 latest test actor's allow/deny/automatic audit coverage, identical audit/outbox
 payloads, selected-plan/issuance correlation and exact TCP port/address/expiry
-agreement. It can also be invoked separately after the suite. The reconnect fixture
+agreement. It also matches the issuance ledger to executed step outputs and
+policy references, and checks its revocation flags against committed notices.
+It can also be invoked separately after the suite. The reconnect fixture
 resets only the PoC client's cached WireGuard transport after a revoked peer is
 re-authorized; it does not alter the target agent's granted membership or TCP rules.
 

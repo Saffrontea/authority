@@ -446,6 +446,47 @@ BEGIN
         OR scoped.ability #> '{validity,expires_at}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,expires_at}')
   ) THEN RAISE EXCEPTION 'issued TCP grant differs from scoped plan'; END IF;
   IF EXISTS (
+    SELECT 1 FROM outbox.events p
+    CROSS JOIN LATERAL jsonb_array_elements(p.payload #> '{planning,plan,steps}') steps(step)
+    CROSS JOIN LATERAL jsonb_array_elements_text(step -> 'provides') provided(idx)
+    CROSS JOIN LATERAL (
+      SELECT (p.payload #> '{planning,plan,abilities}') -> idx::integer AS entry
+    ) selected
+    WHERE p.event_type = 'policy.plan.evaluated'
+      AND p.payload #>> '{planning,binding,subject_user_id}' = actor
+      AND entry #>> '{ability,scope,kind}' IN ('mesh_membership','ssh_credential','mtls_credential','tcp_admission')
+      AND NOT EXISTS (
+        SELECT 1 FROM policy.issued_ability_grants g
+        WHERE g.domain_id = (p.payload #>> '{planning,binding,domain_id}')::uuid
+          AND g.target_node_id = (p.payload #>> '{planning,binding,target_node_id}')::uuid
+          AND g.decision_id = p.aggregate_id AND g.ability_kind = entry #>> '{ability,scope,kind}'
+          AND g.ability = entry -> 'ability' AND g.policy_refs = entry -> 'policies'
+      )
+  ) OR EXISTS (
+    SELECT 1 FROM policy.issued_ability_grants g WHERE g.subject_user_id::text = actor
+      AND NOT EXISTS (
+        SELECT 1 FROM outbox.events p
+        CROSS JOIN LATERAL jsonb_array_elements(p.payload #> '{planning,plan,steps}') steps(step)
+        CROSS JOIN LATERAL jsonb_array_elements_text(step -> 'provides') provided(idx)
+        WHERE p.event_type = 'policy.plan.evaluated' AND p.aggregate_id = g.decision_id
+          AND (p.payload #> '{planning,plan,abilities}') -> idx::integer -> 'ability' = g.ability
+      )
+  ) THEN RAISE EXCEPTION 'issued ability ledger differs from executed plan or policy sources'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM policy.issued_ability_grants g WHERE g.subject_user_id::text = actor
+      AND g.revoked_at IS DISTINCT FROM (
+        SELECT min(EXTRACT(EPOCH FROM n.revoked_at)::bigint)
+        FROM policy.revocation_notices n
+        WHERE n.domain_id = g.domain_id AND n.target_node_id = g.target_node_id
+          AND n.decision_id = g.decision_id
+          AND (n.envelope #> '{notice,adapter_kinds}') ?| CASE g.ability_kind
+            WHEN 'mesh_membership' THEN ARRAY['wireguard.peer']
+            WHEN 'ssh_credential' THEN ARRAY['ssh.certificate','ssh.session']
+            WHEN 'mtls_credential' THEN ARRAY['mtls.client_certificate']
+            WHEN 'tcp_admission' THEN ARRAY['tcp.port'] END
+      )
+  ) THEN RAISE EXCEPTION 'issued ability ledger revocation state differs from committed notices'; END IF;
+  IF EXISTS (
     SELECT 1 FROM policy.revocation_notices n
     JOIN outbox.events p ON p.aggregate_id = n.decision_id
       AND p.event_type = 'policy.plan.evaluated'
@@ -466,6 +507,10 @@ SELECT 'planning audit=' || count(*) || ',allow=' || count(*) FILTER (WHERE deci
   || ',deny=' || count(*) FILTER (WHERE decision = 'deny')
   || ',automatic=' || count(*) FILTER (WHERE payload #>> '{planning,route_choice,mode}' = 'automatic')
 FROM audit.events WHERE action = 'access.plan' AND actor_id = (SELECT actor_id FROM latest);
+SELECT 'issued ability ledger=' || count(*) || ',revoked=' || count(*) FILTER (WHERE revoked_at IS NOT NULL)
+FROM policy.issued_ability_grants WHERE subject_user_id::text = (
+  SELECT actor_id FROM audit.events WHERE action = 'access.plan' ORDER BY sequence DESC LIMIT 1
+);
 COMMIT;
 SQL
 }
