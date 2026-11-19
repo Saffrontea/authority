@@ -90,6 +90,11 @@ export AUTHORITY_NETWORK_AGENT_ORIGIN AUTHORITY_E2E_DELIVERY_PROXY
 
 mise run mesh:tcp-demo:install
 
+# Compilation can outlast a service health deadline. Finish it before starting
+# the supervised process group and all HTTP readiness timers.
+cargo build --offline --workspace --bins
+AUTHORITY_POC_PREBUILT=1
+export AUTHORITY_POC_PREBUILT
 setsid "${SCRIPT_DIR}/run-poc.sh" &
 poc_pid=$!
 

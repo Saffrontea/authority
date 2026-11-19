@@ -4,6 +4,7 @@ members = [
   "bins/credential-issuer",
   "bins/node-agent",
   "bins/network-agent",
+  "bins/mtls-service",
   "crates/contracts-model",
   "crates/device-auth-core",
   "crates/credential-crypto-openssl",
@@ -12,6 +13,7 @@ members = [
   "crates/planning-core",
   "crates/projection-core",
   "crates/replay-ledger",
+  "crates/mtls-core",
 ]
 resolver = "3"
 
@@ -21,6 +23,7 @@ license = "Apache-2.0"
 rust-version = "1.98"
 
 [workspace.dependencies]
+authority-mtls-core = { path = "crates/mtls-core" }
 authority-contracts-model = { path = "crates/contracts-model" }
 authority-device-auth-core = { path = "crates/device-auth-core" }
 authority-credential-crypto-openssl = { path = "crates/credential-crypto-openssl" }

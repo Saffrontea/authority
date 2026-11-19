@@ -18,4 +18,8 @@ if [ ! -s "$AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE" ]; then
     exit 1
 fi
 
+if [ "${AUTHORITY_POC_PREBUILT:-}" = 1 ]; then
+    exec "$PROJECT_DIR/target/debug/authority-credential-issuer"
+fi
+
 exec cargo run --offline -p authority-credential-issuer

@@ -34,6 +34,8 @@ pub struct EnrollmentConfig {
     pub target_identity_file: PathBuf,
     pub client_wireguard_public_key: String,
     pub network_agent_origin: String,
+    pub credential_issuer_origin: String,
+    pub mtls_service_origin: String,
     pub target_mesh_address: String,
     pub existing_route_source_address: Option<std::net::Ipv4Addr>,
 }
@@ -106,6 +108,13 @@ impl AppState {
 
     pub fn client_wireguard_public_key(&self) -> &str {
         &self.0.enrollment.client_wireguard_public_key
+    }
+
+    pub fn credential_issuer_origin(&self) -> &str {
+        &self.0.enrollment.credential_issuer_origin
+    }
+    pub fn mtls_service_origin(&self) -> &str {
+        &self.0.enrollment.mtls_service_origin
     }
 
     pub fn target_mesh_address(&self) -> &str {

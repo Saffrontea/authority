@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+authority-mtls-core.workspace = true
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true

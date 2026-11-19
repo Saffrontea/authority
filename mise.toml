@@ -209,6 +209,27 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh status"
 description = "Internal: verify the WireGuard tunnel"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh verify"
 
+[tasks."mesh:mtls:install"]
+run = "cargo build --offline -p authority-mtls-service && ./scripts/authority-agent.sh run _mesh:mtls-install"
+
+[tasks."_mesh:mtls-install"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-install"
+
+[tasks."_mesh:mtls-status"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-status"
+
+[tasks."_mesh:mtls-stop"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-stop"
+
+[tasks."_mesh:mtls-start"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-start"
+
+[tasks."mesh:mtls:restart"]
+run = "./scripts/authority-agent.sh run _mesh:mtls-restart"
+
+[tasks."_mesh:mtls-restart"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-restart"
+
 [tasks."_mesh:agent-install"]
 description = "Internal: install the network agent in the target LXC"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-install"
@@ -343,7 +364,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh client-reconnect"
 
 [tasks."verification:pbt"]
 description = "Check planning, containment, projection and durable-state properties"
-run = "cargo test -p authority-contracts-model -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger -p authority-network-agent -p authority-credential-issuer -p authority-node-agent"
+run = "cargo test -p authority-contracts-model -p authority-planning-core -p authority-policy-core -p authority-projection-core -p authority-replay-ledger -p authority-network-agent -p authority-credential-issuer -p authority-node-agent -p authority-mtls-core -p authority-mtls-service"
 
 [tasks."verification:tla"]
 description = "Model-check revocation distribution safety and conditional liveness (requires Java 11+)"

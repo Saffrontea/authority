@@ -188,10 +188,16 @@ proptest! {
             prop_assert_eq!(certificate.not_before().compare(Asn1Time::from_unix(case.now).unwrap().as_ref()).unwrap(), std::cmp::Ordering::Equal);
             prop_assert_eq!(certificate.not_after().compare(Asn1Time::from_unix(case.now + ttl).unwrap().as_ref()).unwrap(), std::cmp::Ordering::Equal);
             let names = certificate.subject_alt_names().unwrap();
-            prop_assert_eq!(names.len(), 2);
-            prop_assert_eq!(names.iter().filter_map(|name| name.uri()).collect::<Vec<_>>(), vec![claims.identity_uri.as_str()]);
+            prop_assert_eq!(names.len(), 3);
+            prop_assert_eq!(names.iter().filter_map(|name| name.uri()).collect::<Vec<_>>(), vec![claims.identity_uri.clone(), format!("urn:authority:target:{}", claims.target_node_id)]);
             prop_assert_eq!(names.iter().filter_map(|name| name.dnsname()).collect::<Vec<_>>(), vec![claims.service_audience.as_str()]);
             prop_assert_eq!(certificate.subject_name().entries_by_nid(Nid::COMMONNAME).next().unwrap().data().to_string().unwrap(), claims.decision_id.clone());
+            let identity = authority_mtls_core::client_identity(&certificate, &claims.domain_id, &claims.target_node_id, &claims.service_audience).unwrap();
+            prop_assert_eq!(identity.decision_id, claims.decision_id.clone());
+            prop_assert_eq!(identity.expires_at, claims.expires_at);
+            for (domain, target, service) in [("wrong-domain", claims.target_node_id.as_str(), claims.service_audience.as_str()), (claims.domain_id.as_str(), "wrong-target", claims.service_audience.as_str()), (claims.domain_id.as_str(), claims.target_node_id.as_str(), "wrong-service")] {
+                prop_assert!(authority_mtls_core::client_identity(&certificate, domain, target, service).is_err());
+            }
             prop_assert_eq!(&response.identity_uri, &claims.identity_uri);
             prop_assert_eq!(&response.decision_id, &claims.decision_id);
             prop_assert_eq!(response.expires_at, case.now + ttl);

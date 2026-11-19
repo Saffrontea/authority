@@ -304,6 +304,53 @@ verify_mesh() {
   log "WireGuard tunnel verified (${CLIENT_MESH_IP} -> ${TARGET_MESH_IP})"
 }
 
+install_mtls_service() {
+  local root="${REPO_ROOT:-$(cd -- "${SCRIPT_DIR}/../.." && pwd)}" target_underlay target_id
+  target_underlay="$(container_ip "${TARGET_NAME}")"
+  target_id="$(attach "${TARGET_NAME}" python3 -c 'import json,urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:3003/v1/identity"))["node_id"])')"
+  [[ -n "${target_underlay}" && -n "${target_id}" ]] || die "target identity is unavailable"
+  as_root install -m 0755 "${root}/target/debug/authority-mtls-service" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service.new"
+  as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service.new" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service"
+  as_root install -m 0644 "${root}/.secrets/mtls-ca-cert.pem" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-mtls-client-ca.pem"
+  attach "${TARGET_NAME}" sh -seu <<CONTAINER_SCRIPT
+umask 077
+mkdir -p /var/lib/authority
+if [ ! -s /var/lib/authority/mtls-server-key.pem ]; then
+ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 \
+  -subj /CN=authority-target -addext basicConstraints=CA:FALSE -addext extendedKeyUsage=serverAuth -addext keyUsage=digitalSignature -addext subjectAltName=DNS:authority-target,IP:${target_underlay} \
+  -keyout /var/lib/authority/mtls-server-key.pem -out /var/lib/authority/mtls-server-cert.pem
+fi
+cat > /etc/systemd/system/authority-mtls-service.service <<UNIT
+[Unit]
+Description=Authority mTLS enforcing service
+After=network-online.target
+[Service]
+ExecStart=/usr/local/bin/authority-mtls-service
+Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
+Environment=AUTHORITY_MTLS_CA_CERTIFICATE_FILE=/etc/authority-mtls-client-ca.pem
+Environment=AUTHORITY_MTLS_SERVICE_LEDGER_FILE=/var/lib/authority/mtls-revocations
+Environment=AUTHORITY_MTLS_SERVICE_KEY_FILE=/var/lib/authority/mtls-server-key.pem
+Environment=AUTHORITY_MTLS_SERVICE_CERTIFICATE_FILE=/var/lib/authority/mtls-server-cert.pem
+Environment=AUTHORITY_DOMAIN_ID=019a6e6d-4b01-7c31-bb4c-f83220bec001
+Environment=AUTHORITY_TARGET_NODE_ID=${target_id}
+Environment=AUTHORITY_MTLS_SERVICE_AUDIENCE=demo-api
+Environment=AUTHORITY_MTLS_SERVICE_BIND=0.0.0.0:3004
+Environment=AUTHORITY_MTLS_SERVICE_TLS_BIND=0.0.0.0:8443
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/authority
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable authority-mtls-service.service >/dev/null
+systemctl restart authority-mtls-service.service
+CONTAINER_SCRIPT
+  attach "${TARGET_NAME}" cat /var/lib/authority/mtls-server-cert.pem > "${root}/.secrets/mtls-server-cert.pem"
+  as_root chown "$(stat -c '%u:%g' "${root}/.secrets/mtls-ca-cert.pem")" "${root}/.secrets/mtls-server-cert.pem"
+}
+
 install_network_agent() {
   local client_underlay target_underlay target_host_key
   [[ "$(container_state "${CLIENT_NAME}")" == "RUNNING" ]] || die "${CLIENT_NAME} is not running"
@@ -567,6 +614,11 @@ main() {
     status) show_status ;;
     verify) verify_mesh ;;
     agent-install) install_network_agent ;;
+    mtls-install) install_mtls_service ;;
+    mtls-status) attach "${TARGET_NAME}" journalctl -u authority-mtls-service.service --no-pager -n 40 ;;
+    mtls-stop) attach "${TARGET_NAME}" systemctl stop authority-mtls-service.service ;;
+    mtls-start) attach "${TARGET_NAME}" systemctl start authority-mtls-service.service ;;
+    mtls-restart) attach "${TARGET_NAME}" systemctl restart authority-mtls-service.service ;;
     agent-status) network_agent_status ;;
     agent-restart)
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service

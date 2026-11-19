@@ -189,6 +189,7 @@ dependencies = [
  "authority-contracts-model",
  "authority-credential-crypto-openssl",
  "authority-issuer-core",
+ "authority-mtls-core",
  "authority-projection-core",
  "authority-replay-ledger",
  "axum",
@@ -217,6 +218,43 @@ version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "authority-mtls-core"
+version = "0.1.0"
+dependencies = [
+ "authority-contracts-model",
+ "authority-credential-crypto-openssl",
+ "authority-issuer-core",
+ "authority-replay-ledger",
+ "openssl",
+ "proptest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "authority-mtls-service"
+version = "0.1.0"
+dependencies = [
+ "authority-contracts-model",
+ "authority-credential-crypto-openssl",
+ "authority-mtls-core",
+ "authority-replay-ledger",
+ "axum",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "openssl",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-openssl",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3652,6 +3690,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
 dependencies = [
  "native-tls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-openssl"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59df6849caa43bb7567f9a36f863c447d95a11d5903c9cc334ba32576a27eadd"
+dependencies = [
+ "openssl",
+ "openssl-sys",
  "tokio",
 ]
 

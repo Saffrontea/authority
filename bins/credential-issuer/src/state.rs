@@ -1,9 +1,10 @@
 use std::sync::{
-    Arc, Mutex, RwLock, RwLockReadGuard,
+    Arc, RwLock, RwLockReadGuard,
     atomic::{AtomicU64, Ordering},
 };
 
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
+use authority_mtls_core::AccessStore;
 use authority_replay_ledger::ReplayLedger;
 use ssh_key::PrivateKey;
 
@@ -15,7 +16,7 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     verifier: OpenSslEd25519Verifier,
     ca_key: RwLock<PrivateKey>,
-    replay_ledger: Mutex<ReplayLedger>,
+    access: AccessStore,
     next_serial: AtomicU64,
     mtls_ca: RwLock<Option<MtlsCa>>,
 }
@@ -30,7 +31,7 @@ impl AppState {
         Self(Arc::new(Inner {
             verifier,
             ca_key: RwLock::new(ca_key),
-            replay_ledger: Mutex::new(replay_ledger),
+            access: AccessStore::new(replay_ledger),
             next_serial: AtomicU64::new(initial_serial),
             mtls_ca: RwLock::new(None),
         }))
@@ -50,11 +51,11 @@ impl AppState {
     }
 
     pub fn consume_nonce(&self, nonce: &str, expires_at: i64, now: i64) -> Result<bool, String> {
-        self.0
-            .replay_ledger
-            .lock()
-            .map_err(|error| error.to_string())?
-            .consume(nonce, expires_at, now)
+        self.0.access.consume_nonce(nonce, expires_at, now)
+    }
+
+    pub fn access(&self) -> &AccessStore {
+        &self.0.access
     }
 
     pub fn next_serial(&self) -> u64 {

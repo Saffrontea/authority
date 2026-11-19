@@ -34,6 +34,7 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
         .route("/health", get(health))
         .route("/v1/ssh-certificates", post(issue_ssh_certificate))
         .route("/v1/mtls-certificates", post(issue_mtls_certificate))
+        .route("/v1/revocations", post(revoke_mtls))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -41,6 +42,24 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
                 .allow_methods([Method::GET, Method::POST])
                 .allow_headers([CONTENT_TYPE]),
         )
+}
+
+async fn revoke_mtls(
+    State(state): State<AppState>,
+    Json(envelope): Json<authority_contracts_model::SignedDecisionRevocationNoticeV2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .access()
+        .revoke(
+            &envelope,
+            state.verifier(),
+            &envelope.notice.target_node_id,
+            None,
+        )
+        .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_revocation", cause))?;
+    Ok(Json(
+        json!({"decision_id":envelope.notice.decision_id,"sequence":envelope.notice.sequence,"adapter":"mtls.client_certificate"}),
+    ))
 }
 
 async fn health() -> StatusCode {
@@ -102,10 +121,6 @@ fn issue_mtls_certificate_with_clock(
     if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
-    let now = clock()?;
-    if now < authorization.not_before || now >= authorization.expires_at {
-        return Err(ApiError::unauthorized("authorization_expired"));
-    }
     let public_key = PKey::public_key_from_pem(request.public_key_pem.as_bytes())
         .map_err(|_| ApiError::bad_request("invalid_mtls_public_key"))?;
     let digest = hash(
@@ -120,18 +135,30 @@ fn issue_mtls_certificate_with_clock(
     if fingerprint != authorization.client_spki_sha256 {
         return Err(ApiError::unauthorized("mtls_key_fingerprint_mismatch"));
     }
-    if !state
-        .consume_nonce(&authorization.nonce, authorization.expires_at, now)
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::conflict("authorization_replayed"));
-    }
     let certificate = state
-        .with_mtls_ca(|ca| {
-            build_mtls_certificate(&public_key, authorization, ca, state.next_serial())
-                .map_err(|error| error.to_string())
-        })
-        .map_err(ApiError::internal)?;
+        .access()
+        .issue(
+            authorization,
+            || clock().map_err(|e| e.code.to_owned()),
+            || {
+                state.with_mtls_ca(|ca| {
+                    build_mtls_certificate(&public_key, authorization, ca, state.next_serial())
+                        .map_err(|error| error.to_string())
+                })
+            },
+        )
+        .map_err(|error| match error {
+            authority_mtls_core::AccessError::Revoked => {
+                ApiError::unauthorized("mtls_authorization_revoked")
+            }
+            authority_mtls_core::AccessError::Replay => {
+                ApiError::conflict("authorization_replayed")
+            }
+            authority_mtls_core::AccessError::NotActive => {
+                ApiError::unauthorized("authorization_expired")
+            }
+            other => ApiError::internal(other),
+        })?;
     let ca_certificate_pem = state
         .with_mtls_ca(|ca| {
             String::from_utf8(ca.certificate.to_pem().map_err(|error| error.to_string())?)
@@ -173,6 +200,10 @@ fn build_mtls_certificate(
     let context = builder.x509v3_context(Some(&ca.certificate), None);
     let san = SubjectAlternativeName::new()
         .uri(&authorization.identity_uri)
+        .uri(&format!(
+            "urn:authority:target:{}",
+            authorization.target_node_id
+        ))
         .dns(&authorization.service_audience)
         .build(&context)?;
     builder.append_extension(san)?;

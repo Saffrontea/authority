@@ -49,6 +49,8 @@ if [[ -z "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-}" ]]; then
     AUTHORITY_POC_NETWORK_AGENT_ORIGIN="http://${target_underlay}:3003"
 fi
 AUTHORITY_SSH_TARGET_PORT=${AUTHORITY_SSH_TARGET_PORT:-2222}
+AUTHORITY_POC_MTLS_SERVICE_ORIGIN=${AUTHORITY_POC_MTLS_SERVICE_ORIGIN:-${AUTHORITY_POC_NETWORK_AGENT_ORIGIN%:3003}:3004}
+export AUTHORITY_POC_MTLS_SERVICE_ORIGIN
 export AUTHORITY_SSH_TARGET AUTHORITY_SSH_TARGET_PORT AUTHORITY_POC_NETWORK_AGENT_ORIGIN AUTHORITY_POC_WG_PUBLIC_KEY AUTHORITY_TARGET_IDENTITY_FILE
 echo "[poc] ssh-mesh-proxy=${AUTHORITY_SSH_TARGET}:${AUTHORITY_SSH_TARGET_PORT} network-agent=${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}" >&2
 
@@ -72,6 +74,13 @@ on_signal() {
 trap cleanup EXIT
 trap on_signal INT TERM
 
+# Build before health deadlines start; cargo run can otherwise wait on unrelated
+# test/clippy build locks while an apparently healthy process has not started.
+if [[ "${AUTHORITY_POC_PREBUILT:-}" != 1 ]]; then
+    cargo build --offline --workspace --bins
+fi
+AUTHORITY_POC_PREBUILT=1
+export AUTHORITY_POC_PREBUILT
 "${SCRIPT_DIR}/run-control-plane.sh" &
 control_pid=$!
 
@@ -96,7 +105,7 @@ for _ in {1..600}; do
 done
 curl --fail --silent --show-error "${issuer_origin}/health" >/dev/null
 
-mise run mesh:agent:install
+"${SCRIPT_DIR}/authority-agent.sh" run _mesh:agent-install
 for _ in {1..100}; do
     if curl --fail --silent "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}/v1/identity" >/dev/null 2>&1; then
         break
@@ -113,6 +122,8 @@ curl --fail --silent --show-error "${AUTHORITY_POC_NETWORK_AGENT_ORIGIN}/v1/iden
 chmod 0600 "${target_identity_tmp}"
 mv -f -- "${target_identity_tmp}" "${AUTHORITY_TARGET_IDENTITY_FILE}"
 echo "[poc] target node identity is ready" >&2
+
+"${SCRIPT_DIR}/authority-agent.sh" run _mesh:mtls-install
 
 "${SCRIPT_DIR}/run-node-agent.sh" &
 node_pid=$!

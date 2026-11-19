@@ -38,10 +38,10 @@ webdriver() {
     if [[ -n "${body}" ]]; then
         response="$(curl --silent --show-error --max-time 15 \
             --request "${method}" --header 'content-type: application/json' \
-            --data "${body}" "${DRIVER_ORIGIN}${path}")"
+            --data "${body}" "${DRIVER_ORIGIN}${path}")" || die "WebDriver ${method} ${path}: transport failed"
     else
         response="$(curl --silent --show-error --max-time 15 \
-            --request "${method}" "${DRIVER_ORIGIN}${path}")"
+            --request "${method}" "${DRIVER_ORIGIN}${path}")" || die "WebDriver ${method} ${path}: transport failed"
     fi
     value_error="$(jq -r '.value.error? // empty' <<<"${response}")"
     [[ -z "${value_error}" ]] || die "WebDriver ${method} ${path}: ${response}"
@@ -173,7 +173,7 @@ curl --silent --fail "${DRIVER_ORIGIN}/status" >/dev/null || die 'ChromeDriver d
 browser_profile="$(mktemp -d /tmp/authority-poc-browser.XXXXXX)"
 e2e_username="poc-e2e-${browser_profile##*.}"
 capabilities="$(jq -nc --arg profile "${browser_profile}" '{capabilities:{alwaysMatch:{browserName:"chrome","webauthn:virtualAuthenticators":true,"goog:chromeOptions":{binary:"/usr/bin/chromium",args:[("--user-data-dir=" + $profile),"--headless=new","--disable-gpu","--disable-dev-shm-usage","--no-first-run"]}}}}')"
-session="$(webdriver POST /session "${capabilities}" | jq -r '.sessionId')"
+session="$(webdriver POST /session "${capabilities}" | jq -er '.sessionId | select(type == "string" and length > 0)')"
 webdriver POST "/session/${session}/webauthn/authenticator" \
     '{"protocol":"ctap2","transport":"internal","hasResidentKey":true,"hasUserVerification":true,"isUserConsenting":true,"isUserVerified":true}' >/dev/null
 
@@ -464,6 +464,7 @@ if [[ -n "${wireguard_public_key}" ]]; then
 fi
 
 if [[ -n "${wireguard_public_key}" ]]; then
+    python3 "${SCRIPT_DIR}/mtls-layer-e2e.py" "${session}" "${control_origin}" "${issuer_origin}" "${node_origin}" "${network_agent_origin}"
     client_underlay="${AUTHORITY_SSH_TARGET:?}"
     python3 "${SCRIPT_DIR}/tcp-layer-e2e.py" "${session}" "${control_origin}" "${network_agent_origin}" "${client_underlay}"
     mise run mesh:configure

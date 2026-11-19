@@ -1,0 +1,23 @@
+[package]
+name = "authority-mtls-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+authority-contracts-model.workspace = true
+authority-credential-crypto-openssl.workspace = true
+authority-issuer-core.workspace = true
+authority-replay-ledger.workspace = true
+openssl.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+serde_json.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -46,6 +46,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_identity_file: config.target_identity_file,
             client_wireguard_public_key: config.client_wireguard_public_key,
             network_agent_origin: config.network_agent_origin,
+            credential_issuer_origin: config.credential_issuer_origin,
+            mtls_service_origin: config.mtls_service_origin,
             target_mesh_address: config.target_mesh_address,
             existing_route_source_address: config.existing_route_source_address,
         },

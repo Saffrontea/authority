@@ -976,6 +976,16 @@ struct RevokeAccessAuthorizationRequest {
     adapter_kinds: Option<Vec<AdapterGrantKindV1>>,
 }
 
+const REVOCABLE_DECISION_QUERY: &str = "SELECT issued.payload, (SELECT MAX((adapter->>'expires_at')::bigint) \
+          FROM outbox.events AS evaluated \
+          CROSS JOIN LATERAL jsonb_array_elements(evaluated.payload->'adapter_grants') AS adapter \
+          WHERE evaluated.aggregate_id = issued.aggregate_id \
+            AND evaluated.event_type = 'policy.decision.evaluated') AS adapter_expires_at \
+         FROM outbox.events AS issued \
+         WHERE owner_module = 'policy' AND aggregate_type = 'access_decision' \
+           AND aggregate_id = $1 AND event_type IN ('access.authorization.issued', 'access.tcp_authorization.issued') \
+         ORDER BY occurred_at DESC LIMIT 1";
+
 async fn revoke_access_authorization(
     State(state): State<AppState>,
     Path(decision_id): Path<String>,
@@ -990,24 +1000,25 @@ async fn revoke_access_authorization(
         bindings.push(serde_json::to_string(kinds).map_err(ApiError::internal)?);
     }
     let session = authenticated_session(&state, &headers, "access.revoke", &bindings)?;
-    let row = sqlx::query(
-        "SELECT payload FROM outbox.events \
-         WHERE owner_module = 'policy' AND aggregate_type = 'access_decision' \
-           AND aggregate_id = $1 AND event_type IN ('access.authorization.issued', 'access.tcp_authorization.issued') \
-         ORDER BY occurred_at DESC LIMIT 1",
-    )
-    .bind(&decision_id)
-    .fetch_optional(state.pool())
-    .await
-    .map_err(ApiError::internal)?
-    .ok_or_else(|| ApiError::not_found("authorization_not_found"))?;
+    let row = sqlx::query(REVOCABLE_DECISION_QUERY)
+        .bind(&decision_id)
+        .fetch_optional(state.pool())
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("authorization_not_found"))?;
     let payload: Value = row.try_get("payload").map_err(ApiError::internal)?;
     let RevocableDecision {
         subject,
         target_node_id,
-        expires_at,
+        mut expires_at,
         issued_kinds,
     } = revocable_decision(payload)?;
+    if let Some(adapter_expiry) = row
+        .try_get::<Option<i64>, _>("adapter_expires_at")
+        .map_err(ApiError::internal)?
+    {
+        expires_at = expires_at.max(adapter_expiry);
+    }
     if subject != session.user_id.to_string() {
         return Err(ApiError::not_found("authorization_not_found"));
     }
@@ -1030,6 +1041,9 @@ async fn revoke_access_authorization(
     }
 
     if let Some(existing) = load_revocation(&state, &decision_id, &scope_key).await? {
+        crate::revocation_delivery::enforce_mtls(&state, &existing)
+            .await
+            .map_err(|_| ApiError::unavailable("mtls_revocation_pending"))?;
         return Ok(Json(existing));
     }
     let sequence: i64 = sqlx::query_scalar("SELECT nextval('policy.revocation_notice_sequence')")
@@ -1052,9 +1066,11 @@ async fn revoke_access_authorization(
         state.signer(),
     )
     .map_err(ApiError::internal)?;
-    persist_revocation(&state, session.user_id, envelope)
+    let persisted = persist_revocation(&state, session.user_id, envelope).await?;
+    crate::revocation_delivery::enforce_mtls(&state, &persisted)
         .await
-        .map(Json)
+        .map_err(|_| ApiError::unavailable("mtls_revocation_pending"))?;
+    Ok(Json(persisted))
 }
 
 async fn persist_revocation(
@@ -1726,6 +1742,44 @@ mod tests {
     use authority_policy_core::{AccessDecision, Capability, PolicyRef};
 
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires AUTHORITY_DB_HOST and LXC PostgreSQL"]
+    async fn revocation_retention_includes_mtls_beyond_transport_expiry() {
+        let pool = crate::access_policy::tests::lxc_pool(1).await;
+        let mut transaction = pool.begin().await.unwrap();
+        let payload: Value = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/access-authorization-bundle-v1/valid/basic.json"
+        ))
+        .unwrap();
+        let transport_expiry = revocable_decision(payload.clone())
+            .unwrap_or_else(|_| panic!("fixture must decode"))
+            .expires_at;
+        let mtls_expiry = transport_expiry + 600;
+        let decision = Uuid::new_v4().simple().to_string();
+        for (event, value) in [
+            ("access.authorization.issued", payload),
+            (
+                "policy.decision.evaluated",
+                json!({"adapter_grants":[{"kind":"mtls.client_certificate", "expires_at":mtls_expiry}]}),
+            ),
+        ] {
+            sqlx::query("INSERT INTO outbox.events (id, owner_module, aggregate_type, aggregate_id, event_type, contract_version, payload, occurred_at) VALUES ($1,'policy','access_decision',$2,$3,1,$4,now())")
+                .bind(Uuid::new_v4()).bind(&decision).bind(event).bind(value)
+                .execute(&mut *transaction).await.unwrap();
+        }
+        let row = sqlx::query(REVOCABLE_DECISION_QUERY)
+            .bind(&decision)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        assert_eq!(
+            row.get::<Option<i64>, _>("adapter_expires_at"),
+            Some(mtls_expiry)
+        );
+        assert!(row.get::<Option<i64>, _>("adapter_expires_at").unwrap() > transport_expiry);
+        transaction.rollback().await.unwrap();
+    }
 
     #[test]
     fn session_tokens_are_random_and_only_digests_are_stable() {

@@ -1,5 +1,7 @@
 # Verification obligations and evidence
 
+mTLS enforcement and its additional guarantees are described in [mTLS revocation](mtls-revocation.md).
+
 See the [coverage audit](verification-audit.md) for the requested property-to-evidence mapping.
 
 This work tracks the full verification target; a passing model is not a proof of

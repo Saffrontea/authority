@@ -207,14 +207,14 @@ pub fn request(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use authority_policy_core::{Capability, Route, scoped::RequestedTcp};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
     use std::time::Duration;
 
     use super::*;
 
-    async fn lxc_pool(max_connections: u32) -> PgPool {
+    pub(crate) async fn lxc_pool(max_connections: u32) -> PgPool {
         let host = std::env::var("AUTHORITY_DB_HOST").expect("set AUTHORITY_DB_HOST for LXC");
         let password = std::env::var("AUTHORITY_DB_PASSWORD").unwrap_or_else(|_| {
             let path = std::env::var_os("AUTHORITY_DB_PASSWORD_FILE").map_or_else(

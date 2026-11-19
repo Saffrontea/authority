@@ -1,6 +1,6 @@
 use std::{collections::HashMap, time::Duration};
 
-use authority_contracts_model::SignedDecisionRevocationNoticeV2;
+use authority_contracts_model::{AdapterGrantKindV1, SignedDecisionRevocationNoticeV2};
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -30,7 +30,7 @@ pub async fn run(state: AppState, client: reqwest::Client) {
 async fn reconcile(
     state: &AppState,
     client: &reqwest::Client,
-    delivered: &mut HashMap<i64, i64>,
+    delivered: &mut HashMap<(i64, String), i64>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let identity: Value =
         serde_json::from_slice(&tokio::fs::read(state.target_identity_file()).await?)?;
@@ -54,18 +54,50 @@ async fn reconcile(
     .await?;
     for value in values {
         let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_value(value)?;
-        if delivered.contains_key(&notice.notice.sequence) {
-            continue;
+        let kinds = &notice.notice.adapter_kinds;
+        let mut origins = Vec::new();
+        if kinds.contains(&AdapterGrantKindV1::WireGuardPeer)
+            || kinds.contains(&AdapterGrantKindV1::TcpPort)
+        {
+            origins.push((state.network_agent_origin(), false));
         }
-        match deliver(client, state.network_agent_origin(), &notice).await {
-            Ok(()) => {
-                delivered.insert(notice.notice.sequence, notice.notice.expires_at);
-                info!(decision_id = %notice.notice.decision_id, "revocation delivered to network agent");
+        if kinds.contains(&AdapterGrantKindV1::MtlsClientCertificate) {
+            origins.push((state.credential_issuer_origin(), true));
+            origins.push((state.mtls_service_origin(), true));
+        }
+        for (origin, mtls) in origins {
+            let delivery = (notice.notice.sequence, origin.to_owned());
+            if delivered.contains_key(&delivery) {
+                continue;
             }
-            Err(cause) => {
-                warn!(%cause, decision_id = %notice.notice.decision_id, "revocation delivery failed; will retry");
+            match deliver(client, origin, &notice, mtls).await {
+                Ok(()) => {
+                    delivered.insert(delivery, notice.notice.expires_at);
+                    info!(decision_id = %notice.notice.decision_id, %origin, "revocation delivered to adapter");
+                }
+                Err(cause) => {
+                    warn!(%cause, decision_id = %notice.notice.decision_id, %origin, "revocation delivery failed; will retry");
+                }
             }
         }
+    }
+    Ok(())
+}
+
+/// The mTLS API acknowledges enforcement only after both configured receivers ACK.
+/// The background dispatcher independently retries every pending destination.
+pub async fn enforce_mtls(
+    state: &AppState,
+    notice: &SignedDecisionRevocationNoticeV2,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if notice
+        .notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::MtlsClientCertificate)
+    {
+        let client = client()?;
+        deliver(&client, state.credential_issuer_origin(), notice, true).await?;
+        deliver(&client, state.mtls_service_origin(), notice, true).await?;
     }
     Ok(())
 }
@@ -74,6 +106,7 @@ async fn deliver(
     client: &reqwest::Client,
     origin: &str,
     notice: &SignedDecisionRevocationNoticeV2,
+    mtls: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut response = client
         .post(format!("{}/v1/revocations", origin.trim_end_matches('/')))
@@ -88,8 +121,17 @@ async fn deliver(
         )
         .into());
     }
-    // Drain the response within the request deadline so the connection can be reused.
-    while response.chunk().await?.is_some() {}
+    if mtls {
+        let receipt: Value = response.json().await?;
+        if receipt["decision_id"] != notice.notice.decision_id
+            || receipt["sequence"] != notice.notice.sequence
+            || receipt["adapter"] != "mtls.client_certificate"
+        {
+            return Err("mTLS receiver returned an invalid receipt".into());
+        }
+    } else {
+        while response.chunk().await?.is_some() {}
+    }
 
     Ok(())
 }
@@ -102,8 +144,10 @@ mod tests {
         net::TcpListener,
     };
 
-    async fn delivery_response(
+    async fn delivery_response_body(
         status: &str,
+        response_body: &str,
+        mtls: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_str(include_str!(
             "../../../contracts/test-vectors/signed-decision-revocation-notice-v2/valid/basic.json"
@@ -111,8 +155,10 @@ mod tests {
         let body = serde_json::to_vec(&notice)?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", listener.local_addr()?);
-        let response =
-            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+            response_body.len()
+        );
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -131,9 +177,46 @@ mod tests {
             }
             stream.write_all(response.as_bytes()).await.unwrap();
         });
-        let result = deliver(&client()?, &origin, &notice).await;
+        let result = deliver(&client()?, &origin, &notice, mtls).await;
         server.await?;
         result
+    }
+
+    async fn delivery_response(
+        status: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        delivery_response_body(status, "", false).await
+    }
+
+    #[tokio::test]
+    async fn mtls_receipt_must_match_adapter_decision_and_sequence() {
+        let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/signed-decision-revocation-notice-v2/valid/basic.json"
+        ))
+        .unwrap();
+        let receipt = serde_json::json!({"decision_id":notice.notice.decision_id,"sequence":notice.notice.sequence,"adapter":"mtls.client_certificate"});
+        delivery_response_body("200 OK", &receipt.to_string(), true)
+            .await
+            .unwrap();
+        for (field, wrong) in [
+            ("decision_id", serde_json::json!("other")),
+            ("sequence", serde_json::json!(0)),
+            ("adapter", serde_json::json!("wireguard.peer")),
+        ] {
+            let mut corrupted = receipt.clone();
+            corrupted[field] = wrong;
+            assert!(
+                delivery_response_body("200 OK", &corrupted.to_string(), true)
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(delivery_response_body("200 OK", "", true).await.is_err());
+        assert!(
+            delivery_response_body("503 Unavailable", &receipt.to_string(), true)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -172,7 +255,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(7),
-            deliver(&client().unwrap(), &origin, &notice),
+            deliver(&client().unwrap(), &origin, &notice, false),
         )
         .await;
         server.abort();

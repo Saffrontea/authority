@@ -23,4 +23,8 @@ if [ ! -s "$AUTHORITY_SSH_TRUSTED_CA_FILE" ]; then
     install -m 0600 "$AUTHORITY_SSH_CA_PUBLIC_KEY_FILE" "$AUTHORITY_SSH_TRUSTED_CA_FILE"
 fi
 
+if [ "${AUTHORITY_POC_PREBUILT:-}" = 1 ]; then
+    exec "$PROJECT_DIR/target/debug/authority-node-agent"
+fi
+
 exec cargo run --offline -p authority-node-agent
