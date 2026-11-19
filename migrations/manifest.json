@@ -23,6 +23,12 @@
     },
     "0008_tcp_admission.sql": {
       "sha256": "7bfbe876aca9fe03b15b672ddd1cd6a1bec2ca7d5f4151033b0d3e42461f622e"
+    },
+    "0009_replica_authority_state.sql": {
+      "sha256": "974f52f2f9c8957fcd79eeaaf16c32cb01720072881757bdb3c6bc9aa57bad26"
+    },
+    "0010_shared_ca_binding.sql": {
+      "sha256": "509caebc171cd4f9ed7d1f58d0c903ac99f15d86fc8c39394205cb4d0e53d702"
     }
   }
 }

@@ -4,11 +4,11 @@ use axum::http::HeaderValue;
 
 pub struct Config {
     pub bind: SocketAddr,
+    pub pki_origin: String,
     pub control_plane_key_id: String,
     pub control_plane_public_key_file: PathBuf,
     pub ssh_ca_key_file: PathBuf,
     pub ssh_ca_public_key_file: PathBuf,
-    pub replay_ledger_file: PathBuf,
     pub mtls_ca_key_file: PathBuf,
     pub mtls_ca_certificate_file: PathBuf,
     pub browser_origins: Vec<HeaderValue>,
@@ -16,7 +16,20 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
+        let pki_origin = required("AUTHORITY_PKI_PUBLIC_ORIGIN")?;
+        let uri = pki_origin
+            .parse::<axum::http::Uri>()
+            .map_err(|e| e.to_string())?;
+        if !matches!(uri.scheme_str(), Some("http" | "https"))
+            || uri.authority().is_none()
+            || uri.path() != "/"
+            || uri.query().is_some()
+            || uri.authority().is_some_and(|a| a.as_str().contains('@'))
+        {
+            return Err("AUTHORITY_PKI_PUBLIC_ORIGIN must be an HTTP(S) origin".into());
+        }
         Ok(Self {
+            pki_origin,
             bind: value("AUTHORITY_ISSUER_BIND", "127.0.0.1:3001")?
                 .parse()
                 .map_err(|error| format!("AUTHORITY_ISSUER_BIND is invalid: {error}"))?,
@@ -26,7 +39,6 @@ impl Config {
             )?),
             ssh_ca_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_KEY_FILE")?),
             ssh_ca_public_key_file: PathBuf::from(required("AUTHORITY_SSH_CA_PUBLIC_KEY_FILE")?),
-            replay_ledger_file: PathBuf::from(required("AUTHORITY_ISSUER_REPLAY_LEDGER_FILE")?),
             mtls_ca_key_file: PathBuf::from(required("AUTHORITY_MTLS_CA_KEY_FILE")?),
             mtls_ca_certificate_file: PathBuf::from(required(
                 "AUTHORITY_MTLS_CA_CERTIFICATE_FILE",

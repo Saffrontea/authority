@@ -104,6 +104,7 @@ def verify(binary, env, name, source, minimum=1, expect_failure=False):
     with tempfile.TemporaryDirectory(prefix="authority-verus-") as directory:
         path = Path(directory) / f"{name}.rs"
         path.write_text(source)
+        print(f"{name}: starting verification (timeout 120s)", flush=True)
         result = subprocess.run([str(binary), "--crate-type=lib", "--triggers-mode", "silent", str(path)],
             env=env, cwd=directory, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
         counts = re.search(r"verification results:: (\d+) verified, (\d+) errors", result.stdout)
@@ -111,12 +112,12 @@ def verify(binary, env, name, source, minimum=1, expect_failure=False):
             if result.returncode == 0 or not counts or int(counts[2]) == 0:
                 print(result.stdout)
                 raise SystemExit(f"unsafe mutation failed to produce a proof error: {name}")
-            print(f"{name}: expected proof failure detected")
+            print(f"{name}: expected proof failure detected", flush=True)
         elif result.returncode != 0 or not counts or int(counts[1]) < minimum or int(counts[2]) != 0:
             print(result.stdout)
             raise SystemExit(f"verification failed or proof obligations disappeared: {name}")
         else:
-            print(f"{name}: {counts[1]} verified, 0 errors")
+            print(f"{name}: {counts[1]} verified, 0 errors", flush=True)
 
 
 def main():

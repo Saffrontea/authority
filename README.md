@@ -52,15 +52,15 @@ assigns a monotonic sequence. The target Network Agent verifies the signature,
 audience, node binding, and lifetime before removing an active peer. A notice
 received before its Grant blocks that Grant from being installed later.
 
-The Control Plane polls persisted, unexpired notices every second and delivers
-`POST /v1/revocations` directly to the configured Network Agent over the LXC
-underlay (`AUTHORITY_NETWORK_AGENT_ORIGIN`). Delivery does not pass through the
-browser or the WireGuard peer being revoked. Failed delivery is retried;
-restarting the Control Plane replays live notices, which the agent applies
-idempotently. Delivery uses a shared asynchronous HTTP client with a two-second
-connection timeout and a five-second request deadline; proxies and redirects are
-disabled. This PoC has one configured target; distribution selects only notices
-for that target identity.
+The Control Plane claims durable per-receiver delivery work with READ COMMITTED,
+row locks and expiring ownership, then sends `POST /v1/revocations` to the target
+Network Agent over the LXC underlay (`AUTHORITY_NETWORK_AGENT_ORIGIN`). Other CP
+replicas can retry a crashed worker's claim. Proxies and redirects are disabled.
+Each address identifies a kernel actuator. mTLS services instead subscribe with
+independent process epochs, durable cursors and short enforcement leases; CRL and
+OCSP responses come from the shared certificate ledger. See
+[mTLS authority and revocation](docs/mtls-revocation.md) for configuration,
+completion semantics and replication boundaries.
 The UI reports persistence, not an acknowledgement from the enforcement agent.
 
 Manual reconciliation can also read

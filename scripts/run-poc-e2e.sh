@@ -5,6 +5,14 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 poc_pid=''
 proxy_pid=''
 proxy_directory=''
+bootstrap_directory=$(mktemp -d /tmp/authority-bootstrap.XXXXXX)
+AUTHORITY_BOOTSTRAP_TOKEN_FILE=${bootstrap_directory}/token
+AUTHORITY_POC_REPLICAS=2
+AUTHORITY_PKI_PUBLIC_ORIGIN=http://10.0.3.1:3101
+export AUTHORITY_BOOTSTRAP_TOKEN_FILE AUTHORITY_POC_REPLICAS AUTHORITY_PKI_PUBLIC_ORIGIN
+AUTHORITY_DB_HOST=$(./scripts/authority-agent.sh run _db:status | awk '/^ip: / {print $2;exit}')
+AUTHORITY_DB_PASSWORD_FILE=${SCRIPT_DIR}/../.secrets/authority-db-password
+export AUTHORITY_DB_HOST AUTHORITY_DB_PASSWORD_FILE
 cleaned_up=0
 
 python3 "${SCRIPT_DIR}/check-tla-traces.py" --check-tools
@@ -40,6 +48,8 @@ export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NO
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1
+    "${SCRIPT_DIR}/authority-agent.sh" run _mesh:mtls-restore >/dev/null 2>&1 || true
+    rm -rf -- "${bootstrap_directory}"
     if ! mise run mesh:test:wg-restore >/dev/null 2>&1; then
         echo "poc:e2e: failed to restore receiver wg command permissions" >&2
     fi

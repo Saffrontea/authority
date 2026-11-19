@@ -23,10 +23,12 @@ pub fn load_or_generate(
     cert_path: &Path,
 ) -> Result<MtlsCa, Box<dyn std::error::Error>> {
     if key_path.exists() && cert_path.exists() {
-        return Ok(MtlsCa {
-            key: PKey::private_key_from_pem(&fs::read(key_path)?)?,
-            certificate: X509::from_pem(&fs::read(cert_path)?)?,
-        });
+        let key = PKey::private_key_from_pem(&fs::read(key_path)?)?;
+        let certificate = X509::from_pem(&fs::read(cert_path)?)?;
+        if !certificate.public_key()?.public_eq(&key) {
+            return Err("mTLS CA key does not match certificate".into());
+        }
+        return Ok(MtlsCa { key, certificate });
     }
     if let Some(parent) = key_path.parent() {
         fs::create_dir_all(parent)?;

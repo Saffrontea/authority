@@ -5,18 +5,29 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+test-support = ["dep:authority-replay-ledger"]
+
 [dependencies]
+x509-ocsp = { version = "0.2.1", features = ["std"] }
+x509-cert = "0.2"
+der = { version = "0.7", features = ["alloc", "std"] }
+spki = "0.7"
+sqlx.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+serde.workspace = true
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true
-authority-replay-ledger.workspace = true
+authority-replay-ledger = { workspace = true, optional = true }
 openssl.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+authority-replay-ledger.workspace = true
 proptest = "1"
-serde_json.workspace = true
 tempfile = "3"
 
 [lints]

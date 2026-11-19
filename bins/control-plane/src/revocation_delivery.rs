@@ -1,7 +1,6 @@
-use std::{collections::HashMap, time::Duration};
+use std::time::Duration;
 
-use authority_contracts_model::{AdapterGrantKindV1, SignedDecisionRevocationNoticeV2};
-use serde_json::Value;
+use authority_contracts_model::SignedDecisionRevocationNoticeV2;
 use tracing::{info, warn};
 
 use crate::state::AppState;
@@ -18,95 +17,82 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
 }
 
 pub async fn run(state: AppState, client: reqwest::Client) {
-    let mut delivered = HashMap::new();
+    let worker = uuid::Uuid::new_v4();
     loop {
-        if let Err(cause) = reconcile(&state, &client, &mut delivered).await {
+        if let Err(cause) = reconcile(&state, &client, worker).await {
             warn!(%cause, "revocation delivery reconciliation failed; will retry");
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
 async fn reconcile(
     state: &AppState,
     client: &reqwest::Client,
-    delivered: &mut HashMap<(i64, String), i64>,
+    worker: uuid::Uuid,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let identity: Value =
-        serde_json::from_slice(&tokio::fs::read(state.target_identity_file()).await?)?;
-    let target = identity["node_id"]
-        .as_str()
-        .ok_or("missing target node id")?
-        .parse::<uuid::Uuid>()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let now = i64::try_from(now)?;
-    delivered.retain(|_, expires_at| *expires_at > now);
-    let values: Vec<Value> = sqlx::query_scalar(
-        "SELECT envelope FROM policy.revocation_notices \
-         WHERE domain_id = $1 AND target_node_id = $2 AND expires_at > now() \
-           AND envelope->'notice' ? 'adapter_kinds' ORDER BY sequence",
-    )
-    .bind(state.domain_id())
-    .bind(target)
-    .fetch_all(state.pool())
-    .await?;
-    for value in values {
-        let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_value(value)?;
-        let kinds = &notice.notice.adapter_kinds;
-        let mut origins = Vec::new();
-        if kinds.contains(&AdapterGrantKindV1::WireGuardPeer)
-            || kinds.contains(&AdapterGrantKindV1::TcpPort)
-        {
-            origins.push((state.network_agent_origin(), false));
+    let Some(delivery) = claim(state.pool(), worker).await? else {
+        return Ok(());
+    };
+    let Delivery {
+        sequence,
+        receiver,
+        origin,
+        notice,
+    } = delivery;
+    match deliver(client, &origin, &notice).await {
+        Ok(()) => {
+            sqlx::query("UPDATE policy.adapter_deliveries SET completed_at=clock_timestamp() WHERE sequence=$1 AND receiver_id=$2 AND lease_owner=$3")
+                .bind(sequence).bind(&receiver).bind(worker).execute(state.pool()).await?;
+            info!(decision_id=%notice.notice.decision_id, %receiver, "revocation delivered to adapter");
         }
-        if kinds.contains(&AdapterGrantKindV1::MtlsClientCertificate) {
-            origins.push((state.credential_issuer_origin(), true));
-            origins.push((state.mtls_service_origin(), true));
-        }
-        for (origin, mtls) in origins {
-            let delivery = (notice.notice.sequence, origin.to_owned());
-            if delivered.contains_key(&delivery) {
-                continue;
-            }
-            match deliver(client, origin, &notice, mtls).await {
-                Ok(()) => {
-                    delivered.insert(delivery, notice.notice.expires_at);
-                    info!(decision_id = %notice.notice.decision_id, %origin, "revocation delivered to adapter");
-                }
-                Err(cause) => {
-                    warn!(%cause, decision_id = %notice.notice.decision_id, %origin, "revocation delivery failed; will retry");
-                }
-            }
+        Err(cause) => {
+            sqlx::query("UPDATE policy.adapter_deliveries SET lease_until=clock_timestamp()+interval '1 second' WHERE sequence=$1 AND receiver_id=$2 AND lease_owner=$3")
+                .bind(sequence).bind(&receiver).bind(worker).execute(state.pool()).await?;
+            warn!(%cause, decision_id=%notice.notice.decision_id, %receiver, "revocation delivery failed; will retry");
         }
     }
     Ok(())
 }
 
-/// The mTLS API acknowledges enforcement only after both configured receivers ACK.
-/// The background dispatcher independently retries every pending destination.
-pub async fn enforce_mtls(
-    state: &AppState,
-    notice: &SignedDecisionRevocationNoticeV2,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if notice
-        .notice
-        .adapter_kinds
-        .contains(&AdapterGrantKindV1::MtlsClientCertificate)
-    {
-        let client = client()?;
-        deliver(&client, state.credential_issuer_origin(), notice, true).await?;
-        deliver(&client, state.mtls_service_origin(), notice, true).await?;
-    }
-    Ok(())
+struct Delivery {
+    sequence: i64,
+    receiver: String,
+    origin: String,
+    notice: SignedDecisionRevocationNoticeV2,
+}
+
+async fn claim(
+    pool: &sqlx::PgPool,
+    worker: uuid::Uuid,
+) -> Result<Option<Delivery>, Box<dyn std::error::Error + Send + Sync>> {
+    use sqlx::Row;
+    let mut tx = authority_mtls_core::database::begin(pool).await?;
+    let row = sqlx::query("SELECT d.sequence,d.receiver_id,d.origin,n.envelope FROM policy.adapter_deliveries d JOIN policy.revocation_notices n USING(sequence) WHERE d.completed_at IS NULL AND (d.lease_until IS NULL OR d.lease_until<=clock_timestamp()) AND n.expires_at>clock_timestamp() ORDER BY d.sequence FOR UPDATE OF d SKIP LOCKED LIMIT 1")
+        .fetch_optional(&mut *tx).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let sequence: i64 = row.try_get("sequence")?;
+    let receiver: String = row.try_get("receiver_id")?;
+    let origin: String = row.try_get("origin")?;
+    let notice: SignedDecisionRevocationNoticeV2 =
+        serde_json::from_value(row.try_get("envelope")?)?;
+    sqlx::query("UPDATE policy.adapter_deliveries SET lease_owner=$3,lease_until=clock_timestamp()+interval '15 seconds' WHERE sequence=$1 AND receiver_id=$2")
+        .bind(sequence).bind(&receiver).bind(worker).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(Delivery {
+        sequence,
+        receiver,
+        origin,
+        notice,
+    }))
 }
 
 async fn deliver(
     client: &reqwest::Client,
     origin: &str,
     notice: &SignedDecisionRevocationNoticeV2,
-    mtls: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut response = client
         .post(format!("{}/v1/revocations", origin.trim_end_matches('/')))
@@ -121,17 +107,7 @@ async fn deliver(
         )
         .into());
     }
-    if mtls {
-        let receipt: Value = response.json().await?;
-        if receipt["decision_id"] != notice.notice.decision_id
-            || receipt["sequence"] != notice.notice.sequence
-            || receipt["adapter"] != "mtls.client_certificate"
-        {
-            return Err("mTLS receiver returned an invalid receipt".into());
-        }
-    } else {
-        while response.chunk().await?.is_some() {}
-    }
+    while response.chunk().await?.is_some() {}
 
     Ok(())
 }
@@ -147,7 +123,6 @@ mod tests {
     async fn delivery_response_body(
         status: &str,
         response_body: &str,
-        mtls: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_str(include_str!(
             "../../../contracts/test-vectors/signed-decision-revocation-notice-v2/valid/basic.json"
@@ -177,7 +152,7 @@ mod tests {
             }
             stream.write_all(response.as_bytes()).await.unwrap();
         });
-        let result = deliver(&client()?, &origin, &notice, mtls).await;
+        let result = deliver(&client()?, &origin, &notice).await;
         server.await?;
         result
     }
@@ -185,38 +160,7 @@ mod tests {
     async fn delivery_response(
         status: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        delivery_response_body(status, "", false).await
-    }
-
-    #[tokio::test]
-    async fn mtls_receipt_must_match_adapter_decision_and_sequence() {
-        let notice: SignedDecisionRevocationNoticeV2 = serde_json::from_str(include_str!(
-            "../../../contracts/test-vectors/signed-decision-revocation-notice-v2/valid/basic.json"
-        ))
-        .unwrap();
-        let receipt = serde_json::json!({"decision_id":notice.notice.decision_id,"sequence":notice.notice.sequence,"adapter":"mtls.client_certificate"});
-        delivery_response_body("200 OK", &receipt.to_string(), true)
-            .await
-            .unwrap();
-        for (field, wrong) in [
-            ("decision_id", serde_json::json!("other")),
-            ("sequence", serde_json::json!(0)),
-            ("adapter", serde_json::json!("wireguard.peer")),
-        ] {
-            let mut corrupted = receipt.clone();
-            corrupted[field] = wrong;
-            assert!(
-                delivery_response_body("200 OK", &corrupted.to_string(), true)
-                    .await
-                    .is_err()
-            );
-        }
-        assert!(delivery_response_body("200 OK", "", true).await.is_err());
-        assert!(
-            delivery_response_body("503 Unavailable", &receipt.to_string(), true)
-                .await
-                .is_err()
-        );
+        delivery_response_body(status, "").await
     }
 
     #[tokio::test]
@@ -255,7 +199,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(7),
-            deliver(&client().unwrap(), &origin, &notice, false),
+            deliver(&client().unwrap(), &origin, &notice),
         )
         .await;
         server.abort();
@@ -277,5 +221,63 @@ mod tests {
     async fn failed_delivery_remains_retryable() {
         assert!(delivery_response("503 Service Unavailable").await.is_err());
         delivery_response("200 OK").await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires migrated LXC PostgreSQL; run without live PoC dispatchers"]
+    async fn delivery_claims_are_shared_and_recovered_after_worker_lease_expiry() {
+        let left = crate::access_policy::tests::lxc_pool(2).await;
+        let right = crate::access_policy::tests::lxc_pool(2).await;
+        let mut notice: SignedDecisionRevocationNoticeV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/signed-decision-revocation-notice-v2/valid/basic.json"
+        ))
+        .unwrap();
+        let mut tx = authority_mtls_core::database::begin(&left).await.unwrap();
+        sqlx::query("SELECT id FROM policy.revocation_stream FOR UPDATE")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let sequence: i64 =
+            sqlx::query_scalar("SELECT nextval('policy.revocation_notice_sequence')")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        notice.notice.sequence = sequence;
+        let domain = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO policy.revocation_notices(sequence,domain_id,target_node_id,decision_id,reason,revoked_at,expires_at,envelope,scope_key) VALUES($1,$2,$3,$4,'test',clock_timestamp(),clock_timestamp()+interval '60 seconds',$5,'wireguard.peer')")
+            .bind(sequence).bind(domain).bind(uuid::Uuid::new_v4()).bind(uuid::Uuid::new_v4().to_string()).bind(serde_json::to_value(notice).unwrap()).execute(&mut *tx).await.unwrap();
+        sqlx::query("INSERT INTO policy.adapter_deliveries(sequence,receiver_id,origin) VALUES($1,'test','http://127.0.0.1:1')").bind(sequence).execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+        let first = uuid::Uuid::new_v4();
+        let second = uuid::Uuid::new_v4();
+        let (a, b) = tokio::join!(claim(&left, first), claim(&right, second));
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_eq!(usize::from(a.is_some()) + usize::from(b.is_some()), 1);
+        assert_eq!(a.as_ref().or(b.as_ref()).unwrap().sequence, sequence);
+        let old_owner = if a.is_some() { first } else { second };
+        let new_owner = if a.is_some() { second } else { first };
+        sqlx::query("UPDATE policy.adapter_deliveries SET lease_until=clock_timestamp()-interval '1 second' WHERE sequence=$1").bind(sequence).execute(&left).await.unwrap();
+        assert_eq!(
+            claim(&right, new_owner).await.unwrap().unwrap().sequence,
+            sequence
+        );
+        let stale=sqlx::query("UPDATE policy.adapter_deliveries SET completed_at=clock_timestamp() WHERE sequence=$1 AND lease_owner=$2").bind(sequence).bind(old_owner).execute(&left).await.unwrap();
+        assert_eq!(stale.rows_affected(), 0);
+        sqlx::query("DELETE FROM policy.adapter_deliveries WHERE sequence=$1")
+            .bind(sequence)
+            .execute(&left)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM policy.revocation_notices WHERE sequence=$1")
+            .bind(sequence)
+            .execute(&left)
+            .await
+            .unwrap();
     }
 }

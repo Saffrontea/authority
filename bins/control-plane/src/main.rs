@@ -40,14 +40,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         webauthn,
         config.domain_id,
-        config.bootstrap_token,
+        &config.bootstrap_token,
         signer,
         EnrollmentConfig {
             target_identity_file: config.target_identity_file,
             client_wireguard_public_key: config.client_wireguard_public_key,
             network_agent_origin: config.network_agent_origin,
-            credential_issuer_origin: config.credential_issuer_origin,
-            mtls_service_origin: config.mtls_service_origin,
             target_mesh_address: config.target_mesh_address,
             existing_route_source_address: config.existing_route_source_address,
         },
@@ -56,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.ssh_authorization_ttl_seconds,
         ),
     );
+    state.initialize_auth().await?;
     let delivery_client = revocation_delivery::client()?;
     let delivery = tokio::spawn(revocation_delivery::run(state.clone(), delivery_client));
     let listener = tokio::net::TcpListener::bind(config.bind).await?;

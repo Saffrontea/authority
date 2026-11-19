@@ -6,14 +6,15 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+reqwest.workspace = true
+uuid.workspace = true
 authority-mtls-core.workspace = true
+authority-issuer-core.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-contracts-model.workspace = true
-authority-replay-ledger.workspace = true
 axum.workspace = true
 openssl.workspace = true
 serde_json.workspace = true
-serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

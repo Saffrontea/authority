@@ -5,6 +5,7 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 control_pid=''
 issuer_pid=''
 node_pid=''
+replica_pids=()
 cleaned_up=0
 control_origin=${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}
 issuer_origin=${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}
@@ -57,7 +58,7 @@ echo "[poc] ssh-mesh-proxy=${AUTHORITY_SSH_TARGET}:${AUTHORITY_SSH_TARGET_PORT} 
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1
-    for pid in "${node_pid}" "${issuer_pid}" "${control_pid}"; do
+    for pid in "${node_pid}" "${issuer_pid}" "${control_pid}" "${replica_pids[@]}"; do
         if [[ -n "${pid}" ]]; then
             kill "${pid}" 2>/dev/null || true
         fi
@@ -81,6 +82,23 @@ if [[ "${AUTHORITY_POC_PREBUILT:-}" != 1 ]]; then
 fi
 AUTHORITY_POC_PREBUILT=1
 export AUTHORITY_POC_PREBUILT
+status="$("${SCRIPT_DIR}/authority-agent.sh" run _db:status)"
+AUTHORITY_DB_HOST=${AUTHORITY_DB_HOST:-$(printf '%s\n' "$status" | awk '/^ip: / {print $2;exit}')}
+AUTHORITY_DB_PASSWORD_FILE=${AUTHORITY_DB_PASSWORD_FILE:-${SCRIPT_DIR}/../.secrets/authority-db-password}
+AUTHORITY_PKI_PUBLIC_ORIGIN=${AUTHORITY_PKI_PUBLIC_ORIGIN:-${issuer_origin/localhost/10.0.3.1}}
+printf '%s\n' "$AUTHORITY_PKI_PUBLIC_ORIGIN" > "${SCRIPT_DIR}/../.secrets/pki-origin"
+AUTHORITY_ISSUER_BIND=${AUTHORITY_ISSUER_BIND:-0.0.0.0:3001}
+export AUTHORITY_ISSUER_BIND
+export AUTHORITY_DB_HOST AUTHORITY_DB_PASSWORD_FILE AUTHORITY_PKI_PUBLIC_ORIGIN
+if [[ "${AUTHORITY_POC_REPLICAS:-1}" == 2 ]]; then
+    AUTHORITY_BIND=127.0.0.1:3200
+    AUTHORITY_ISSUER_BIND=127.0.0.1:3301
+    export AUTHORITY_BIND AUTHORITY_ISSUER_BIND
+    python3 "${SCRIPT_DIR}/replica-proxy.py" 127.0.0.1:3100 127.0.0.1:3200 127.0.0.1:3201 &
+    replica_pids+=("$!")
+    python3 "${SCRIPT_DIR}/replica-proxy.py" 0.0.0.0:3101 127.0.0.1:3301 127.0.0.1:3302 &
+    replica_pids+=("$!")
+fi
 "${SCRIPT_DIR}/run-control-plane.sh" &
 control_pid=$!
 
@@ -91,7 +109,11 @@ for _ in {1..600}; do
     kill -0 "${control_pid}" 2>/dev/null || exit 1
     sleep 0.1
 done
-curl --fail --silent --show-error "${control_origin}/health" >/dev/null
+curl --fail --silent --show-error "http://${AUTHORITY_BIND:-127.0.0.1:3000}/health" >/dev/null
+if [[ "${AUTHORITY_POC_REPLICAS:-1}" == 2 ]]; then
+    AUTHORITY_BIND=127.0.0.1:3201 "${SCRIPT_DIR}/run-control-plane.sh" &
+    replica_pids+=("$!")
+fi
 
 "${SCRIPT_DIR}/run-credential-issuer.sh" &
 issuer_pid=$!
@@ -103,6 +125,16 @@ for _ in {1..600}; do
     kill -0 "${issuer_pid}" 2>/dev/null || exit 1
     sleep 0.1
 done
+# Probe the initialized first replica directly before starting its peer.
+if [[ "${AUTHORITY_POC_REPLICAS:-1}" == 2 ]]; then
+    curl --fail --silent --show-error http://127.0.0.1:3301/health >/dev/null
+    AUTHORITY_ISSUER_BIND=127.0.0.1:3302 "${SCRIPT_DIR}/run-credential-issuer.sh" &
+    replica_pids+=("$!")
+    for _ in {1..100}; do
+        curl --fail --silent http://127.0.0.1:3302/health >/dev/null && break
+        sleep 0.1
+    done
+fi
 curl --fail --silent --show-error "${issuer_origin}/health" >/dev/null
 
 "${SCRIPT_DIR}/authority-agent.sh" run _mesh:agent-install
@@ -137,6 +169,9 @@ for _ in {1..600}; do
 done
 curl --fail --silent --show-error "${node_origin}/health" >/dev/null
 
+if [[ "${AUTHORITY_POC_REPLICAS:-1}" == 2 ]]; then
+    curl --fail --silent --show-error http://127.0.0.1:3201/health >/dev/null
+fi
 echo "[poc] all services are ready" >&2
 
-wait -n "${control_pid}" "${issuer_pid}" "${node_pid}"
+wait -n "${control_pid}" "${issuer_pid}" "${node_pid}" "${replica_pids[@]}"

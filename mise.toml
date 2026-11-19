@@ -401,3 +401,9 @@ run = "python3 ./scripts/check-verus.py --mutations"
 [tasks."verification:sources"]
 description = "Check proof source extraction and fail-closed injection boundaries"
 run = "python3 -m unittest discover -s scripts -p test_verus_sources.py"
+
+[tasks."_mesh:mtls-partition"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-partition"
+
+[tasks."_mesh:mtls-restore"]
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-restore"

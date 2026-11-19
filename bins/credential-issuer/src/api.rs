@@ -35,6 +35,9 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
         .route("/v1/ssh-certificates", post(issue_ssh_certificate))
         .route("/v1/mtls-certificates", post(issue_mtls_certificate))
         .route("/v1/revocations", post(revoke_mtls))
+        .route("/v1/pki/{ca_id}/crl", get(get_crl))
+        .route("/v1/pki/{ca_id}/ocsp", post(post_ocsp))
+        .route("/v1/pki/{ca_id}/ocsp/{*request}", get(get_ocsp))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -44,19 +47,97 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
         )
 }
 
+async fn get_crl(
+    State(state): State<AppState>,
+    axum::extract::Path(ca_id): axum::extract::Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    if ca_id != state.mtls_ca_id().map_err(ApiError::internal)? {
+        return Err(ApiError::unauthorized("unknown_ca"));
+    }
+    let (certificate, key) = state
+        .with_mtls_ca(|ca| Ok((ca.certificate.clone(), ca.key.clone())))
+        .map_err(ApiError::internal)?;
+    let bytes = authority_mtls_core::pki::crl(
+        state.database().map_err(ApiError::internal)?,
+        &ca_id,
+        &certificate,
+        &key,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok((
+        [
+            ("content-type", "application/pkix-crl"),
+            ("cache-control", "no-store"),
+        ],
+        bytes,
+    ))
+}
+async fn ocsp_response(
+    state: &AppState,
+    ca_id: &str,
+    body: &[u8],
+) -> Result<axum::response::Response, ApiError> {
+    if ca_id != state.mtls_ca_id().map_err(ApiError::internal)? {
+        return Err(ApiError::unauthorized("unknown_ca"));
+    }
+    let (certificate, key) = state
+        .with_mtls_ca(|ca| Ok((ca.certificate.clone(), ca.key.clone())))
+        .map_err(ApiError::internal)?;
+    let bytes = authority_mtls_core::pki::ocsp(
+        state.database().map_err(ApiError::internal)?,
+        ca_id,
+        &certificate,
+        &key,
+        body,
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok((
+        [
+            ("content-type", "application/ocsp-response"),
+            ("cache-control", "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+async fn post_ocsp(
+    State(state): State<AppState>,
+    axum::extract::Path(ca_id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, ApiError> {
+    ocsp_response(&state, &ca_id, &body).await
+}
+async fn get_ocsp(
+    State(state): State<AppState>,
+    axum::extract::Path((ca_id, request)): axum::extract::Path<(String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    let bytes = openssl::base64::decode_block(&request).map_err(ApiError::internal)?;
+    ocsp_response(&state, &ca_id, &bytes).await
+}
+
 async fn revoke_mtls(
     State(state): State<AppState>,
     Json(envelope): Json<authority_contracts_model::SignedDecisionRevocationNoticeV2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    state
-        .access()
-        .revoke(
-            &envelope,
-            state.verifier(),
-            &envelope.notice.target_node_id,
-            None,
-        )
-        .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_revocation", cause))?;
+    authority_issuer_core::verify_revocation_notice_v2_for_adapter(
+        &envelope,
+        state.verifier(),
+        &envelope.notice.target_node_id,
+        authority_contracts_model::AdapterGrantKindV1::MtlsClientCertificate,
+        unix_timestamp()?,
+    )
+    .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_revocation", cause))?;
+    if !state
+        .database()
+        .map_err(ApiError::internal)?
+        .committed_notice(&envelope)
+        .await
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::unauthorized("revocation_not_committed"));
+    }
     Ok(Json(
         json!({"decision_id":envelope.notice.decision_id,"sequence":envelope.notice.sequence,"adapter":"mtls.client_certificate"}),
     ))
@@ -85,7 +166,20 @@ async fn issue_ssh_certificate(
     State(state): State<AppState>,
     Json(request): Json<IssueSshCertificateRequest>,
 ) -> Result<Json<IssueSshCertificateResponse>, ApiError> {
-    issue_ssh_certificate_inner(&state, &request).map(Json)
+    let public_key = checked_ssh_key(&state, &request, unix_timestamp()?)?;
+    let claims = &request.authorization.authorization;
+    let serial = state
+        .database()
+        .map_err(ApiError::internal)?
+        .consume_serial(
+            authority_contracts_model::AdapterGrantKindV1::SshCertificate.as_str(),
+            &claims.nonce,
+            claims.expires_at,
+        )
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::conflict("authorization_replayed"))?;
+    sign_ssh_certificate(&state, &request, &public_key, serial).map(Json)
 }
 
 #[derive(Deserialize)]
@@ -107,14 +201,91 @@ async fn issue_mtls_certificate(
     State(state): State<AppState>,
     Json(request): Json<IssueMtlsCertificateRequest>,
 ) -> Result<Json<IssueMtlsCertificateResponse>, ApiError> {
-    issue_mtls_certificate_with_clock(&state, &request, unix_timestamp).map(Json)
+    let public_key = checked_mtls_key(&state, &request)?;
+    let ca_id = state.mtls_ca_id().map_err(ApiError::internal)?;
+    let extensions = authority_mtls_core::pki::certificate_extensions(state.pki_origin(), &ca_id)
+        .map_err(ApiError::internal)?;
+    let certificate = state
+        .database()
+        .map_err(ApiError::internal)?
+        .issue(&ca_id, &request.authorization.authorization, |serial| {
+            state.with_mtls_ca(|ca| {
+                build_mtls_certificate(
+                    &public_key,
+                    &request.authorization.authorization,
+                    ca,
+                    serial,
+                    extensions,
+                )
+                .map_err(|e| e.to_string())
+            })
+        })
+        .await
+        .map_err(mtls_access_error)?;
+    mtls_response(&state, &request, &certificate).map(Json)
 }
 
+#[cfg(test)]
 fn issue_mtls_certificate_with_clock(
     state: &AppState,
     request: &IssueMtlsCertificateRequest,
     clock: impl FnOnce() -> Result<i64, ApiError>,
 ) -> Result<IssueMtlsCertificateResponse, ApiError> {
+    let public_key = checked_mtls_key(state, request)?;
+    let authorization = &request.authorization.authorization;
+    let extensions = authority_mtls_core::pki::certificate_extensions(
+        state.pki_origin(),
+        &state.mtls_ca_id().map_err(ApiError::internal)?,
+    )
+    .map_err(ApiError::internal)?;
+    let certificate = state
+        .access()
+        .issue(
+            authorization,
+            || clock().map_err(|e| e.code.to_owned()),
+            || {
+                state.with_mtls_ca(|ca| {
+                    build_mtls_certificate(
+                        &public_key,
+                        authorization,
+                        ca,
+                        state.next_serial(),
+                        extensions,
+                    )
+                    .map_err(|error| error.to_string())
+                })
+            },
+        )
+        .map_err(mtls_access_error)?;
+    mtls_response(state, request, &certificate)
+}
+
+fn mtls_response(
+    state: &AppState,
+    request: &IssueMtlsCertificateRequest,
+    certificate: &X509,
+) -> Result<IssueMtlsCertificateResponse, ApiError> {
+    let authorization = &request.authorization.authorization;
+    let ca_certificate_pem = state
+        .with_mtls_ca(|ca| {
+            String::from_utf8(ca.certificate.to_pem().map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())
+        })
+        .map_err(ApiError::internal)?;
+    Ok(IssueMtlsCertificateResponse {
+        certificate_pem: String::from_utf8(certificate.to_pem().map_err(ApiError::internal)?)
+            .map_err(ApiError::internal)?,
+        ca_certificate_pem,
+        decision_id: authorization.decision_id.clone(),
+        identity_uri: authorization.identity_uri.clone(),
+        expires_at: authorization.expires_at,
+    })
+}
+
+fn checked_mtls_key(
+    state: &AppState,
+    request: &IssueMtlsCertificateRequest,
+) -> Result<PKey<Public>, ApiError> {
     verify_mtls_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_mtls_authorization", cause))?;
     let authorization = &request.authorization.authorization;
@@ -135,44 +306,19 @@ fn issue_mtls_certificate_with_clock(
     if fingerprint != authorization.client_spki_sha256 {
         return Err(ApiError::unauthorized("mtls_key_fingerprint_mismatch"));
     }
-    let certificate = state
-        .access()
-        .issue(
-            authorization,
-            || clock().map_err(|e| e.code.to_owned()),
-            || {
-                state.with_mtls_ca(|ca| {
-                    build_mtls_certificate(&public_key, authorization, ca, state.next_serial())
-                        .map_err(|error| error.to_string())
-                })
-            },
-        )
-        .map_err(|error| match error {
-            authority_mtls_core::AccessError::Revoked => {
-                ApiError::unauthorized("mtls_authorization_revoked")
-            }
-            authority_mtls_core::AccessError::Replay => {
-                ApiError::conflict("authorization_replayed")
-            }
-            authority_mtls_core::AccessError::NotActive => {
-                ApiError::unauthorized("authorization_expired")
-            }
-            other => ApiError::internal(other),
-        })?;
-    let ca_certificate_pem = state
-        .with_mtls_ca(|ca| {
-            String::from_utf8(ca.certificate.to_pem().map_err(|error| error.to_string())?)
-                .map_err(|error| error.to_string())
-        })
-        .map_err(ApiError::internal)?;
-    Ok(IssueMtlsCertificateResponse {
-        certificate_pem: String::from_utf8(certificate.to_pem().map_err(ApiError::internal)?)
-            .map_err(ApiError::internal)?,
-        ca_certificate_pem,
-        decision_id: authorization.decision_id.clone(),
-        identity_uri: authorization.identity_uri.clone(),
-        expires_at: authorization.expires_at,
-    })
+    Ok(public_key)
+}
+fn mtls_access_error(error: authority_mtls_core::AccessError) -> ApiError {
+    match error {
+        authority_mtls_core::AccessError::Revoked => {
+            ApiError::unauthorized("mtls_authorization_revoked")
+        }
+        authority_mtls_core::AccessError::Replay => ApiError::conflict("authorization_replayed"),
+        authority_mtls_core::AccessError::NotActive => {
+            ApiError::unauthorized("authorization_expired")
+        }
+        other => ApiError::internal(other),
+    }
 }
 
 fn build_mtls_certificate(
@@ -180,6 +326,7 @@ fn build_mtls_certificate(
     authorization: &authority_contracts_model::MtlsIssuanceAuthorizationV1,
     ca: &crate::mtls_ca::MtlsCa,
     serial: u64,
+    extensions: Vec<openssl::x509::X509Extension>,
 ) -> Result<X509, openssl::error::ErrorStack> {
     let mut name = X509NameBuilder::new()?;
     name.append_entry_by_text("CN", &authorization.decision_id)?;
@@ -207,10 +354,14 @@ fn build_mtls_certificate(
         .dns(&authorization.service_audience)
         .build(&context)?;
     builder.append_extension(san)?;
+    for extension in extensions {
+        builder.append_extension(extension)?;
+    }
     builder.sign(&ca.key, MessageDigest::sha256())?;
     Ok(builder.build())
 }
 
+#[cfg(test)]
 fn issue_ssh_certificate_inner(
     state: &AppState,
     request: &IssueSshCertificateRequest,
@@ -218,18 +369,36 @@ fn issue_ssh_certificate_inner(
     issue_ssh_certificate_with_clock(state, request, unix_timestamp)
 }
 
+#[cfg(test)]
 fn issue_ssh_certificate_with_clock(
     state: &AppState,
     request: &IssueSshCertificateRequest,
     clock: impl FnOnce() -> Result<i64, ApiError>,
 ) -> Result<IssueSshCertificateResponse, ApiError> {
+    let now = clock()?;
+    let public_key = checked_ssh_key(state, request, now)?;
+    let authorization = &request.authorization.authorization;
+    if !state
+        .consume_nonce(&authorization.nonce, authorization.expires_at, now)
+        .map_err(ApiError::internal)?
+    {
+        return Err(ApiError::conflict("authorization_replayed"));
+    }
+
+    sign_ssh_certificate(state, request, &public_key, state.next_serial())
+}
+
+fn checked_ssh_key(
+    state: &AppState,
+    request: &IssueSshCertificateRequest,
+    now: i64,
+) -> Result<PublicKey, ApiError> {
     verify_authorization(&request.authorization, state.verifier())
         .map_err(|cause| ApiError::unauthorized_with_log("invalid_authorization", cause))?;
     let authorization = &request.authorization.authorization;
     if authorization.audience != CREDENTIAL_ISSUER_AUDIENCE {
         return Err(ApiError::unauthorized("invalid_audience"));
     }
-    let now = clock()?;
     if now < authorization.not_before || now >= authorization.expires_at {
         return Err(ApiError::unauthorized("authorization_expired"));
     }
@@ -240,19 +409,21 @@ fn issue_ssh_certificate_with_clock(
     if fingerprint != authorization.ssh_public_key_fingerprint {
         return Err(ApiError::unauthorized("ssh_key_fingerprint_mismatch"));
     }
-    if !state
-        .consume_nonce(&authorization.nonce, authorization.expires_at, now)
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::conflict("authorization_replayed"));
-    }
+    Ok(public_key)
+}
 
-    let serial = state.next_serial();
+fn sign_ssh_certificate(
+    state: &AppState,
+    request: &IssueSshCertificateRequest,
+    public_key: &PublicKey,
+    serial: u64,
+) -> Result<IssueSshCertificateResponse, ApiError> {
+    let authorization = &request.authorization.authorization;
     let valid_after = u64::try_from(authorization.not_before).map_err(ApiError::internal)?;
     let valid_before = u64::try_from(authorization.expires_at).map_err(ApiError::internal)?;
     let mut builder = certificate::Builder::new_with_random_nonce(
         &mut OsRng,
-        &public_key,
+        public_key,
         valid_after,
         valid_before,
     )
@@ -575,6 +746,7 @@ mod tests {
             &authorization,
             &ca,
             7,
+            Vec::new(),
         )
         .expect("client certificate");
         let (server_key, server_cert) = test_server_certificate(&ca, &group, now);

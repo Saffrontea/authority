@@ -361,6 +361,12 @@
       return authorization.network_grant;
     };
 
+    window.authorityReadRevocationStatus = async function (decisionId) {
+      const token = sessionStorage.getItem('authority-session');
+      return getJson(`/v1/access-authorizations/${decisionId}/revocations/status`,
+        await deviceProofHeaders(token, 'access.revoke_status', [decisionId]));
+    };
+
     window.authorityPrepareRevocation = async function (decisionId, reason = 'user_requested', adapterKinds = null) {
       const sessionToken = sessionStorage.getItem('authority-session');
       if (!sessionToken || !decisionId) throw new Error('Revocation prerequisites are missing.');

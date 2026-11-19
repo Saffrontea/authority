@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use authority_contracts_model::{
     AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, DecisionRevocationNoticeV2,
@@ -47,7 +47,7 @@ use webauthn_rs::prelude::{
 use crate::ui;
 use crate::{
     access_policy,
-    state::{AppState, PendingAuthentication, PendingRegistration, Session},
+    state::{AppState, PendingAuthentication, PendingRegistration},
 };
 
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
@@ -87,6 +87,10 @@ pub fn router(state: AppState) -> Router {
             post(revoke_access_authorization),
         )
         .route("/v1/revocations", get(pull_revocations))
+        .route(
+            "/v1/access-authorizations/{decision_id}/revocations/status",
+            get(revocation_status),
+        )
         .with_state(state)
 }
 
@@ -112,7 +116,7 @@ async fn bootstrap_config(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<BootstrapConfigResponse>, ApiError> {
-    require_bootstrap_token(&state, &headers)?;
+    require_bootstrap_token(&state, &headers).await?;
     let bytes = std::fs::read(state.target_identity_file()).map_err(ApiError::internal)?;
     let target_identity = serde_json::from_slice(&bytes).map_err(ApiError::internal)?;
     Ok(Json(BootstrapConfigResponse {
@@ -140,7 +144,7 @@ async fn create_user(
     headers: HeaderMap,
     Json(request): Json<CreateUserRequest>,
 ) -> Result<(StatusCode, Json<UserResponse>), ApiError> {
-    require_bootstrap_token(&state, &headers)?;
+    require_bootstrap_token(&state, &headers).await?;
     validate_username(&request.username)?;
     if request.display_name.trim().is_empty() || request.display_name.len() > 256 {
         return Err(ApiError::bad_request("invalid_display_name"));
@@ -197,7 +201,7 @@ async fn create_demo_access(
     headers: HeaderMap,
     Json(request): Json<CreateDemoAccessRequest>,
 ) -> Result<(StatusCode, Json<DemoAccessResponse>), ApiError> {
-    consume_bootstrap_token(&state, &headers)?;
+    require_bootstrap_token(&state, &headers).await?;
     let user_exists = sqlx::query(
         "SELECT 1 FROM identity.users \
          WHERE id = $1 AND domain_id = $2 AND status = 'active'",
@@ -220,7 +224,10 @@ async fn create_demo_access(
     let target_device_id = Uuid::new_v4();
     let target_node_id = request.target_node_id;
     let policy_id = Uuid::new_v4();
-    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    consume_bootstrap_token(&state, &headers, &mut transaction).await?;
     // This endpoint is guarded by the bootstrap token. Reusing the physical
     // PoC client key deliberately reassigns that demo device to the newly
     // bootstrapped user, making repeated E2E runs idempotent without weakening
@@ -452,7 +459,7 @@ async fn start_registration(
     headers: HeaderMap,
     Json(request): Json<StartRegistrationRequest>,
 ) -> Result<Json<StartRegistrationResponse>, ApiError> {
-    require_bootstrap_token(&state, &headers)?;
+    require_bootstrap_token(&state, &headers).await?;
     let user = sqlx::query(
         "SELECT username, display_name FROM identity.users \
          WHERE id = $1 AND domain_id = $2 AND status = 'active'",
@@ -488,20 +495,22 @@ async fn start_registration(
         )
         .map_err(ApiError::internal)?;
     let challenge_id = Uuid::new_v4();
-    let mut registrations = state.registrations().lock().map_err(ApiError::internal)?;
-    let now = Instant::now();
-    registrations.retain(|_, pending| pending.expires_at > now);
-    if registrations.len() >= MAX_PENDING_CHALLENGES {
+    if !state
+        .put_challenge(
+            challenge_id,
+            "registration",
+            &PendingRegistration {
+                user_id: request.user_id,
+                state: registration,
+            },
+            i64::try_from(CHALLENGE_TTL.as_secs()).map_err(ApiError::internal)?,
+            i64::try_from(MAX_PENDING_CHALLENGES).map_err(ApiError::internal)?,
+        )
+        .await
+        .map_err(ApiError::internal)?
+    {
         return Err(ApiError::unavailable("registration_capacity_reached"));
     }
-    registrations.insert(
-        challenge_id,
-        PendingRegistration {
-            user_id: request.user_id,
-            state: registration,
-            expires_at: now + CHALLENGE_TTL,
-        },
-    );
 
     Ok(Json(StartRegistrationResponse {
         challenge_id,
@@ -524,15 +533,11 @@ async fn finish_registration(
     State(state): State<AppState>,
     Json(request): Json<FinishRegistrationRequest>,
 ) -> Result<(StatusCode, Json<FinishRegistrationResponse>), ApiError> {
-    let pending = state
-        .registrations()
-        .lock()
+    let pending: PendingRegistration = state
+        .take_challenge(request.challenge_id, "registration")
+        .await
         .map_err(ApiError::internal)?
-        .remove(&request.challenge_id)
         .ok_or_else(|| ApiError::bad_request("unknown_or_consumed_challenge"))?;
-    if Instant::now() > pending.expires_at {
-        return Err(ApiError::bad_request("expired_challenge"));
-    }
 
     let passkey = state
         .webauthn()
@@ -629,23 +634,25 @@ async fn start_authentication(
     let mut device_challenge_bytes = [0_u8; 32];
     rand_bytes(&mut device_challenge_bytes).map_err(ApiError::internal)?;
     let device_challenge = encode_base64url(&device_challenge_bytes);
-    let mut authentications = state.authentications().lock().map_err(ApiError::internal)?;
-    let now = Instant::now();
-    authentications.retain(|_, pending| pending.expires_at > now);
-    if authentications.len() >= MAX_PENDING_CHALLENGES {
+    if !state
+        .put_challenge(
+            challenge_id,
+            "authentication",
+            &PendingAuthentication {
+                user_id,
+                device_id: request.device_id,
+                device_public_key,
+                device_challenge: device_challenge.clone(),
+                state: authentication,
+            },
+            i64::try_from(CHALLENGE_TTL.as_secs()).map_err(ApiError::internal)?,
+            i64::try_from(MAX_PENDING_CHALLENGES).map_err(ApiError::internal)?,
+        )
+        .await
+        .map_err(ApiError::internal)?
+    {
         return Err(ApiError::unavailable("authentication_capacity_reached"));
     }
-    authentications.insert(
-        challenge_id,
-        PendingAuthentication {
-            user_id,
-            device_id: request.device_id,
-            device_public_key,
-            device_challenge: device_challenge.clone(),
-            state: authentication,
-            expires_at: now + CHALLENGE_TTL,
-        },
-    );
 
     Ok(Json(StartAuthenticationResponse {
         challenge_id,
@@ -669,19 +676,16 @@ struct FinishAuthenticationResponse {
     expires_at: u64,
 }
 
+#[allow(clippy::too_many_lines)] // Keep credential/session mutation in one visible transaction.
 async fn finish_authentication(
     State(state): State<AppState>,
     Json(request): Json<FinishAuthenticationRequest>,
 ) -> Result<Json<FinishAuthenticationResponse>, ApiError> {
-    let pending = state
-        .authentications()
-        .lock()
+    let pending: PendingAuthentication = state
+        .take_challenge(request.challenge_id, "authentication")
+        .await
         .map_err(ApiError::internal)?
-        .remove(&request.challenge_id)
         .ok_or_else(|| ApiError::bad_request("unknown_or_consumed_challenge"))?;
-    if Instant::now() > pending.expires_at {
-        return Err(ApiError::bad_request("expired_challenge"));
-    }
     let signature = decode_signature(&request.device_signature)
         .map_err(|_| ApiError::unauthorized("invalid_device_signature"))?;
     let device_message =
@@ -696,16 +700,26 @@ async fn finish_authentication(
         .webauthn()
         .finish_passkey_authentication(&request.credential, &pending.state)
         .map_err(|cause| ApiError::unauthorized_with_log("authentication_failed", cause))?;
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::internal)?;
     let row = sqlx::query(
-        "SELECT id, passkey FROM identity.webauthn_credentials \
-         WHERE user_id = $1 AND credential_id = $2",
+        "SELECT id, passkey, sign_count FROM identity.webauthn_credentials \
+         WHERE user_id = $1 AND credential_id = $2 FOR UPDATE",
     )
     .bind(pending.user_id)
     .bind(result.cred_id())
-    .fetch_optional(state.pool())
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(ApiError::internal)?
     .ok_or_else(|| ApiError::unauthorized("authentication_failed"))?;
+    let previous_counter: i64 = row.try_get("sign_count").map_err(ApiError::internal)?;
+    if previous_counter > 0
+        && result.counter() > 0
+        && i64::from(result.counter()) <= previous_counter
+    {
+        return Err(ApiError::unauthorized("authentication_counter_replayed"));
+    }
     let credential_id: Uuid = row.try_get("id").map_err(ApiError::internal)?;
     let passkey_json: Value = row.try_get("passkey").map_err(ApiError::internal)?;
     let mut passkey: Passkey = serde_json::from_value(passkey_json).map_err(ApiError::internal)?;
@@ -713,13 +727,12 @@ async fn finish_authentication(
         .update_credential(&result)
         .ok_or_else(|| ApiError::unauthorized("authentication_failed"))?;
 
-    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     sqlx::query(
         "UPDATE identity.webauthn_credentials \
          SET passkey = $1, sign_count = $2, last_used_at = now() WHERE id = $3",
     )
     .bind(serde_json::to_value(passkey).map_err(ApiError::internal)?)
-    .bind(i64::from(result.counter()))
+    .bind(previous_counter.max(i64::from(result.counter())))
     .bind(credential_id)
     .execute(&mut *transaction)
     .await
@@ -734,7 +747,6 @@ async fn finish_authentication(
         "allow",
     )
     .await?;
-    transaction.commit().await.map_err(ApiError::internal)?;
 
     let session_token = generate_session_token()?;
     let session_digest = session_token_digest(&session_token)?;
@@ -743,23 +755,31 @@ async fn finish_authentication(
         .map_err(ApiError::internal)?
         .saturating_add(SESSION_TTL)
         .as_secs();
-    let mut sessions = state.sessions().lock().map_err(ApiError::internal)?;
-    let now = Instant::now();
-    sessions.retain(|_, session| session.expires_at > now);
-    if sessions.len() >= MAX_SESSIONS {
+    sqlx::query("SELECT domain_id FROM identity.auth_domains WHERE domain_id=$1 FOR UPDATE")
+        .bind(state.domain_id())
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    sqlx::query(
+        "DELETE FROM identity.sessions WHERE domain_id=$1 AND expires_at<=clock_timestamp()",
+    )
+    .bind(state.domain_id())
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity.sessions WHERE domain_id=$1")
+            .bind(state.domain_id())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+    if count >= i64::try_from(MAX_SESSIONS).map_err(ApiError::internal)? {
         return Err(ApiError::unavailable("session_capacity_reached"));
     }
-    sessions.insert(
-        session_digest,
-        Session {
-            user_id: pending.user_id,
-            device_id: pending.device_id,
-            device_public_key: pending.device_public_key,
-            consumed_nonces: std::collections::HashSet::new(),
-            expires_at: Instant::now() + SESSION_TTL,
-            expires_at_unix: expires_at,
-        },
-    );
+    sqlx::query("INSERT INTO identity.sessions(domain_id,token_digest,user_id,device_id,device_public_key,expires_at) VALUES($1,$2,$3,$4,$5,to_timestamp($6::bigint))")
+        .bind(state.domain_id()).bind(session_digest.as_slice()).bind(pending.user_id).bind(pending.device_id).bind(pending.device_public_key.as_slice()).bind(i64::try_from(expires_at).map_err(ApiError::internal)?)
+        .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
 
     Ok(Json(FinishAuthenticationResponse {
         session_token,
@@ -780,7 +800,7 @@ async fn get_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<SessionResponse>, ApiError> {
-    let session = authenticated_session(&state, &headers, "session.read", &[])?;
+    let session = authenticated_session(&state, &headers, "session.read", &[]).await?;
     Ok(Json(SessionResponse {
         user_id: session.user_id,
         device_id: session.device_id,
@@ -794,7 +814,7 @@ struct AuthenticatedSession {
     expires_at: u64,
 }
 
-fn authenticated_session(
+async fn authenticated_session(
     state: &AppState,
     headers: &HeaderMap,
     action: &str,
@@ -820,35 +840,54 @@ fn authenticated_session(
     let signature = decode_signature(required_header(headers, "x-authority-device-signature")?)
         .map_err(|_| ApiError::unauthorized("invalid_device_proof"))?;
     let proof_message = session_request_preimage(&token, action, bindings, timestamp, nonce);
-    let mut sessions = state.sessions().lock().map_err(ApiError::internal)?;
-    let now = Instant::now();
-    let requested_expired = sessions
-        .get(&token_digest)
-        .is_some_and(|session| now > session.expires_at);
-    sessions.retain(|_, session| session.expires_at > now);
-    if requested_expired {
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    let row = sqlx::query("SELECT user_id,device_id,device_public_key,EXTRACT(EPOCH FROM expires_at)::bigint AS expiry, expires_at>clock_timestamp() AS active FROM identity.sessions WHERE domain_id=$1 AND token_digest=$2 FOR UPDATE")
+        .bind(state.domain_id()).bind(token_digest.as_slice()).fetch_optional(&mut *transaction).await.map_err(ApiError::internal)?
+        .ok_or_else(||ApiError::unauthorized("invalid_session"))?;
+    if !row
+        .try_get::<bool, _>("active")
+        .map_err(ApiError::internal)?
+    {
         return Err(ApiError::unauthorized("expired_session"));
     }
-    let session = sessions
-        .get_mut(&token_digest)
-        .ok_or_else(|| ApiError::unauthorized("invalid_session"))?;
-    if session.consumed_nonces.contains(nonce) {
-        return Err(ApiError::unauthorized("device_proof_replayed"));
-    }
-    if session.consumed_nonces.len() >= MAX_SESSION_NONCES {
-        return Err(ApiError::unauthorized("session_proof_capacity_reached"));
-    }
-    if !verify_device_signature(&session.device_public_key, &proof_message, &signature)
+    let device_public_key: Vec<u8> = row
+        .try_get("device_public_key")
+        .map_err(ApiError::internal)?;
+    let device_public_key: [u8; 32] = device_public_key
+        .try_into()
+        .map_err(|_| ApiError::internal("invalid stored device key"))?;
+    if !verify_device_signature(&device_public_key, &proof_message, &signature)
         .map_err(ApiError::internal)?
     {
         return Err(ApiError::unauthorized("invalid_device_proof"));
     }
-    session.consumed_nonces.insert(nonce.to_owned());
-    Ok(AuthenticatedSession {
-        user_id: session.user_id,
-        device_id: session.device_id,
-        expires_at: session.expires_at_unix,
-    })
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity.session_nonces WHERE token_digest=$1")
+            .bind(token_digest.as_slice())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+    if count >= i64::try_from(MAX_SESSION_NONCES).map_err(ApiError::internal)? {
+        return Err(ApiError::unauthorized("session_proof_capacity_reached"));
+    }
+    let inserted = sqlx::query("INSERT INTO identity.session_nonces(token_digest,nonce) VALUES($1,$2) ON CONFLICT DO NOTHING")
+        .bind(token_digest.as_slice()).bind(nonce).execute(&mut *transaction).await.map_err(ApiError::internal)?.rows_affected();
+    if inserted == 0 {
+        return Err(ApiError::unauthorized("device_proof_replayed"));
+    }
+    let result = AuthenticatedSession {
+        user_id: row.try_get("user_id").map_err(ApiError::internal)?,
+        device_id: row.try_get("device_id").map_err(ApiError::internal)?,
+        expires_at: u64::try_from(
+            row.try_get::<i64, _>("expiry")
+                .map_err(ApiError::internal)?,
+        )
+        .map_err(ApiError::internal)?,
+    };
+    transaction.commit().await.map_err(ApiError::internal)?;
+    Ok(result)
 }
 
 #[derive(Deserialize)]
@@ -885,7 +924,7 @@ async fn issue_access_authorization(
         request.mtls_client_spki_sha256.clone(),
         request.terminal_token_hash.clone(),
     ];
-    let session = authenticated_session(&state, &headers, "access.authorize", &bindings)?;
+    let session = authenticated_session(&state, &headers, "access.authorize", &bindings).await?;
     if request.device_id != session.device_id {
         return Err(ApiError::forbidden("session_device_mismatch"));
     }
@@ -999,7 +1038,7 @@ async fn revoke_access_authorization(
     if let Some(kinds) = &request.adapter_kinds {
         bindings.push(serde_json::to_string(kinds).map_err(ApiError::internal)?);
     }
-    let session = authenticated_session(&state, &headers, "access.revoke", &bindings)?;
+    let session = authenticated_session(&state, &headers, "access.revoke", &bindings).await?;
     let row = sqlx::query(REVOCABLE_DECISION_QUERY)
         .bind(&decision_id)
         .fetch_optional(state.pool())
@@ -1034,57 +1073,58 @@ async fn revoke_access_authorization(
     if adapter_kinds.windows(2).any(|kinds| kinds[0] == kinds[1]) {
         return Err(ApiError::bad_request("invalid_revocation_adapters"));
     }
-    let scope_key = revocation_scope(&adapter_kinds);
     let now = unix_timestamp()?;
     if now >= expires_at {
         return Err(ApiError::conflict("authorization_already_expired"));
     }
 
-    if let Some(existing) = load_revocation(&state, &decision_id, &scope_key).await? {
-        crate::revocation_delivery::enforce_mtls(&state, &existing)
-            .await
-            .map_err(|_| ApiError::unavailable("mtls_revocation_pending"))?;
-        return Ok(Json(existing));
-    }
-    let sequence: i64 = sqlx::query_scalar("SELECT nextval('policy.revocation_notice_sequence')")
-        .fetch_one(state.pool())
-        .await
-        .map_err(ApiError::internal)?;
-    let envelope = sign_revocation_notice_v2(
-        DecisionRevocationNoticeV2 {
-            version: authority_contracts_model::protocol::CONTRACT_VERSION_V2.to_owned(),
-            issuer: authority_contracts_model::protocol::domain_issuer(state.domain_id()),
-            domain_id: state.domain_id().to_string(),
-            target_node_id: target_node_id.clone(),
-            decision_id: decision_id.clone(),
-            reason: request.reason.clone(),
-            sequence,
-            revoked_at: now,
-            expires_at,
-            adapter_kinds,
-        },
-        state.signer(),
-    )
-    .map_err(ApiError::internal)?;
-    let persisted = persist_revocation(&state, session.user_id, envelope).await?;
-    crate::revocation_delivery::enforce_mtls(&state, &persisted)
-        .await
-        .map_err(|_| ApiError::unavailable("mtls_revocation_pending"))?;
+    let notice = DecisionRevocationNoticeV2 {
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V2.to_owned(),
+        issuer: authority_contracts_model::protocol::domain_issuer(state.domain_id()),
+        domain_id: state.domain_id().to_string(),
+        target_node_id,
+        decision_id,
+        reason: request.reason,
+        sequence: 0,
+        revoked_at: now,
+        expires_at,
+        adapter_kinds,
+    };
+    let persisted = persist_revocation(&state, session.user_id, notice).await?;
     Ok(Json(persisted))
 }
 
+#[allow(clippy::too_many_lines)] // Publication, issuance fence and membership share one commit.
 async fn persist_revocation(
     state: &AppState,
     actor_user_id: Uuid,
-    envelope: SignedDecisionRevocationNoticeV2,
+    mut notice: DecisionRevocationNoticeV2,
 ) -> Result<SignedDecisionRevocationNoticeV2, ApiError> {
+    let mut transaction = access_policy::begin_authorization(state.pool())
+        .await
+        .map_err(ApiError::internal)?;
+    // Serialize publication through commit: sequence order is commit order.
+    sqlx::query("SELECT id FROM policy.revocation_stream FOR UPDATE")
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    let existing: Option<Value> = sqlx::query_scalar("SELECT envelope FROM policy.revocation_notices WHERE domain_id=$1 AND decision_id=$2 AND scope_key=$3")
+        .bind(state.domain_id()).bind(&notice.decision_id).bind(revocation_scope(&notice.adapter_kinds)).fetch_optional(&mut *transaction).await.map_err(ApiError::internal)?;
+    if let Some(existing) = existing {
+        transaction.commit().await.map_err(ApiError::internal)?;
+        return serde_json::from_value(existing).map_err(ApiError::internal);
+    }
+    notice.sequence = sqlx::query_scalar("SELECT nextval('policy.revocation_notice_sequence')")
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    let envelope = sign_revocation_notice_v2(notice, state.signer()).map_err(ApiError::internal)?;
     let notice = &envelope.notice;
     let target_uuid = notice
         .target_node_id
         .parse::<Uuid>()
         .map_err(ApiError::internal)?;
     let envelope_json = serde_json::to_value(&envelope).map_err(ApiError::internal)?;
-    let mut transaction = state.pool().begin().await.map_err(ApiError::internal)?;
     let inserted = sqlx::query(
         "INSERT INTO policy.revocation_notices \
          (sequence, domain_id, decision_id, target_node_id, reason, revoked_at, expires_at, envelope, scope_key) \
@@ -1112,6 +1152,31 @@ async fn persist_revocation(
         )
         .await?
         .ok_or_else(|| ApiError::internal("conflicting revocation disappeared"));
+    }
+    if notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::MtlsClientCertificate)
+    {
+        authority_mtls_core::database::revoke_in(&mut transaction, &envelope)
+            .await
+            .map_err(ApiError::internal)?;
+        sqlx::query("INSERT INTO policy.revocation_members(sequence,instance_id,lease_until) SELECT $1,instance_id,lease_until FROM policy.enforcement_instances WHERE domain_id=$2 AND target_node_id=$3 AND role='mtls-service' AND lease_until>clock_timestamp()")
+            .bind(notice.sequence).bind(state.domain_id()).bind(target_uuid).execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    }
+    if notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::WireGuardPeer)
+        || notice.adapter_kinds.contains(&AdapterGrantKindV1::TcpPort)
+    {
+        sqlx::query(
+            "INSERT INTO policy.adapter_deliveries(sequence,receiver_id,origin) VALUES($1,$2,$3)",
+        )
+        .bind(notice.sequence)
+        .bind(format!("network:{target_uuid}"))
+        .bind(state.network_agent_origin())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
     }
     sqlx::query(
         "INSERT INTO audit.events \
@@ -1160,6 +1225,38 @@ async fn load_revocation(
         .map(serde_json::from_value)
         .transpose()
         .map_err(ApiError::internal)
+}
+
+async fn revocation_status(
+    State(state): State<AppState>,
+    Path(decision_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let session = authenticated_session(
+        &state,
+        &headers,
+        "access.revoke_status",
+        std::slice::from_ref(&decision_id),
+    )
+    .await?;
+    let source = sqlx::query(REVOCABLE_DECISION_QUERY)
+        .bind(&decision_id)
+        .fetch_optional(state.pool())
+        .await
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("authorization_not_found"))?;
+    if revocable_decision(source.try_get("payload").map_err(ApiError::internal)?)?.subject
+        != session.user_id.to_string()
+    {
+        return Err(ApiError::not_found("authorization_not_found"));
+    }
+    let rows = sqlx::query("SELECT n.sequence, NOT EXISTS(SELECT 1 FROM policy.revocation_members m WHERE m.sequence=n.sequence AND m.lease_until>clock_timestamp() AND NOT EXISTS(SELECT 1 FROM policy.revocation_receipts r WHERE r.sequence=m.sequence AND r.instance_id=m.instance_id)) AS drained FROM policy.revocation_notices n WHERE n.domain_id=$1 AND n.decision_id=$2")
+        .bind(state.domain_id()).bind(&decision_id).fetch_all(state.pool()).await.map_err(ApiError::internal)?;
+    let notices = rows.iter().map(|row| Ok(json!({"sequence":row.try_get::<i64,_>("sequence")?,"sessions_drained":row.try_get::<bool,_>("drained")?}))).collect::<Result<Vec<_>,sqlx::Error>>().map_err(ApiError::internal)?;
+    let drained = !notices.is_empty() && notices.iter().all(|n| n["sessions_drained"] == true);
+    Ok(Json(
+        json!({"decision_id":decision_id,"committed":!rows.is_empty(),"mtls_sessions_drained":drained,"notices":notices}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1555,10 +1652,11 @@ async fn record_audit(
     Ok(())
 }
 
-fn require_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+async fn require_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     let supplied = bootstrap_token_header(headers)?;
     if state
         .verify_bootstrap_token(supplied)
+        .await
         .map_err(ApiError::internal)?
     {
         Ok(())
@@ -1567,10 +1665,15 @@ fn require_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), 
     }
 }
 
-fn consume_bootstrap_token(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+async fn consume_bootstrap_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), ApiError> {
     let supplied = bootstrap_token_header(headers)?;
     if state
-        .consume_bootstrap_token(supplied)
+        .consume_bootstrap_token(supplied, transaction)
+        .await
         .map_err(ApiError::internal)?
     {
         Ok(())
@@ -1957,7 +2060,8 @@ async fn issue_tcp_authorization(
     Json(request): Json<IssueTcpAuthorizationRequest>,
 ) -> Result<Json<TcpAuthorizationResponse>, ApiError> {
     let bindings = tcp_authorization_bindings(&request)?;
-    let session = authenticated_session(&state, &headers, "access.authorize_tcp", &bindings)?;
+    let session =
+        authenticated_session(&state, &headers, "access.authorize_tcp", &bindings).await?;
     if session.device_id != request.device_id {
         return Err(ApiError::forbidden("session_device_mismatch"));
     }

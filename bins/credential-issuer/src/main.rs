@@ -4,10 +4,8 @@ mod mtls_ca;
 mod ssh_ca;
 mod state;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
-use authority_replay_ledger::ReplayLedger;
+use authority_mtls_core::database::AuthorityDb;
 use config::Config;
 use state::AppState;
 use tracing::{error, info};
@@ -25,17 +23,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let ca_key = ssh_ca::load_or_generate(&config.ssh_ca_key_file, &config.ssh_ca_public_key_file)
         .map_err(|error| format!("SSH CA error: {error}"))?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let replay_ledger = ReplayLedger::open(
-        config.replay_ledger_file,
-        i64::try_from(now).map_err(|error| error.to_string())?,
-    )?;
-    let initial_serial = now << 20;
-    let state = AppState::new(verifier, ca_key, replay_ledger, initial_serial);
+    let database = AuthorityDb::from_env().await?;
+    let state = AppState::from_database(verifier, ca_key, database, config.pki_origin);
     state.install_mtls_ca(mtls_ca::load_or_generate(
         &config.mtls_ca_key_file,
         &config.mtls_ca_certificate_file,
     )?)?;
+    let ca_id = state.mtls_ca_id()?;
+    let ca_cert = state.with_mtls_ca(|ca| Ok(ca.certificate.clone()))?;
+    state.database()?.register_ca(&ca_id, &ca_cert).await?;
+    state.database()?.bind_ca("mtls-client", &ca_id).await?;
     spawn_ca_reload(state.clone(), config.ssh_ca_key_file.clone())?;
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
 

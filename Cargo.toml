@@ -45,7 +45,8 @@ tower-http = { version = "0.7.1", features = ["cors", "fs", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.29.2", features = ["serde", "v4"] }
-webauthn-rs = "0.6.2"
+# Challenge state is serialized only into single-use server-side DB rows, never cookies/client state.
+webauthn-rs = { version = "0.6.2", features = ["danger-allow-state-serialisation"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

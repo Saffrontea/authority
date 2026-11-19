@@ -140,7 +140,7 @@ json_post() {
     rm -f "${response_file}"
 }
 
-token="$(<"${PROJECT_DIR}/.secrets/authority-bootstrap-token")"
+token="$(<"${AUTHORITY_BOOTSTRAP_TOKEN_FILE:-${PROJECT_DIR}/.secrets/authority-bootstrap-token}")"
 wireguard_public_key="${AUTHORITY_POC_WG_PUBLIC_KEY:-}"
 network_agent_origin="${AUTHORITY_POC_NETWORK_AGENT_ORIGIN:-}"
 control_origin="${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}"

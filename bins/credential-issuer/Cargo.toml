@@ -10,7 +10,6 @@ authority-mtls-core.workspace = true
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true
-authority-replay-ledger.workspace = true
 axum.workspace = true
 openssl.workspace = true
 serde.workspace = true
@@ -25,6 +24,8 @@ tower-http.workspace = true
 workspace = true
 
 [dev-dependencies]
+authority-mtls-core = { workspace = true, features = ["test-support"] }
+authority-replay-ledger.workspace = true
 authority-projection-core.workspace = true
 proptest = "1"
 tempfile = "3"

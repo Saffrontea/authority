@@ -312,6 +312,25 @@ install_mtls_service() {
   as_root install -m 0755 "${root}/target/debug/authority-mtls-service" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service.new" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-mtls-service"
   as_root install -m 0644 "${root}/.secrets/mtls-ca-cert.pem" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-mtls-client-ca.pem"
+  as_root install -d "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority"
+  as_root install -m 0644 "${root}/scripts/tcp-fault-proxy.py" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority/db-fault-proxy.py"
+  as_root install -m 0600 "${root}/.secrets/authority-db-password" "${LXC_PATH}/${TARGET_NAME}/rootfs/etc/authority-db-password"
+  local database_host pki_origin
+  pki_origin="$(cat "${root}/.secrets/pki-origin")"
+  [[ "${pki_origin}" =~ ^http://10\.0\.3\.1:[0-9]+$ ]] || die "invalid LXC PKI ingress origin"
+  database_host="$(container_ip authority-db)"
+  [[ -n "${database_host}" ]] || die "shared database is unavailable"
+  # Admit only this trusted target's underlay /32, never the whole bridge subnet.
+  attach authority-db sh -seu -- "${target_underlay}" <<'DATABASE_SCRIPT'
+hba_file="$(runuser -u postgres -- psql -Atqc 'SHOW hba_file')"
+sed -i '/^# BEGIN AUTHORITY MTLS TARGET$/,/^# END AUTHORITY MTLS TARGET$/d' "$hba_file"
+{
+  printf '\n# BEGIN AUTHORITY MTLS TARGET\n'
+  printf 'host authority authority %s/32 scram-sha-256\n' "$1"
+  printf '# END AUTHORITY MTLS TARGET\n'
+} >> "$hba_file"
+runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c 'SELECT pg_reload_conf()' >/dev/null
+DATABASE_SCRIPT
   attach "${TARGET_NAME}" sh -seu <<CONTAINER_SCRIPT
 umask 077
 mkdir -p /var/lib/authority
@@ -320,15 +339,29 @@ if [ ! -s /var/lib/authority/mtls-server-key.pem ]; then
   -subj /CN=authority-target -addext basicConstraints=CA:FALSE -addext extendedKeyUsage=serverAuth -addext keyUsage=digitalSignature -addext subjectAltName=DNS:authority-target,IP:${target_underlay} \
   -keyout /var/lib/authority/mtls-server-key.pem -out /var/lib/authority/mtls-server-cert.pem
 fi
+rm -f /run/authority-mtls-db-partition
+cat > /etc/systemd/system/authority-mtls-db-proxy.service <<UNIT
+[Unit]
+Description=Authority LXC DB partition test transport
+After=network-online.target
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/lib/authority/db-fault-proxy.py ${database_host} 5432 15432 /run/authority-mtls-db-partition
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+UNIT
 cat > /etc/systemd/system/authority-mtls-service.service <<UNIT
 [Unit]
 Description=Authority mTLS enforcing service
-After=network-online.target
+After=network-online.target authority-mtls-db-proxy.service
+Requires=authority-mtls-db-proxy.service
 [Service]
 ExecStart=/usr/local/bin/authority-mtls-service
 Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
 Environment=AUTHORITY_MTLS_CA_CERTIFICATE_FILE=/etc/authority-mtls-client-ca.pem
-Environment=AUTHORITY_MTLS_SERVICE_LEDGER_FILE=/var/lib/authority/mtls-revocations
+Environment=AUTHORITY_DB_HOST=${database_host}
+Environment=AUTHORITY_DB_PASSWORD_FILE=/etc/authority-db-password
+Environment=AUTHORITY_PKI_PUBLIC_ORIGIN=${pki_origin}
 Environment=AUTHORITY_MTLS_SERVICE_KEY_FILE=/var/lib/authority/mtls-server-key.pem
 Environment=AUTHORITY_MTLS_SERVICE_CERTIFICATE_FILE=/var/lib/authority/mtls-server-cert.pem
 Environment=AUTHORITY_DOMAIN_ID=019a6e6d-4b01-7c31-bb4c-f83220bec001
@@ -343,10 +376,26 @@ ReadWritePaths=/var/lib/authority
 [Install]
 WantedBy=multi-user.target
 UNIT
+sed -e 's/:3004/:3005/' -e 's/:8443/:8444/' /etc/systemd/system/authority-mtls-service.service > /etc/systemd/system/authority-mtls-service-2.service
+sed -i -e 's/AUTHORITY_DB_HOST=${database_host}/AUTHORITY_DB_HOST=127.0.0.1/' /etc/systemd/system/authority-mtls-service.service
+printf '\n[Service]\nEnvironment=AUTHORITY_DB_PORT=15432\n' >> /etc/systemd/system/authority-mtls-service.service
 systemctl daemon-reload
+systemctl enable authority-mtls-db-proxy.service >/dev/null
+systemctl restart authority-mtls-db-proxy.service
+systemctl enable authority-mtls-service-2.service >/dev/null
+systemctl reset-failed authority-mtls-service-2.service
+systemctl restart authority-mtls-service-2.service
 systemctl enable authority-mtls-service.service >/dev/null
+systemctl reset-failed authority-mtls-service.service
 systemctl restart authority-mtls-service.service
 CONTAINER_SCRIPT
+  for port in 3004 3005; do
+    for _ in {1..100}; do
+      if attach "${TARGET_NAME}" python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${port}/health',timeout=1)" 2>/dev/null; then break; fi
+      sleep 0.1
+    done
+    attach "${TARGET_NAME}" python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:${port}/health',timeout=1)"
+  done
   attach "${TARGET_NAME}" cat /var/lib/authority/mtls-server-cert.pem > "${root}/.secrets/mtls-server-cert.pem"
   as_root chown "$(stat -c '%u:%g' "${root}/.secrets/mtls-ca-cert.pem")" "${root}/.secrets/mtls-server-cert.pem"
 }
@@ -616,9 +665,11 @@ main() {
     agent-install) install_network_agent ;;
     mtls-install) install_mtls_service ;;
     mtls-status) attach "${TARGET_NAME}" journalctl -u authority-mtls-service.service --no-pager -n 40 ;;
-    mtls-stop) attach "${TARGET_NAME}" systemctl stop authority-mtls-service.service ;;
-    mtls-start) attach "${TARGET_NAME}" systemctl start authority-mtls-service.service ;;
-    mtls-restart) attach "${TARGET_NAME}" systemctl restart authority-mtls-service.service ;;
+    mtls-partition) attach "${TARGET_NAME}" touch /run/authority-mtls-db-partition ;;
+    mtls-restore) attach "${TARGET_NAME}" rm -f /run/authority-mtls-db-partition ;;
+    mtls-stop) attach "${TARGET_NAME}" systemctl stop authority-mtls-service.service authority-mtls-service-2.service ;;
+    mtls-start) attach "${TARGET_NAME}" systemctl start authority-mtls-service.service authority-mtls-service-2.service ;;
+    mtls-restart) attach "${TARGET_NAME}" systemctl restart authority-mtls-service.service authority-mtls-service-2.service ;;
     agent-status) network_agent_status ;;
     agent-restart)
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service
