@@ -107,51 +107,6 @@ pub fn all_abilities() -> BTreeSet<Ability> {
     ])
 }
 
-pub(crate) fn legacy_catalog(route: Route) -> Model<Ability, AccessMechanism> {
-    let mesh = route == Route::MeshRequired;
-    let service_requires = if mesh {
-        BTreeSet::from([Ability::NetworkReachability])
-    } else {
-        BTreeSet::new()
-    };
-    // Direct means the route is externally available, as in the existing API.
-    // It does not infer mesh membership from TCP or identity credentials.
-    Model {
-        mechanisms: vec![
-            Mechanism {
-                id: AccessMechanism::WireGuardPeer,
-                requires: BTreeSet::new(),
-                provides: BTreeSet::from([Ability::MeshMembership]),
-            },
-            Mechanism {
-                id: AccessMechanism::NetworkRoute,
-                requires: if mesh {
-                    BTreeSet::from([Ability::MeshMembership])
-                } else {
-                    BTreeSet::new()
-                },
-                provides: BTreeSet::from([Ability::NetworkReachability]),
-            },
-            Mechanism {
-                id: AccessMechanism::SshCertificate,
-                requires: service_requires.clone(),
-                provides: BTreeSet::from([Ability::SshSession]),
-            },
-            Mechanism {
-                id: AccessMechanism::MtlsCertificate,
-                requires: service_requires.clone(),
-                provides: BTreeSet::from([Ability::ServiceIdentity]),
-            },
-            Mechanism {
-                id: AccessMechanism::TcpAdmission,
-                requires: service_requires,
-                provides: BTreeSet::from([Ability::TcpConnection]),
-            },
-        ],
-        derivations: Vec::new(),
-    }
-}
-
 /// Finds an authorized realization using the built-in access catalog.
 ///
 /// # Errors
@@ -211,44 +166,42 @@ pub(crate) fn conditional_catalog(
     route: Route,
 ) -> authority_planning_core::ConditionalModel<Ability, AccessMechanism, EndpointFact> {
     use authority_planning_core::{Conditional, ConditionalModel, Derivation};
-    let direct = |ability| match ability {
-        Ability::NetworkReachability => Ability::NetworkRouteAuthorization,
-        Ability::SshSession => Ability::SshCredential,
-        Ability::ServiceIdentity => Ability::MtlsCredential,
-        Ability::TcpConnection => Ability::TcpAdmission,
-        other => other,
+    let route_mechanism = match route {
+        Route::MeshRequired => Mechanism {
+            id: AccessMechanism::WireGuardPeer,
+            requires: BTreeSet::new(),
+            provides: BTreeSet::from([Ability::MeshMembership, Ability::NetworkRouteAuthorization]),
+        },
+        Route::Direct => Mechanism {
+            id: AccessMechanism::NetworkRoute,
+            requires: BTreeSet::new(),
+            provides: BTreeSet::from([Ability::NetworkRouteAuthorization]),
+        },
     };
-    let mechanisms = legacy_catalog(route)
-        .mechanisms
-        .into_iter()
-        .filter(|edge| {
-            !matches!(
-                (route, edge.id),
-                (Route::MeshRequired, AccessMechanism::NetworkRoute)
-                    | (Route::Direct, AccessMechanism::WireGuardPeer)
-            )
-        })
-        .map(|mut edge| {
-            // Acquiring a credential/admission rule does not require a live route.
-            // Reachability is a prerequisite of the derived usable authority instead.
-            if matches!(
-                edge.id,
-                AccessMechanism::SshCertificate
-                    | AccessMechanism::MtlsCertificate
-                    | AccessMechanism::TcpAdmission
-            ) {
-                edge.requires.clear();
-            }
-            edge.provides = edge.provides.into_iter().map(direct).collect();
-            if route == Route::MeshRequired && edge.id == AccessMechanism::WireGuardPeer {
-                edge.provides.insert(Ability::NetworkRouteAuthorization);
-            }
-            Conditional {
-                value: edge,
-                requires_facts: BTreeSet::new(),
-            }
-        })
-        .collect();
+    let mechanisms = [
+        route_mechanism,
+        Mechanism {
+            id: AccessMechanism::SshCertificate,
+            requires: BTreeSet::new(),
+            provides: BTreeSet::from([Ability::SshCredential]),
+        },
+        Mechanism {
+            id: AccessMechanism::MtlsCertificate,
+            requires: BTreeSet::new(),
+            provides: BTreeSet::from([Ability::MtlsCredential]),
+        },
+        Mechanism {
+            id: AccessMechanism::TcpAdmission,
+            requires: BTreeSet::new(),
+            provides: BTreeSet::from([Ability::TcpAdmission]),
+        },
+    ]
+    .into_iter()
+    .map(|value| Conditional {
+        value,
+        requires_facts: BTreeSet::new(),
+    })
+    .collect();
     let derivations = [
         (
             Ability::NetworkRouteAuthorization,

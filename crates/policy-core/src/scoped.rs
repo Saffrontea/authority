@@ -309,7 +309,6 @@ pub struct NetworkResources {
     pub registered_wireguard_key: String,
     /// Trusted deployment configuration, not a client-selected audience.
     pub service_audience: String,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub environment: BTreeSet<crate::realization::EndpointFact>,
 }
 
@@ -828,7 +827,7 @@ mod construction_tests {
             inputs in prop::collection::vec((0_u8..6, any::<i64>(), any::<u128>()), 0..8),
         ) {
             let fixture: serde_json::Value = serde_json::from_str(include_str!(
-                "../../../contracts/test-vectors/policy-plan-evaluated-v1/valid/wireguard-mesh.json"
+                "../../../contracts/test-vectors/policy-plan-evaluated-v2/valid/wireguard-mesh.json"
             )).unwrap();
             let evidence: crate::selection::PlanningEvidence = serde_json::from_value(fixture["planning"].clone()).unwrap();
             let binding = evidence.binding;

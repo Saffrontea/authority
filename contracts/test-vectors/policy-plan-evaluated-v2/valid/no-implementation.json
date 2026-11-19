@@ -40,7 +40,8 @@
       "source_address": "10.77.0.1",
       "target_address": "10.77.0.2",
       "registered_wireguard_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-      "service_audience": "demo-api"
+      "service_audience": "demo-api",
+      "environment": []
     },
     "deployment": {
       "existing_route": null,

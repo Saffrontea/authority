@@ -106,9 +106,9 @@ direct authority nodes only, avoiding duplicate or substituted credentials.
 Planning evidence v2 records both kinds and the grounded derivation trace, plus
 the environment snapshot. Replay checks the complete catalog-level closure as
 well as scoped edges: omitting an output cannot disable the very rule that would
-have produced it. V1 records retain their frozen legacy catalog and serialization;
-they are not reinterpreted using the new graph. V2 has a separate contract artifact
-and outbox contract version. Unknown future versions fail closed.
+have produced it. Only the current v2 format and catalog are supported. Environment
+and derivation fields are required; old and unknown versions fail closed. The PoC
+does not retain a legacy replay path.
 
 `policy-core::scoped::evaluate_scoped` first resolves existing policy precedence
 and identity checks, then instantiates scoped abilities and the access catalog.

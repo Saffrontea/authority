@@ -148,7 +148,8 @@ The graph separates direct credential/admission authority from derived usable
 abilities. Trusted endpoint and route facts come from `device.nodes.endpoint_facts`;
 new or upgraded nodes default to an empty manifest and fail closed until configured.
 The PoC bootstrap declares its installed fixture environment. Audit v2 records the
-complete derivation trace; historical v1 records retain their original interpretation.
+complete derivation trace. Only the current planning format is accepted; there is
+no legacy catalog or replay fallback.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 

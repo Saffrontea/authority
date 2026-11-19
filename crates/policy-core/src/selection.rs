@@ -172,7 +172,6 @@ pub struct PlanEvidence {
     pub abilities: Vec<AbilityEvidence>,
     pub goals: Vec<usize>,
     pub steps: Vec<StepEvidence>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub derivations: Vec<DerivedEvidence>,
 }
 
@@ -205,11 +204,7 @@ impl PlanningEvidence {
     /// evidence replay, not authorization against current policy or live routing.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
-        if ![
-            authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V1,
-            authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2,
-        ]
-        .contains(&self.version)
+        if self.version != authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2
             || self.evaluated_at < 0
             || self.outcomes.is_empty()
             || self.selection_rule != authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1
@@ -267,7 +262,6 @@ impl PlanningEvidence {
                             selected,
                             &self.outcomes,
                             resources,
-                            self.version,
                         )
                     })
             }
@@ -345,7 +339,6 @@ impl PlanEvidence {
         selected: CandidateId,
         outcomes: &BTreeSet<Outcome>,
         resources: &NetworkResources,
-        version: u8,
     ) -> bool {
         let mut kinds = BTreeSet::new();
         for record in &self.abilities {
@@ -391,34 +384,7 @@ impl PlanEvidence {
         if index_kinds(&self.goals) != Some(goals) {
             return false;
         }
-        if version == authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2 {
-            return self.consistent_derived(binding, evaluated_at, selected, outcomes, resources);
-        }
-        if !self.derivations.is_empty() || !resources.environment.is_empty() {
-            return false;
-        }
-        let model = crate::realization::legacy_catalog(selected.route());
-        let mut executed = BTreeSet::new();
-        let mut available = BTreeSet::new();
-        for step in &self.steps {
-            let Some(mechanism) = model
-                .mechanisms
-                .iter()
-                .find(|mechanism| mechanism.id == step.mechanism)
-            else {
-                return false;
-            };
-            if !executed.insert(step.mechanism)
-                || !step.requires.iter().all(|index| available.contains(index))
-                || index_kinds(&step.requires) != Some(mechanism.requires.clone())
-                || index_kinds(&step.provides) != Some(mechanism.provides.clone())
-            {
-                return false;
-            }
-            available.extend(step.provides.iter().copied());
-        }
-        available.len() == self.abilities.len()
-            && self.goals.iter().all(|index| available.contains(index))
+        self.consistent_derived(binding, evaluated_at, selected, outcomes, resources)
     }
 }
 

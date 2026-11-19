@@ -10,7 +10,6 @@ pub const MAX_TTL_SECONDS: i64 = 600;
 pub const MAX_TCP_PORTS: usize = 64;
 pub const MAX_PLAN_MECHANISMS_V1: usize = 5;
 pub const MAX_PLAN_CANDIDATES_V1: usize = 2;
-pub const PLANNING_EVIDENCE_VERSION_V1: u8 = 1;
 pub const PLANNING_EVIDENCE_VERSION_V2: u8 = 2;
 
 pub const CREDENTIAL_ISSUER_AUDIENCE: &str = "credential-issuer";

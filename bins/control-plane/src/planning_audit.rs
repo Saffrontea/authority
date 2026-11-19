@@ -61,10 +61,10 @@ mod tests {
     fn audit_payload_preserves_allow_and_deny_evidence_and_rejects_inconsistency() {
         for vector in [
             include_str!(
-                "../../../contracts/test-vectors/policy-plan-evaluated-v1/valid/existing-route.json"
+                "../../../contracts/test-vectors/policy-plan-evaluated-v2/valid/existing-route.json"
             ),
             include_str!(
-                "../../../contracts/test-vectors/policy-plan-evaluated-v1/valid/no-implementation.json"
+                "../../../contracts/test-vectors/policy-plan-evaluated-v2/valid/no-implementation.json"
             ),
         ] {
             let value: Value = serde_json::from_str(vector).unwrap();
@@ -76,7 +76,7 @@ mod tests {
             );
         }
         let value: Value = serde_json::from_str(include_str!(
-            "../../../contracts/test-vectors/policy-plan-evaluated-v1/invalid/scope-expansion.json"
+            "../../../contracts/test-vectors/policy-plan-evaluated-v2/invalid/rebound-credential.json"
         ))
         .unwrap();
         let evidence: PlanningEvidence = serde_json::from_value(value["planning"].clone()).unwrap();
