@@ -140,7 +140,8 @@ coarse model used by its own tests.
 
 For each requested ability, policy precedence is resolved independently for every
 port/principal and every interval between policy boundaries: highest priority,
-then revision, deny-on-tie, then policy ID. All requested atoms and time segments
+then deny over allow, then policy ID. Revisions identify versions of a single
+policy and are never compared across policies. All requested atoms and time segments
 must be allowed. Multiple rules can cover disjoint scope or time segments. A deny
 on one port cannot silently disappear behind a broad allow. Direct permission
 does not grant the corresponding derived authority. The entire graph is compiled
@@ -321,7 +322,7 @@ discovery and mixed per-service routing are not modeled.
 `policy_core::ability_policy::authorize` evaluates concrete `ScopedAbility`
 rules independently for direct and derived authority. It splits port/principal
 sets and the requested interval at rule boundaries, then selects a winner for
-every atom and segment by priority, revision, deny-on-tie and policy ID. Every
+every atom and segment by priority, deny precedence and policy ID. Every
 segment must be allowed. Evidence includes all winning policy references;
 disjoint rules can cover a request without hiding a narrow deny. Bindings,
 keys, resources and authority kinds must match through scoped containment.

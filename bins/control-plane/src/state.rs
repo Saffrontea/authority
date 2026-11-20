@@ -150,9 +150,9 @@ impl AppState {
         &self,
         id: Uuid,
         kind: &str,
+        subject_user_id: Uuid,
         payload: &T,
         ttl: i64,
-        maximum: i64,
     ) -> Result<bool, String> {
         let mut tx = crate::access_policy::begin_authorization(self.pool())
             .await
@@ -163,18 +163,22 @@ impl AppState {
             .await
             .map_err(|e| e.to_string())?;
         sqlx::query("DELETE FROM identity.pending_challenges WHERE domain_id=$1 AND expires_at<=clock_timestamp()").bind(self.domain_id()).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM identity.pending_challenges WHERE domain_id=$1 AND kind=$2",
+        if !crate::auth_limits::reserve_challenge_slot(
+            &mut tx,
+            self.domain_id(),
+            subject_user_id,
+            kind,
         )
-        .bind(self.domain_id())
-        .bind(kind)
-        .fetch_one(&mut *tx)
         .await
-        .map_err(|e| e.to_string())?;
-        if count >= maximum {
+        .map_err(|error| error.to_string())?
+        {
+            tx.commit().await.map_err(|error| error.to_string())?;
             return Ok(false);
         }
-        sqlx::query("INSERT INTO identity.pending_challenges(domain_id,id,kind,payload,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()+make_interval(secs=>$5::integer))").bind(self.domain_id()).bind(id).bind(kind).bind(serde_json::to_value(payload).map_err(|e|e.to_string())?).bind(i32::try_from(ttl).map_err(|e|e.to_string())?).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        sqlx::query("INSERT INTO identity.pending_challenges(domain_id,id,kind,subject_user_id,payload,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+make_interval(secs=>$6::integer))")
+            .bind(self.domain_id()).bind(id).bind(kind).bind(subject_user_id)
+            .bind(serde_json::to_value(payload).map_err(|e|e.to_string())?).bind(i32::try_from(ttl).map_err(|e|e.to_string())?)
+            .execute(&mut *tx).await.map_err(|e|e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(true)
     }

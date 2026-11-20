@@ -14,7 +14,7 @@ use openssl::{
     pkey::{PKey, Private},
 };
 use proptest::prelude::*;
-use std::sync::LazyLock;
+use std::{fs, sync::LazyLock};
 
 struct Keys {
     control: OpenSslEd25519Signer,
@@ -221,4 +221,75 @@ proptest! {
         prop_assert!(!state.terminal_authorized(&claims.nonce, case.now + ttl).unwrap());
         prop_assert!(install_ssh_certificate_with_clock(&state, &valid, || Ok(case.now + ttl - 1)).is_ok());
     }
+}
+
+#[test]
+fn concurrent_installs_and_admitted_terminals_keep_their_exact_certificate() {
+    let first = Case {
+        id: 100,
+        now: KEYS.now,
+        ttl: 200,
+        principals: vec!["deploy".into()],
+        key: 0,
+    };
+    let second = Case {
+        id: 101,
+        now: KEYS.now,
+        ttl: 200,
+        principals: vec!["other".into()],
+        key: 0,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(directory.path(), &first);
+    let a_cert = certificate(&first, Variant::Valid);
+    let b_cert = certificate(&second, Variant::Valid);
+    let a_claims = projections(&first).ssh_node_install;
+    let b_claims = projections(&second).ssh_node_install;
+    let a = request(
+        Some(&sign_authorization(a_claims.clone(), &KEYS.control).unwrap()),
+        &a_cert,
+    );
+    let b = request(
+        Some(&sign_authorization(b_claims.clone(), &KEYS.control).unwrap()),
+        &b_cert,
+    );
+    install_ssh_certificate_with_clock(&state, &a, || Ok(first.now)).unwrap();
+    let admitted = state
+        .terminal_snapshot(&a_claims.nonce, first.now)
+        .unwrap()
+        .unwrap();
+    install_ssh_certificate_with_clock(&state, &b, || Ok(first.now)).unwrap();
+    assert_eq!(&*admitted.certificate, a_cert);
+    assert_eq!(
+        &*state
+            .terminal_snapshot(&b_claims.nonce, first.now)
+            .unwrap()
+            .unwrap()
+            .certificate,
+        b_cert
+    );
+    assert!(
+        state
+            .terminal_snapshot(&a_claims.nonce, first.now)
+            .unwrap()
+            .is_none()
+    );
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|scope| {
+        for (request, claims, certificate) in [(&a, &a_claims, &a_cert), (&b, &b_claims, &b_cert)] {
+            let state = state.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..16 {
+                    install_ssh_certificate_with_clock(&state, request, || Ok(first.now)).unwrap();
+                    if let Some(snapshot) =
+                        state.terminal_snapshot(&claims.nonce, first.now).unwrap()
+                    {
+                        assert_eq!(&*snapshot.certificate, certificate);
+                    }
+                }
+            });
+        }
+    });
 }

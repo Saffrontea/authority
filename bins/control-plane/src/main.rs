@@ -1,5 +1,6 @@
 mod access_policy;
 mod api;
+mod auth_limits;
 mod config;
 mod grant_ledger;
 mod planning_audit;

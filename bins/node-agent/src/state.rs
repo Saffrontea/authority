@@ -24,13 +24,20 @@ struct Inner {
     browser_origins: Vec<HeaderValue>,
     terminal_slots: Arc<Semaphore>,
     verifier: OpenSslEd25519Verifier,
-    terminal_lease: Mutex<Option<TerminalLease>>,
+    terminal_lease: Mutex<Option<TerminalSnapshot>>,
     mtls_private_key: PKey<Private>,
 }
 
 pub struct TerminalLease {
     pub token_hash: String,
     pub expires_at: i64,
+}
+
+#[derive(Clone)]
+pub struct TerminalSnapshot {
+    pub certificate: Arc<str>,
+    pub expires_at: i64,
+    token_hash: String,
 }
 
 pub struct AgentPaths {
@@ -112,25 +119,72 @@ impl AppState {
         &self.0.mtls_private_key
     }
 
-    pub fn install_terminal_lease(&self, lease: TerminalLease) -> Result<(), String> {
-        *self
+    pub fn install_certificate(
+        &self,
+        certificate: &str,
+        lease: TerminalLease,
+    ) -> Result<(), String> {
+        use std::io::Write;
+        let mut installed = self
             .0
             .terminal_lease
             .lock()
-            .map_err(|error| error.to_string())? = Some(lease);
+            .map_err(|error| error.to_string())?;
+        let parent = self
+            .certificate_path()
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut temporary =
+            tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+        temporary
+            .write_all(certificate.as_bytes())
+            .map_err(|error| error.to_string())?;
+        temporary
+            .as_file()
+            .sync_all()
+            .map_err(|error| error.to_string())?;
+        temporary
+            .persist(self.certificate_path())
+            .map_err(|error| error.to_string())?;
+        *installed = Some(TerminalSnapshot {
+            certificate: Arc::from(certificate),
+            token_hash: lease.token_hash,
+            expires_at: lease.expires_at,
+        });
         Ok(())
     }
 
+    #[cfg(test)]
+    pub fn install_terminal_lease(&self, lease: TerminalLease) -> Result<(), String> {
+        let certificate =
+            std::fs::read_to_string(self.certificate_path()).map_err(|error| error.to_string())?;
+        self.install_certificate(&certificate, lease)
+    }
+
+    #[cfg(test)]
     pub fn terminal_authorized(&self, token_hash: &str, now: i64) -> Result<bool, String> {
+        Ok(self.terminal_snapshot(token_hash, now)?.is_some())
+    }
+
+    pub fn terminal_snapshot(
+        &self,
+        token_hash: &str,
+        now: i64,
+    ) -> Result<Option<TerminalSnapshot>, String> {
         let lease = self
             .0
             .terminal_lease
             .lock()
             .map_err(|error| error.to_string())?;
-        Ok(lease.as_ref().is_some_and(|lease| {
-            lease.expires_at > now
-                && constant_time_eq(lease.token_hash.as_bytes(), token_hash.as_bytes())
-        }))
+        Ok(lease
+            .as_ref()
+            .filter(|lease| {
+                lease.expires_at > now
+                    && constant_time_eq(lease.token_hash.as_bytes(), token_hash.as_bytes())
+            })
+            .cloned())
     }
 }
 

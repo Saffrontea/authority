@@ -250,3 +250,19 @@ tracked in [Verification](docs/verification.md). Run `mise run verification:pbt`
 and `mise run verification:tla:mutations` (Java 11+). For the Verus proofs, run
 `mise run verification:verus:setup` once, then `mise run verification:check`
 for the combined proof/model/property gate.
+
+A network-agent restart clears installed WireGuard/TCP state but retains consumed
+replay nonces. Clients must obtain fresh authorization after restart; replaying an
+unexpired grant does not reinstall it. Failed kernel operations remain retryable
+within the same running process after their reservation is rolled back.
+
+Authentication starts are public, but pending challenges and issuance rates are
+bounded per user and challenge kind in the shared DB (4 pending challenges,
+8 starts per 30 seconds).
+Excess pending challenges evict only that user's oldest entries. Sessions are
+limited to 8 per user; successful sign-in replaces only that user's oldest
+sessions. Each domain admits at most 4096 sessions and 4096 pending challenges of each
+kind. These limits isolate a single known account's resource usage across replicas;
+network/IP-level throttling and protection against targeted account starvation
+remain deployment responsibilities. Forwarded client-IP headers are not trusted
+as an identity or rate-limit key by this PoC.

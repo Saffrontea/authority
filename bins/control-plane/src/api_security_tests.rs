@@ -263,3 +263,164 @@ async fn device_allocation_skips_unreserved_target_address() {
     assert_ne!(client, reserved);
     assert_eq!(target, reserved);
 }
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL migrations"]
+async fn challenge_flood_is_rate_limited_per_subject_and_preserves_other_users() {
+    let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(4).await).await;
+    fixture.state.initialize_auth().await.unwrap();
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let state = fixture.state.clone();
+        let user = fixture.user;
+        tasks.spawn(async move {
+            state
+                .put_challenge(
+                    Uuid::new_v4(),
+                    "authentication",
+                    user,
+                    &json!({"user_id":user}),
+                    300,
+                )
+                .await
+                .unwrap()
+        });
+    }
+    let mut accepted = 0;
+    while let Some(result) = tasks.join_next().await {
+        if result.unwrap() {
+            accepted += 1;
+        }
+    }
+    assert_eq!(accepted, crate::auth_limits::CHALLENGES_PER_WINDOW);
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM identity.pending_challenges WHERE domain_id=$1 AND subject_user_id=$2")
+        .bind(fixture.state.domain_id()).bind(fixture.user).fetch_one(fixture.state.pool()).await.unwrap();
+    assert_eq!(count, crate::auth_limits::MAX_PENDING_PER_USER);
+    sqlx::query("UPDATE identity.challenge_rate_limits SET window_start=clock_timestamp()-interval '31 seconds' WHERE domain_id=$1 AND subject_user_id=$2")
+        .bind(fixture.state.domain_id()).bind(fixture.user).execute(fixture.state.pool()).await.unwrap();
+    assert!(
+        fixture
+            .state
+            .put_challenge(
+                Uuid::new_v4(),
+                "authentication",
+                fixture.user,
+                &json!({"user_id":fixture.user}),
+                300
+            )
+            .await
+            .unwrap()
+    );
+    let other = Uuid::new_v4();
+    let other_challenge = Uuid::new_v4();
+    assert!(
+        fixture
+            .state
+            .put_challenge(
+                other_challenge,
+                "authentication",
+                other,
+                &json!({"user_id":other}),
+                300
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .state
+            .take_challenge::<Value>(other_challenge, "authentication")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("DELETE FROM identity.pending_challenges WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM identity.challenge_rate_limits WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM identity.bootstrap_tokens WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM identity.auth_domains WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL migrations"]
+async fn session_pressure_evicts_only_the_authenticated_users_oldest_sessions() {
+    let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(2).await).await;
+    fixture.state.initialize_auth().await.unwrap();
+    let other_user = Uuid::new_v4();
+    let other_digest = sha256(Uuid::new_v4().as_bytes());
+    sqlx::query("INSERT INTO identity.sessions(domain_id,token_digest,user_id,device_id,device_public_key,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '1 minute')")
+        .bind(fixture.state.domain_id()).bind(other_digest.as_slice()).bind(other_user).bind(Uuid::new_v4()).bind(fixture.signer.public_key_raw().unwrap())
+        .execute(fixture.state.pool()).await.unwrap();
+    for _ in 0..16 {
+        let mut tx = crate::access_policy::begin_authorization(fixture.state.pool())
+            .await
+            .unwrap();
+        assert!(
+            crate::auth_limits::reserve_session_slot(
+                &mut tx,
+                fixture.state.domain_id(),
+                fixture.user
+            )
+            .await
+            .unwrap()
+        );
+        sqlx::query("INSERT INTO identity.sessions(domain_id,token_digest,user_id,device_id,device_public_key,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '15 minutes')")
+            .bind(fixture.state.domain_id()).bind(sha256(Uuid::new_v4().as_bytes()).as_slice()).bind(fixture.user).bind(fixture.device).bind(fixture.signer.public_key_raw().unwrap())
+            .execute(&mut *tx).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let own: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM identity.sessions WHERE domain_id=$1 AND user_id=$2",
+    )
+    .bind(fixture.state.domain_id())
+    .bind(fixture.user)
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    let other: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity.sessions WHERE token_digest=$1")
+            .bind(other_digest.as_slice())
+            .fetch_one(fixture.state.pool())
+            .await
+            .unwrap();
+    let original: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM identity.sessions WHERE token_digest=$1")
+            .bind(fixture.digest.as_slice())
+            .fetch_one(fixture.state.pool())
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM identity.sessions WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM identity.bootstrap_tokens WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM identity.auth_domains WHERE domain_id=$1")
+        .bind(fixture.state.domain_id())
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    assert_eq!(own, crate::auth_limits::MAX_SESSIONS_PER_USER);
+    assert_eq!(other, 1);
+    assert_eq!(original, 0);
+}

@@ -282,7 +282,7 @@ impl From<authority_planning_core::PlanningError> for DenialReason {
 /// Evaluates an immutable snapshot using set operations only.
 ///
 /// For each required capability, the highest-priority applicable rule wins.
-/// A deny wins an exact priority and revision tie.
+/// A deny wins any priority tie; revisions do not rank different policies.
 ///
 /// # Errors
 ///
@@ -313,7 +313,6 @@ pub fn evaluate(
             .max_by_key(|rule| {
                 (
                     rule.priority,
-                    rule.revision,
                     matches!(rule.effect, Effect::Deny),
                     rule.policy_id,
                 )

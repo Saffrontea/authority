@@ -59,6 +59,8 @@ pub enum AuthorizationEnvelopeError {
     RevocationTargetNodeMismatch,
     #[error("revocation notice is expired at the supplied time")]
     RevocationNoticeExpired,
+    #[error("revocation notice is not active yet")]
+    RevocationNoticeNotActive,
     #[error("revocation notice does not affect the expected adapter")]
     RevocationAdapterMismatch,
 }
@@ -214,6 +216,9 @@ pub fn verify_revocation_notice_for_node(
     if envelope.notice.target_node_id != expected_target_node_id {
         return Err(AuthorizationEnvelopeError::RevocationTargetNodeMismatch);
     }
+    if now < envelope.notice.revoked_at {
+        return Err(AuthorizationEnvelopeError::RevocationNoticeNotActive);
+    }
     if now >= envelope.notice.expires_at {
         return Err(AuthorizationEnvelopeError::RevocationNoticeExpired);
     }
@@ -266,6 +271,9 @@ pub fn verify_revocation_notice_v2_for_adapter(
     }
     if !envelope.notice.adapter_kinds.contains(&expected_adapter) {
         return Err(AuthorizationEnvelopeError::RevocationAdapterMismatch);
+    }
+    if now < envelope.notice.revoked_at {
+        return Err(AuthorizationEnvelopeError::RevocationNoticeNotActive);
     }
     if now >= envelope.notice.expires_at {
         return Err(AuthorizationEnvelopeError::RevocationNoticeExpired);
@@ -484,6 +492,45 @@ mod tests {
         assert!(matches!(
             verify_network_grant_for_node(&envelope, &crypto, "node_01", 1_794_326_700),
             Err(AuthorizationEnvelopeError::GrantNotActive)
+        ));
+    }
+
+    #[test]
+    fn signed_future_revocation_is_not_active_until_its_timestamp() {
+        let crypto = FakeCrypto::default();
+        let envelope = sign_revocation_notice_v2(
+            DecisionRevocationNoticeV2 {
+                version: "2".into(),
+                issuer: "domain-authority:example".into(),
+                domain_id: "domain_example".into(),
+                target_node_id: "node_01".into(),
+                decision_id: "decision_01".into(),
+                reason: "user_requested".into(),
+                sequence: 1,
+                revoked_at: 1_794_326_501,
+                expires_at: 1_794_326_600,
+                adapter_kinds: vec![AdapterGrantKindV1::MtlsClientCertificate],
+            },
+            &crypto,
+        )
+        .unwrap();
+        let verify = |now| {
+            verify_revocation_notice_v2_for_adapter(
+                &envelope,
+                &crypto,
+                "node_01",
+                AdapterGrantKindV1::MtlsClientCertificate,
+                now,
+            )
+        };
+        assert!(matches!(
+            verify(1_794_326_500),
+            Err(AuthorizationEnvelopeError::RevocationNoticeNotActive)
+        ));
+        assert!(verify(1_794_326_501).is_ok());
+        assert!(matches!(
+            verify(1_794_326_600),
+            Err(AuthorizationEnvelopeError::RevocationNoticeExpired)
         ));
     }
 

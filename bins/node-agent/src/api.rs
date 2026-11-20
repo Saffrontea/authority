@@ -1,7 +1,6 @@
 use authority_contracts_model::protocol::NODE_AGENT_AUDIENCE;
 use authority_device_auth_core::{decode_base64url, encode_base64url};
 use std::{
-    fs,
     net::IpAddr,
     process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
@@ -80,12 +79,10 @@ async fn open_ssh_terminal(
         return Err(ApiError::forbidden("invalid_terminal_capability"));
     }
     let token_hash = encode_base64url(&sha256(token.as_bytes()));
-    if !state
-        .terminal_authorized(&token_hash, unix_timestamp()?)
+    let snapshot = state
+        .terminal_snapshot(&token_hash, unix_timestamp()?)
         .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::forbidden("terminal_capability_denied"));
-    }
+        .ok_or_else(|| ApiError::forbidden("terminal_capability_denied"))?;
     let target = state
         .ssh_target()
         .ok_or_else(|| ApiError::unavailable("ssh_target_not_configured"))?;
@@ -95,7 +92,7 @@ async fn open_ssh_terminal(
         .map_err(|_| ApiError::unavailable("ssh_terminal_capacity_reached"))?;
     Ok(upgrade
         .protocols([protocol.to_owned()])
-        .on_upgrade(move |socket| run_ssh_terminal(socket, state, target, permit))
+        .on_upgrade(move |socket| run_ssh_terminal(socket, state, target, snapshot, permit))
         .into_response())
 }
 
@@ -103,9 +100,20 @@ async fn run_ssh_terminal(
     mut socket: WebSocket,
     state: AppState,
     target: (IpAddr, u16),
+    snapshot: crate::state::TerminalSnapshot,
     _permit: OwnedSemaphorePermit,
 ) {
-    let certificate_option = format!("CertificateFile={}", state.certificate_path().display());
+    // A later install cannot replace the certificate paired with this capability.
+    if !unix_timestamp().is_ok_and(|now| now < snapshot.expires_at) {
+        return;
+    }
+    let Ok(mut certificate_file) = tempfile::NamedTempFile::new() else {
+        return;
+    };
+    if std::io::Write::write_all(&mut certificate_file, snapshot.certificate.as_bytes()).is_err() {
+        return;
+    }
+    let certificate_option = format!("CertificateFile={}", certificate_file.path().display());
     let known_hosts_option = format!("UserKnownHostsFile={}", state.known_hosts_path().display());
     let (target, port) = target;
     let destination = format!("deploy@{target}");
@@ -326,15 +334,14 @@ fn install_ssh_certificate_with_clock(
     {
         return Err(ApiError::forbidden("certificate_authorization_mismatch"));
     }
-    if let Some(parent) = state.certificate_path().parent() {
-        fs::create_dir_all(parent).map_err(ApiError::internal)?;
-    }
-    fs::write(state.certificate_path(), &request.certificate).map_err(ApiError::internal)?;
     state
-        .install_terminal_lease(TerminalLease {
-            token_hash: authorization.nonce.clone(),
-            expires_at: authorization.expires_at,
-        })
+        .install_certificate(
+            &request.certificate,
+            TerminalLease {
+                token_hash: authorization.nonce.clone(),
+                expires_at: authorization.expires_at,
+            },
+        )
         .map_err(ApiError::internal)?;
 
     Ok(InstallCertificateResponse {

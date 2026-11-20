@@ -63,6 +63,9 @@ fn atoms(scope: &AbilityScope) -> Vec<AbilityScope> {
 
 /// Authorize the entire requested interval and scope, returning every winning
 /// policy needed as evidence. A narrow deny cannot disappear behind a broad allow.
+/// At equal priority, any matching deny overrides all allows. Revisions identify
+/// a version of ONE policy; they never rank different policies. Policy IDs only
+/// select deterministic provenance among rules with the same priority/effect.
 /// Rules are supplied from one authenticated, locked policy snapshot.
 ///
 /// # Errors
@@ -116,7 +119,6 @@ pub fn authorize(
                 .max_by_key(|rule| {
                     (
                         rule.priority,
-                        rule.policy.revision,
                         rule.effect == Effect::Deny,
                         rule.policy.policy_id,
                     )
@@ -470,6 +472,22 @@ mod tests {
     use proptest::prelude::*;
     use uuid::Uuid;
 
+    proptest! {
+        #[test]
+        fn same_priority_deny_wins_independently_of_policy_revisions(
+            allow_revision in 1_i64..=i64::MAX, deny_revision in 1_i64..=i64::MAX,
+            priority in any::<i32>(),
+        ) {
+            let mut allow=rule(1,authority(&[443],10,30),Effect::Allow);
+            let mut deny=rule(2,authority(&[443],10,30),Effect::Deny);
+            allow.priority=priority;deny.priority=priority;
+            allow.policy.revision=allow_revision;deny.policy.revision=deny_revision;
+            let expected=Err(PermissionError::ExplicitDeny(deny.policy));
+            prop_assert_eq!(authorize(&authority(&[443],10,30),&[allow.clone(),deny.clone()]),expected.clone());
+            prop_assert_eq!(authorize(&authority(&[443],10,30),&[deny,allow]),expected);
+        }
+    }
+
     #[test]
     fn stored_selectors_require_explicit_key_binding_and_preserve_pins() {
         let requested = AbilityScope::SshCredential {
@@ -518,11 +536,12 @@ mod tests {
             let mut expected = true;
             for port in [80,443] {
                 for time in 10..30 {
-                    let winner = rules.iter().filter(|entry| {
+                    let applicable: Vec<_> = rules.iter().filter(|entry| {
                         let AbilityScope::TcpConnection { ports, .. } = &entry.authority.scope else { return false; };
                         ports.contains(&port) && entry.authority.validity.not_before <= time && time < entry.authority.validity.expires_at
-                    }).max_by_key(|entry| (entry.priority, entry.policy.revision, entry.effect == Effect::Deny, entry.policy.policy_id));
-                    expected &= winner.is_some_and(|entry| entry.effect == Effect::Allow);
+                    }).collect();
+                    let highest = applicable.iter().map(|entry| entry.priority).max();
+                    expected &= highest.is_some() && !applicable.iter().any(|entry| Some(entry.priority) == highest && entry.effect == Effect::Deny);
                 }
             }
             let actual = authorize(&authority(&[80,443],10,30), &rules);

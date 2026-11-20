@@ -113,14 +113,21 @@ async fn get_ocsp(
     State(state): State<AppState>,
     axum::extract::Path((ca_id, request)): axum::extract::Path<(String, String)>,
 ) -> Result<axum::response::Response, ApiError> {
-    let bytes = openssl::base64::decode_block(&request).map_err(ApiError::internal)?;
+    let bytes = decode_ocsp_request(&request)?;
     ocsp_response(&state, &ca_id, &bytes).await
+}
+
+fn decode_ocsp_request(request: &str) -> Result<Vec<u8>, ApiError> {
+    openssl::base64::decode_block(request)
+        .map_err(|_| ApiError::bad_request("invalid_ocsp_encoding"))
 }
 
 async fn revoke_mtls(
     State(state): State<AppState>,
     Json(envelope): Json<authority_contracts_model::SignedDecisionRevocationNoticeV2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // The issuer is not node-bound: the exact committed-notice DB check below
+    // is the authority for domain/target scope; this call verifies signature/time/adapter.
     authority_issuer_core::verify_revocation_notice_v2_for_adapter(
         &envelope,
         state.verifier(),
@@ -519,6 +526,14 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn malformed_ocsp_transport_encoding_is_a_client_error() {
+        let error = super::decode_ocsp_request("!not-base64!").err().unwrap();
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_ocsp_encoding");
+        assert_eq!(super::decode_ocsp_request("MAA=").unwrap(), [0x30, 0]);
+    }
+
     use std::{
         fs,
         io::{Read, Write},

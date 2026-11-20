@@ -52,10 +52,9 @@ use crate::{
 
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_mins(15);
-const MAX_SESSIONS: usize = 256;
+
 const DEVICE_PROOF_SKEW_SECONDS: i64 = 30;
 const MAX_SESSION_NONCES: usize = 1024;
-const MAX_PENDING_CHALLENGES: usize = 256;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -511,17 +510,20 @@ async fn start_registration(
         .put_challenge(
             challenge_id,
             "registration",
+            request.user_id,
             &PendingRegistration {
                 user_id: request.user_id,
                 state: registration,
             },
             i64::try_from(CHALLENGE_TTL.as_secs()).map_err(ApiError::internal)?,
-            i64::try_from(MAX_PENDING_CHALLENGES).map_err(ApiError::internal)?,
         )
         .await
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::unavailable("registration_capacity_reached"));
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "registration_capacity_reached",
+        });
     }
 
     Ok(Json(StartRegistrationResponse {
@@ -650,6 +652,7 @@ async fn start_authentication(
         .put_challenge(
             challenge_id,
             "authentication",
+            user_id,
             &PendingAuthentication {
                 user_id,
                 device_id: request.device_id,
@@ -658,12 +661,14 @@ async fn start_authentication(
                 state: authentication,
             },
             i64::try_from(CHALLENGE_TTL.as_secs()).map_err(ApiError::internal)?,
-            i64::try_from(MAX_PENDING_CHALLENGES).map_err(ApiError::internal)?,
         )
         .await
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::unavailable("authentication_capacity_reached"));
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "authentication_capacity_reached",
+        });
     }
 
     Ok(Json(StartAuthenticationResponse {
@@ -767,26 +772,18 @@ async fn finish_authentication(
         .map_err(ApiError::internal)?
         .saturating_add(SESSION_TTL)
         .as_secs();
-    sqlx::query("SELECT domain_id FROM identity.auth_domains WHERE domain_id=$1 FOR UPDATE")
-        .bind(state.domain_id())
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(ApiError::internal)?;
-    sqlx::query(
-        "DELETE FROM identity.sessions WHERE domain_id=$1 AND expires_at<=clock_timestamp()",
+    if !crate::auth_limits::reserve_session_slot(
+        &mut transaction,
+        state.domain_id(),
+        pending.user_id,
     )
-    .bind(state.domain_id())
-    .execute(&mut *transaction)
     .await
-    .map_err(ApiError::internal)?;
-    let count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM identity.sessions WHERE domain_id=$1")
-            .bind(state.domain_id())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(ApiError::internal)?;
-    if count >= i64::try_from(MAX_SESSIONS).map_err(ApiError::internal)? {
-        return Err(ApiError::unavailable("session_capacity_reached"));
+    .map_err(ApiError::internal)?
+    {
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "session_capacity_reached",
+        });
     }
     sqlx::query("INSERT INTO identity.sessions(domain_id,token_digest,user_id,device_id,device_public_key,expires_at) VALUES($1,$2,$3,$4,$5,to_timestamp($6::bigint))")
         .bind(state.domain_id()).bind(session_digest.as_slice()).bind(pending.user_id).bind(pending.device_id).bind(pending.device_public_key.as_slice()).bind(i64::try_from(expires_at).map_err(ApiError::internal)?)
@@ -1322,15 +1319,14 @@ async fn pull_revocations(
         return Err(ApiError::bad_request("invalid_revocation_cursor"));
     }
     let rows = sqlx::query(
-        "SELECT sequence, envelope FROM policy.revocation_notices \
-         WHERE domain_id = $1 AND target_node_id = $2 AND sequence > $3 \
-           AND expires_at > now() AND envelope->'notice' ? 'adapter_kinds' \
-           AND EXISTS (SELECT 1 FROM policy.issued_ability_grants g \
-             WHERE g.domain_id = policy.revocation_notices.domain_id \
-               AND g.target_node_id = policy.revocation_notices.target_node_id \
-               AND g.decision_id = policy.revocation_notices.decision_id \
-               AND g.subject_user_id = $4 AND g.device_id = $5) \
-         ORDER BY sequence LIMIT 100",
+        // Drive reconciliation from indexed ownership, including revoked grants.
+        // Advancing a cursor over other owners' notices would leak their activity.
+        "WITH owned AS (SELECT DISTINCT decision_id FROM policy.issued_ability_grants \
+           WHERE domain_id=$1 AND target_node_id=$2 AND subject_user_id=$4 AND device_id=$5) \
+         SELECT n.sequence,n.envelope FROM owned \
+         JOIN policy.revocation_notices n ON n.domain_id=$1 AND n.target_node_id=$2 AND n.decision_id=owned.decision_id \
+         WHERE n.sequence>$3 AND n.expires_at>now() AND n.envelope->'notice' ? 'adapter_kinds' \
+         ORDER BY n.sequence LIMIT 100",
     )
     .bind(state.domain_id())
     .bind(query.target_node_id)

@@ -41,6 +41,9 @@
     },
     "0014_session_proof_expiry.sql": {
       "sha256": "547ee0304f8afdfe42dd68d5ee90de7b50df646ffaac142dd5b94f7c76af3c14"
+    },
+    "0015_authentication_capacity.sql": {
+      "sha256": "43add6d5b4368fd7999377cde44ed2296d0c760e4880ac5b2c68c81a47b833c1"
     }
   }
 }
