@@ -58,6 +58,7 @@ impl Config {
         let target_identity_file = PathBuf::from(required("AUTHORITY_TARGET_IDENTITY_FILE")?);
         let client_wireguard_public_key = required("AUTHORITY_CLIENT_WIREGUARD_PUBLIC_KEY")?;
         let network_agent_origin = required("AUTHORITY_NETWORK_AGENT_ORIGIN")?;
+        validate_network_agent_origin(&network_agent_origin)?;
         let target_mesh_address = value("AUTHORITY_TARGET_MESH_ADDRESS", "10.77.0.2")?;
         let target_address = target_mesh_address
             .parse::<std::net::Ipv4Addr>()
@@ -182,5 +183,52 @@ fn existing_route_source() -> Result<Option<std::net::Ipv4Addr>, String> {
         }
         Err(env::VarError::NotPresent) => Ok(None),
         Err(cause) => Err(format!("cannot read existing route source: {cause}")),
+    }
+}
+
+pub(crate) fn validate_network_agent_origin(origin: &str) -> Result<(), String> {
+    Url::parse(origin)
+        .map_err(|_| "AUTHORITY_NETWORK_AGENT_ORIGIN must be an HTTP(S) origin".to_owned())?;
+    let uri = origin
+        .parse::<axum::http::Uri>()
+        .map_err(|_| "AUTHORITY_NETWORK_AGENT_ORIGIN must be an HTTP(S) origin".to_owned())?;
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.authority().is_none()
+        || uri.path() != "/"
+        || uri.query().is_some()
+        || origin.bytes().any(|b| {
+            b.is_ascii_whitespace() || b.is_ascii_control() || matches!(b, b';' | b'@' | b'#')
+        })
+    {
+        return Err("AUTHORITY_NETWORK_AGENT_ORIGIN must be an HTTP(S) origin".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::validate_network_agent_origin;
+    #[test]
+    fn only_http_origins_are_accepted() {
+        for origin in [
+            "http://127.0.0.1:3002",
+            "https://example.org",
+            "http://[::1]:3002/",
+        ] {
+            assert!(validate_network_agent_origin(origin).is_ok(), "{origin}");
+        }
+        for origin in [
+            "http://localhost\n",
+            "http://localhost;script-src",
+            "http://localhost unsafe",
+            "http://user@localhost",
+            "http://localhost/path",
+            "http://localhost?x",
+            "http://localhost#x",
+            "ws://localhost",
+            "http://",
+        ] {
+            assert!(validate_network_agent_origin(origin).is_err(), "{origin}");
+        }
     }
 }

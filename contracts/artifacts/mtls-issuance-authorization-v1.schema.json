@@ -12,7 +12,7 @@
     "subject_user_id": { "$ref": "#/$defs/identifier" },
     "device_id": { "$ref": "#/$defs/identifier" },
     "target_node_id": { "$ref": "#/$defs/identifier" },
-    "client_spki_sha256": { "type": "string", "pattern": "^SHA256:[A-Za-z0-9_+/=-]+$" },
+    "client_spki_sha256": { "type": "string", "maxLength": 50, "pattern": "^SHA256:[A-Za-z0-9_+/=-]+$" },
     "identity_uri": { "type": "string", "minLength": 10, "maxLength": 512, "pattern": "^spiffe://" },
     "service_audience": { "$ref": "#/$defs/identifier" },
     "policy_id": { "$ref": "#/$defs/identifier" },

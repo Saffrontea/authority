@@ -413,12 +413,7 @@ impl IssuanceAuthorizationV1 {
             }
         }
 
-        if !self.ssh_public_key_fingerprint.starts_with("SHA256:")
-            || self.ssh_public_key_fingerprint.len() <= "SHA256:".len()
-            || !self.ssh_public_key_fingerprint["SHA256:".len()..]
-                .bytes()
-                .all(is_base64_character)
-        {
+        if !valid_sha256_fingerprint(&self.ssh_public_key_fingerprint) {
             return Err(ContractError::InvalidFingerprint);
         }
 
@@ -963,9 +958,11 @@ fn is_base64url_character(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
-fn valid_sha256_fingerprint(value: &str) -> bool {
+/// Rejects fingerprints exceeding the 43-character SHA-256 digest representation.
+pub fn valid_sha256_fingerprint(value: &str) -> bool {
     value.starts_with("SHA256:")
         && value.len() > "SHA256:".len()
+        && value.len() <= "SHA256:".len() + 43
         && value["SHA256:".len()..].bytes().all(is_base64_character)
 }
 

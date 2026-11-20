@@ -944,6 +944,11 @@ async fn issue_access_authorization(
     headers: HeaderMap,
     Json(request): Json<IssueAccessAuthorizationRequest>,
 ) -> Result<Json<AccessAuthorizationResponse>, ApiError> {
+    if !authority_contracts_model::valid_sha256_fingerprint(&request.ssh_public_key_fingerprint)
+        || !authority_contracts_model::valid_sha256_fingerprint(&request.mtls_client_spki_sha256)
+    {
+        return Err(ApiError::bad_request("invalid_key_fingerprint"));
+    }
     let bindings = vec![
         request.device_id.to_string(),
         request.target_node_id.to_string(),
@@ -1043,14 +1048,16 @@ struct RevokeAccessAuthorizationRequest {
     adapter_kinds: Option<Vec<AdapterGrantKindV1>>,
 }
 
-const REVOCABLE_DECISION_QUERY: &str = "SELECT issued.payload, (SELECT MAX((adapter->>'expires_at')::bigint) \
-          FROM outbox.events AS evaluated \
-          CROSS JOIN LATERAL jsonb_array_elements(evaluated.payload->'adapter_grants') AS adapter \
-          WHERE evaluated.aggregate_id = issued.aggregate_id \
-            AND evaluated.event_type = 'policy.decision.evaluated') AS adapter_expires_at \
+// Issued material and its maximum lifetime are both scoped to the authenticated domain.
+const REVOCABLE_DECISION_QUERY: &str = "SELECT issued.payload, \
+          (SELECT MAX(grants.expires_at) FROM policy.issued_ability_grants AS grants \
+           WHERE grants.domain_id = $2::uuid AND grants.decision_id = issued.aggregate_id) AS adapter_expires_at \
          FROM outbox.events AS issued \
          WHERE owner_module = 'policy' AND aggregate_type = 'access_decision' \
-           AND aggregate_id = $1 AND event_type IN ('access.authorization.issued', 'access.tcp_authorization.issued') \
+           AND aggregate_id = $1 \
+           AND COALESCE(payload #>> '{ssh_authorization,authorization,domain_id}', \
+                        payload #>> '{tcp_grant,grant,domain_id}') = $2::text \
+           AND event_type IN ('access.authorization.issued', 'access.tcp_authorization.issued') \
          ORDER BY occurred_at DESC LIMIT 1";
 
 async fn revoke_access_authorization(
@@ -1069,6 +1076,7 @@ async fn revoke_access_authorization(
     let session = authenticated_session(&state, &headers, "access.revoke", &bindings).await?;
     let row = sqlx::query(REVOCABLE_DECISION_QUERY)
         .bind(&decision_id)
+        .bind(state.domain_id())
         .fetch_optional(state.pool())
         .await
         .map_err(ApiError::internal)?
@@ -1263,6 +1271,9 @@ async fn revocation_status(
     Path(decision_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
+    if !valid_contract_identifier(&decision_id) {
+        return Err(ApiError::bad_request("invalid_decision_id"));
+    }
     let session = authenticated_session(
         &state,
         &headers,
@@ -1272,6 +1283,7 @@ async fn revocation_status(
     .await?;
     let source = sqlx::query(REVOCABLE_DECISION_QUERY)
         .bind(&decision_id)
+        .bind(state.domain_id())
         .fetch_optional(state.pool())
         .await
         .map_err(ApiError::internal)?
@@ -1922,10 +1934,12 @@ mod tests {
     async fn revocation_retention_includes_mtls_beyond_transport_expiry() {
         let pool = crate::access_policy::tests::lxc_pool(1).await;
         let mut transaction = pool.begin().await.unwrap();
-        let payload: Value = serde_json::from_str(include_str!(
+        let mut payload: Value = serde_json::from_str(include_str!(
             "../../../contracts/test-vectors/access-authorization-bundle-v1/valid/basic.json"
         ))
         .unwrap();
+        let domain_id = Uuid::new_v4();
+        payload["ssh_authorization"]["authorization"]["domain_id"] = json!(domain_id);
         let transport_expiry = revocable_decision(payload.clone())
             .unwrap_or_else(|_| panic!("fixture must decode"))
             .expires_at;
@@ -1942,11 +1956,33 @@ mod tests {
                 .bind(Uuid::new_v4()).bind(&decision).bind(event).bind(value)
                 .execute(&mut *transaction).await.unwrap();
         }
+        for (domain, expiry) in [
+            (domain_id, mtls_expiry),
+            (Uuid::new_v4(), mtls_expiry + 3600),
+        ] {
+            let subject = Uuid::new_v4();
+            let device = Uuid::new_v4();
+            let target = Uuid::new_v4();
+            let ability = json!({"scope":{"kind":"mtls_credential"},"binding":{"domain_id":domain,"subject_user_id":subject,"device_id":device,"target_node_id":target},"validity":{"not_before":0,"expires_at":expiry}});
+            sqlx::query("INSERT INTO policy.issued_ability_grants(domain_id,subject_user_id,device_id,target_node_id,decision_id,ability_kind,ability,policy_refs,not_before,expires_at) VALUES($1,$2,$3,$4,$5,'mtls_credential',$6,$7,0,$8)")
+                .bind(domain).bind(subject).bind(device).bind(target).bind(&decision).bind(ability).bind(json!([{"policy_id":Uuid::new_v4(),"revision":1}])).bind(expiry)
+                .execute(&mut *transaction).await.unwrap();
+        }
         let row = sqlx::query(REVOCABLE_DECISION_QUERY)
             .bind(&decision)
+            .bind(domain_id)
             .fetch_one(&mut *transaction)
             .await
             .unwrap();
+        assert!(
+            sqlx::query(REVOCABLE_DECISION_QUERY)
+                .bind(&decision)
+                .bind(Uuid::new_v4())
+                .fetch_optional(&mut *transaction)
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(
             row.get::<Option<i64>, _>("adapter_expires_at"),
             Some(mtls_expiry)

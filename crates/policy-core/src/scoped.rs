@@ -821,7 +821,7 @@ fn applicable_ability_rules<'a>(
     requested: &RequestedAccess,
 ) -> Result<Vec<&'a crate::ability_policy::StoredAbilityPolicy>, ScopeError> {
     if snapshot.identity.device_domain_id != request.domain_id
-        || snapshot.identity.device_owner_user_id != request.subject_user_id
+        || snapshot.identity.device_owner_user_id != Some(request.subject_user_id)
     {
         return Err(DenialReason::DeviceMismatch.into());
     }

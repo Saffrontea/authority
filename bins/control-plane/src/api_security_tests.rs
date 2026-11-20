@@ -13,9 +13,9 @@ struct SessionFixture {
 }
 impl SessionFixture {
     async fn new(pool: sqlx::PgPool) -> Self {
-        let domain = Uuid::new_v4();
-        let user = Uuid::new_v4();
-        let device = Uuid::new_v4();
+        Self::for_identity(pool, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).await
+    }
+    async fn for_identity(pool: sqlx::PgPool, domain: Uuid, user: Uuid, device: Uuid) -> Self {
         let signer = OpenSslEd25519Signer::generate("test-device").unwrap();
         let token = generate_session_token().unwrap();
         let digest = session_token_digest(&token).unwrap();
@@ -423,4 +423,110 @@ async fn session_pressure_evicts_only_the_authenticated_users_oldest_sessions() 
     assert_eq!(own, crate::auth_limits::MAX_SESSIONS_PER_USER);
     assert_eq!(other, 1);
     assert_eq!(original, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
+async fn transferred_device_returns_forbidden_and_commits_a_deny_audit() {
+    let pool = crate::access_policy::tests::lxc_pool(3).await;
+    let (live, _) = crate::access_policy::tests::live_tcp_request(&pool).await;
+    let fixture =
+        SessionFixture::for_identity(pool, live.domain_id, live.subject_user_id, live.device_id)
+            .await;
+    let before: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM audit.events")
+        .fetch_one(fixture.state.pool())
+        .await
+        .unwrap();
+    let grants_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.issued_ability_grants WHERE domain_id=$1 AND device_id=$2",
+    )
+    .bind(live.domain_id)
+    .bind(live.device_id)
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    let request = IssueTcpAuthorizationRequest {
+        device_id: live.device_id,
+        target_node_id: live.target_node_id,
+        destination_ports: vec![8080],
+        include_network: false,
+        ttl_seconds: 10,
+        automatic_route: false,
+    };
+    let headers = fixture.headers(
+        "access.authorize_tcp",
+        &tcp_authorization_bindings(&request).unwrap(),
+        "transferred_device_nonce_0123456789",
+        unix_timestamp().unwrap(),
+    );
+    sqlx::query("UPDATE device.devices SET owner_user_id=NULL,owner_kind='domain',owner_domain_id=domain_id WHERE id=$1")
+        .bind(live.device_id).execute(fixture.state.pool()).await.unwrap();
+    let result =
+        issue_tcp_authorization(State(fixture.state.clone()), headers, Json(request)).await;
+    // Restore the live fixture before assertions so a failing regression cannot strand it.
+    sqlx::query("UPDATE device.devices SET owner_user_id=$2,owner_kind='user',owner_domain_id=NULL WHERE id=$1")
+        .bind(live.device_id).bind(live.subject_user_id).execute(fixture.state.pool()).await.unwrap();
+    let audit: Vec<(String,Option<String>)> = sqlx::query_as("SELECT decision,reason FROM audit.events WHERE domain_id=$1 AND actor_id=$2 AND sequence>$3 AND action='access.authorize'")
+        .bind(live.domain_id).bind(live.subject_user_id.to_string()).bind(before).fetch_all(fixture.state.pool()).await.unwrap();
+    let grants_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM policy.issued_ability_grants WHERE domain_id=$1 AND device_id=$2",
+    )
+    .bind(live.domain_id)
+    .bind(live.device_id)
+    .fetch_one(fixture.state.pool())
+    .await
+    .unwrap();
+    fixture.cleanup().await;
+    let error = result.err().expect("a transferred device must be denied");
+    assert_eq!(grants_before, grants_after);
+    assert_eq!(error.status, StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "policy_denied");
+    assert_eq!(
+        audit,
+        vec![("deny".to_owned(), Some("device_mismatch".to_owned()))]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL migrations"]
+async fn malformed_access_identifiers_and_oversized_fingerprints_are_rejected_before_authentication()
+ {
+    let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(1).await).await;
+    for oversized_ssh in [false, true] {
+        let normal = format!("SHA256:{}", "A".repeat(43));
+        let huge = format!("SHA256:{}", "A".repeat(100_000));
+        let request = IssueAccessAuthorizationRequest {
+            device_id: fixture.device,
+            target_node_id: Uuid::new_v4(),
+            ssh_public_key_fingerprint: if oversized_ssh {
+                huge.clone()
+            } else {
+                normal.clone()
+            },
+            mtls_client_spki_sha256: if oversized_ssh { normal } else { huge },
+            wireguard_public_key: "unused".into(),
+            terminal_token_hash: "unused".into(),
+        };
+        let error = issue_access_authorization(
+            State(fixture.state.clone()),
+            HeaderMap::new(),
+            Json(request),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_key_fingerprint");
+    }
+    let error = revocation_status(
+        State(fixture.state.clone()),
+        Path("invalid/id".into()),
+        HeaderMap::new(),
+    )
+    .await
+    .err()
+    .unwrap();
+    fixture.cleanup().await;
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "invalid_decision_id");
 }

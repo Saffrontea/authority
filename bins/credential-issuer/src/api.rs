@@ -34,7 +34,7 @@ pub fn router(state: AppState, browser_origins: Vec<HeaderValue>) -> Router {
         .route("/health", get(health))
         .route("/v1/ssh-certificates", post(issue_ssh_certificate))
         .route("/v1/mtls-certificates", post(issue_mtls_certificate))
-        .route("/v1/revocations", post(revoke_mtls))
+        .route("/v1/revocations", post(acknowledge_mtls_revocation))
         .route("/v1/pki/{ca_id}/crl", get(get_crl))
         .route("/v1/pki/{ca_id}/ocsp", post(post_ocsp))
         .route("/v1/pki/{ca_id}/ocsp/{*request}", get(get_ocsp))
@@ -122,7 +122,7 @@ fn decode_ocsp_request(request: &str) -> Result<Vec<u8>, ApiError> {
         .map_err(|_| ApiError::bad_request("invalid_ocsp_encoding"))
 }
 
-async fn revoke_mtls(
+async fn acknowledge_mtls_revocation(
     State(state): State<AppState>,
     Json(envelope): Json<authority_contracts_model::SignedDecisionRevocationNoticeV2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -146,7 +146,7 @@ async fn revoke_mtls(
         return Err(ApiError::unauthorized("revocation_not_committed"));
     }
     Ok(Json(
-        json!({"decision_id":envelope.notice.decision_id,"sequence":envelope.notice.sequence,"adapter":"mtls.client_certificate"}),
+        json!({"acknowledged":true,"decision_id":envelope.notice.decision_id,"sequence":envelope.notice.sequence,"adapter":"mtls.client_certificate"}),
     ))
 }
 

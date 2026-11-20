@@ -2,7 +2,7 @@
   "artifacts": {
     "artifacts/mtls-issuance-authorization-v1.schema.json": {
       "version": 1,
-      "sha256": "7412c5ed7c50441c661209d77e841cbc0e173dda8f16ba4dad0a103b8e086f02"
+      "sha256": "b813264496596c3343cf9461ed73095a9bf7e3099d808342122d27ad4a6dfdc9"
     },
     "artifacts/signed-decision-revocation-notice-v2.schema.json": {
       "version": 2,
@@ -26,7 +26,7 @@
     },
     "artifacts/issuance-authorization-v1.schema.json": {
       "version": 1,
-      "sha256": "6cbc0ba82281028a4aabd97286ce9dfd77794263df234f84cafeb3cea08e354f"
+      "sha256": "dd8a79449e0d1eb2e2b78387720bbcd21ab7d36e7a266b944f15ff6d2ae30b19"
     },
     "artifacts/signed-issuance-authorization-v1.schema.json": {
       "version": 1,

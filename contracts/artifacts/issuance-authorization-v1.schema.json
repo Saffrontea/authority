@@ -18,6 +18,7 @@
     "target_node_id": { "$ref": "#/$defs/identifier" },
     "ssh_public_key_fingerprint": {
       "type": "string",
+      "maxLength": 50,
       "pattern": "^SHA256:[A-Za-z0-9+/=_-]+$"
     },
     "principals": {

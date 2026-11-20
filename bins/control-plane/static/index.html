@@ -369,7 +369,7 @@
 
     window.authorityReadRevocationStatus = async function (decisionId) {
       const token = sessionStorage.getItem('authority-session');
-      return getJson(`/v1/access-authorizations/${decisionId}/revocations/status`,
+      return getJson(`/v1/access-authorizations/${encodeURIComponent(decisionId)}/revocations/status`,
         await deviceProofHeaders(token, 'access.revoke_status', [decisionId]));
     };
 
@@ -402,7 +402,7 @@
 
     window.authorityRevokeDecision = async function (decisionId, adapterKinds = null) {
       const prepared = await window.authorityPrepareRevocation(decisionId, 'user_requested', adapterKinds);
-      return api(`/v1/access-authorizations/${decisionId}/revocations`, prepared.body, prepared.headers);
+      return api(`/v1/access-authorizations/${encodeURIComponent(decisionId)}/revocations`, prepared.body, prepared.headers);
     };
 
     async function getJson(path, headers = {}) {

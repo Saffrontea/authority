@@ -62,6 +62,18 @@ OCSP responses come from the shared certificate ledger. See
 [mTLS authority and revocation](docs/mtls-revocation.md) for configuration,
 completion semantics and replication boundaries.
 The UI reports persistence, not an acknowledgement from the enforcement agent.
+The Credential Issuer's `POST /v1/revocations` acknowledges an exact, already
+committed notice (`acknowledged: true`); certificate revocation itself is committed
+atomically by the Control Plane in the shared ledger. The issuer never performs a
+second revocation mutation.
+
+The mTLS CA key and certificate must either both exist or both be absent at
+startup. Partial state is an error; restarting never replaces an existing CA key.
+New private keys are created exclusively with mode `0600`.
+`AUTHORITY_NETWORK_AGENT_ORIGIN` must be an HTTP(S) origin without credentials,
+paths, queries, fragments or CSP directives. Invalid values fail startup.
+SSH and SPKI fingerprints are bounded to 50 bytes including the `SHA256:` prefix;
+oversized input is rejected before access authorization and persistence.
 
 Manual reconciliation can also read
 `GET /v1/revocations?target_node_id=...&after=...` (Pull) and submit the same

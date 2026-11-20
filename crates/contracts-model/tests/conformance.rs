@@ -354,3 +354,27 @@ fn tcp_grant_vectors_conform_and_preserve_preimages() {
         );
     }
 }
+
+#[test]
+fn oversized_fingerprints_are_rejected_before_signing() {
+    for length in [44, 100_000] {
+        let fingerprint = format!("SHA256:{}", "A".repeat(length));
+        let mut ssh: IssuanceAuthorizationV1 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/issuance-authorization-v1/valid/basic.json"
+        ))
+        .unwrap();
+        ssh.ssh_public_key_fingerprint = fingerprint.clone();
+        assert!(ssh.validate().is_err());
+        assert!(ssh.signing_preimage().is_err());
+        let mut mtls: MtlsIssuanceAuthorizationV1 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/mtls-issuance-authorization-v1/valid/basic.json"
+        ))
+        .unwrap();
+        mtls.client_spki_sha256 = fingerprint;
+        assert!(mtls.validate().is_err());
+        assert!(mtls.signing_preimage().is_err());
+    }
+    assert!(authority_contracts_model::valid_sha256_fingerprint(
+        &format!("SHA256:{}", "A".repeat(43))
+    ));
+}

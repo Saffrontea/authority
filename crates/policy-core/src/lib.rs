@@ -145,7 +145,7 @@ pub struct AccessRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityFacts {
     pub device_domain_id: Uuid,
-    pub device_owner_user_id: Uuid,
+    pub device_owner_user_id: Option<Uuid>,
     pub device_active: bool,
     pub target_active: bool,
 }
@@ -293,7 +293,7 @@ pub fn evaluate(
     snapshot: &PolicySnapshot,
 ) -> Result<AccessDecision, DenialReason> {
     if snapshot.identity.device_domain_id != request.domain_id
-        || snapshot.identity.device_owner_user_id != request.subject_user_id
+        || snapshot.identity.device_owner_user_id != Some(request.subject_user_id)
     {
         return Err(DenialReason::DeviceMismatch);
     }
@@ -384,6 +384,16 @@ fn applicable(request: &AccessRequest, rule: &PolicyRule) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_owned_devices_are_denied_as_identity_mismatches() {
+        let (request, mut snapshot) = fixture(AccessIntent::ssh(Route::Direct));
+        snapshot.identity.device_owner_user_id = None;
+        assert_eq!(
+            evaluate(&request, &snapshot),
+            Err(DenialReason::DeviceMismatch)
+        );
+    }
 
     #[test]
     fn plans_direct_ssh_without_mesh_capabilities() {
@@ -490,7 +500,7 @@ mod tests {
             PolicySnapshot {
                 identity: IdentityFacts {
                     device_domain_id: domain_id,
-                    device_owner_user_id: subject_user_id,
+                    device_owner_user_id: Some(subject_user_id),
                     device_active: true,
                     target_active: true,
                 },

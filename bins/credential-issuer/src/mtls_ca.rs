@@ -1,4 +1,4 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 
 use openssl::{
     asn1::{Asn1Integer, Asn1Time},
@@ -22,7 +22,10 @@ pub fn load_or_generate(
     key_path: &Path,
     cert_path: &Path,
 ) -> Result<MtlsCa, Box<dyn std::error::Error>> {
-    if key_path.exists() && cert_path.exists() {
+    if key_path.try_exists()? != cert_path.try_exists()? {
+        return Err("mTLS CA key and certificate must both exist or both be absent".into());
+    }
+    if key_path.try_exists()? {
         let key = PKey::private_key_from_pem(&fs::read(key_path)?)?;
         let certificate = X509::from_pem(&fs::read(cert_path)?)?;
         if !certificate.public_key()?.public_eq(&key) {
@@ -65,8 +68,59 @@ pub fn load_or_generate(
     )?;
     builder.sign(&key, MessageDigest::sha256())?;
     let certificate = builder.build();
-    fs::write(key_path, key.private_key_to_pem_pkcs8()?)?;
-    fs::set_permissions(key_path, fs::Permissions::from_mode(0o600))?;
-    fs::write(cert_path, certificate.to_pem()?)?;
+    let mut key_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(key_path)?;
+    key_file.write_all(&key.private_key_to_pem_pkcs8()?)?;
+    key_file.sync_all()?;
+    let mut cert_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(cert_path)?;
+    cert_file.write_all(&certificate.to_pem()?)?;
+    cert_file.sync_all()?;
     Ok(MtlsCa { key, certificate })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn partial_ca_state_is_rejected_without_touching_existing_material() {
+        for key_exists in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let key = directory.path().join("ca.key");
+            let certificate = directory.path().join("ca.pem");
+            let existing = if key_exists { &key } else { &certificate };
+            fs::write(existing, b"must not be overwritten").unwrap();
+            assert!(load_or_generate(&key, &certificate).is_err());
+            assert_eq!(fs::read(existing).unwrap(), b"must not be overwritten");
+            assert_eq!(key.exists(), key_exists);
+            assert_eq!(certificate.exists(), !key_exists);
+        }
+    }
+
+    #[test]
+    fn generated_key_is_private_and_restart_preserves_the_ca() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = directory.path().join("ca.key");
+        let certificate = directory.path().join("ca.pem");
+        let generated = load_or_generate(&key, &certificate).unwrap();
+        assert_eq!(
+            fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let original = fs::read(&key).unwrap();
+        let loaded = load_or_generate(&key, &certificate).unwrap();
+        assert_eq!(fs::read(&key).unwrap(), original);
+        assert_eq!(
+            generated.certificate.to_der().unwrap(),
+            loaded.certificate.to_der().unwrap()
+        );
+    }
 }

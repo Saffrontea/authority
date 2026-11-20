@@ -50,7 +50,7 @@ fn try_authorize_selected(
     let snapshot = PolicySnapshot {
         identity: IdentityFacts {
             device_domain_id: request.domain_id,
-            device_owner_user_id: request.subject_user_id,
+            device_owner_user_id: Some(request.subject_user_id),
             device_active: true,
             target_active: true,
         },

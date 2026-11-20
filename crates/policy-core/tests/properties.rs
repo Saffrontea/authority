@@ -77,7 +77,7 @@ fn request_and_identity(access_intent: AccessIntent) -> (AccessRequest, Identity
         },
         IdentityFacts {
             device_domain_id: domain_id,
-            device_owner_user_id: subject_user_id,
+            device_owner_user_id: Some(subject_user_id),
             device_active: true,
             target_active: true,
         },
