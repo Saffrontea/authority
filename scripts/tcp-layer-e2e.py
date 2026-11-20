@@ -49,6 +49,11 @@ def revoke(decision, kinds):
                    [decision, kinds])['value']
 
 
+def pull(target, after):
+    return browser('window.authorityPullRevocations(arguments[0],arguments[1])'
+                   '.then(value=>done({value})).catch(error=>done({error:error.message}));', [target, after])['value']
+
+
 def connect(port, timeout=1):
     stream = socket.create_connection((client, port), timeout=timeout)
     stream.settimeout(timeout)
@@ -235,4 +240,4 @@ trace_spec = importlib.util.spec_from_file_location(
     'lifecycle_trace_e2e', Path(__file__).with_name('lifecycle-trace-e2e.py'))
 trace_module = importlib.util.module_from_spec(trace_spec)
 trace_spec.loader.exec_module(trace_module)
-trace_module.run(issue, revoke, http, wait, allowed, agent, control, probe)
+trace_module.run(issue, revoke, http, wait, allowed, agent, control, probe, pull)

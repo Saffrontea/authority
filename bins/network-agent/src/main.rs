@@ -441,35 +441,35 @@ async fn apply_grant(
         return Err(ApiError::unavailable("peer_capacity_reached"));
     }
     let nonce = envelope.grant.nonce.clone();
-    if !state
+    let expires_at = envelope.grant.expires_at;
+    let decision_id = nonce.clone();
+    let applied = state
         .0
         .replay_ledger
         .lock()
         .map_err(ApiError::internal)?
-        .consume(&nonce, envelope.grant.expires_at, now)
-        .map_err(ApiError::internal)?
-    {
+        .consume_with(&nonce, expires_at, now, || {
+            run_wg(&[
+                "set",
+                &state.0.interface,
+                "peer",
+                &peer,
+                "allowed-ips",
+                &allowed_ip,
+            ])?;
+            policy.active_peers.insert(
+                peer.clone(),
+                ActivePeer {
+                    decision_id: decision_id.clone(),
+                    expires_at,
+                },
+            );
+            Ok(())
+        })
+        .map_err(ApiError::internal)?;
+    if applied.is_none() {
         return Err(ApiError::conflict("network_grant_replayed"));
     }
-    run_wg(&[
-        "set",
-        &state.0.interface,
-        "peer",
-        &peer,
-        "allowed-ips",
-        &allowed_ip,
-    ])
-    .map_err(ApiError::internal)?;
-
-    let expires_at = envelope.grant.expires_at;
-    let decision_id = envelope.grant.nonce.clone();
-    policy.active_peers.insert(
-        peer.clone(),
-        ActivePeer {
-            decision_id: decision_id.clone(),
-            expires_at,
-        },
-    );
     drop(policy);
     let interface = state.0.interface.clone();
     let expiry_state = state.clone();
@@ -728,27 +728,24 @@ async fn apply_tcp_grant(
     {
         return Err(ApiError::conflict("tcp_grant_revoked"));
     }
-    if !state
+    let response = json!({ "decision_id": envelope.grant.decision_id, "expires_at": envelope.grant.expires_at,
+        "destination_ports": envelope.grant.destination_ports });
+    let decision_nonce = format!("tcp_{}", envelope.grant.decision_id);
+    let tcp = policy
+        .tcp
+        .as_mut()
+        .ok_or_else(|| ApiError::unavailable("tcp_not_configured"))?;
+    let applied = state
         .0
         .replay_ledger
         .lock()
         .map_err(ApiError::internal)?
-        .consume(
-            &format!("tcp_{}", envelope.grant.decision_id),
-            envelope.grant.expires_at,
-            now,
-        )
-        .map_err(ApiError::internal)?
-    {
+        .consume_with(&decision_nonce, envelope.grant.expires_at, now, || {
+            tcp.apply(envelope.grant, now)
+        })
+        .map_err(ApiError::internal)?;
+    if applied.is_none() {
         return Err(ApiError::conflict("tcp_grant_replayed"));
     }
-    let response = json!({ "decision_id": envelope.grant.decision_id, "expires_at": envelope.grant.expires_at,
-        "destination_ports": envelope.grant.destination_ports });
-    policy
-        .tcp
-        .as_mut()
-        .ok_or_else(|| ApiError::unavailable("tcp_not_configured"))?
-        .apply(envelope.grant, now)
-        .map_err(ApiError::internal)?;
     Ok(Json(response))
 }

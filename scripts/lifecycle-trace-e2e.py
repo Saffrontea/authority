@@ -80,7 +80,7 @@ class Model:
             for decision, kind in self.active)
 
 
-def run(issue, revoke, http, wait, allowed, agent, control, probe):
+def run(issue, revoke, http, wait, allowed, agent, control, probe, pull):
     proxy = os.environ['AUTHORITY_E2E_DELIVERY_PROXY']
     seeds = [int(value, 0) for value in os.environ.get('AUTHORITY_E2E_TRACE_SEEDS', '0,7,42').split(',')]
     assert seeds, 'at least one generated trace is required'
@@ -168,7 +168,7 @@ def run(issue, revoke, http, wait, allowed, agent, control, probe):
             found = {}
             cursor = 0
             while True:
-                feed = get(f'{control}/v1/revocations?target_node_id={target}&after={cursor}')
+                feed = pull(target, cursor)
                 sequences = [value['notice']['sequence'] for value in feed['notices']]
                 assert sequences == sorted(set(sequences)) and all(value > cursor for value in sequences)
                 for value in feed['notices']:
@@ -354,8 +354,21 @@ def run_timed_fault_trace(seed, traces, issue, revoke, http, wait, allowed, agen
     http(f'{proxy}/__e2e/delivery', {'blocked': True})
     try:
         lease = issue_named('lease', [port], TRACE_TTL_SECONDS, True)
+        # A failed kernel install must leave this exact signed grant retryable.
+        task('wg-fail')
+        try:
+            failed = http(f'{agent}/v1/network-grants', lease['network_grant'], 500)
+            assert failed['error'] == 'internal_error'
+        finally:
+            task('wg-restore')
         apply('lease')
         subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+        task('nft-fail')
+        try:
+            failed = http(f'{agent}/v1/tcp-grants', lease['tcp_grant'], 500)
+            assert failed['error'] == 'internal_error'
+        finally:
+            task('nft-restore')
         apply('lease', 'tcp.port')
         wait(lambda: allowed(2223 if port == 8080 else 2224))
         observe()

@@ -30,6 +30,25 @@ fi
 rm -f /run/authority-e2e-wg-cursor
 CONTAINER
     ;;
+  nft-fail)
+    lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
+systemctl is-active --quiet authority-network-agent.service
+mode_file=/run/authority-e2e-nft-mode
+if [ ! -f "$mode_file" ]; then stat -c '%a' /usr/sbin/nft > "$mode_file"; fi
+chmod a-x /usr/sbin/nft
+CONTAINER
+    ;;
+  nft-restore)
+    lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
+mode_file=/run/authority-e2e-nft-mode
+if [ -f "$mode_file" ]; then
+  mode=$(cat "$mode_file")
+  case "$mode" in *[!0-7]*|'') exit 1 ;; esac
+  chmod "$mode" /usr/sbin/nft
+  rm -f "$mode_file"
+fi
+CONTAINER
+    ;;
   peer-present)
     lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
 peers=$(wg show wg0 peers)
@@ -83,5 +102,5 @@ echo 'receiver did not automatically recover from SIGKILL' >&2
 exit 1
 CONTAINER
     ;;
-  *) echo 'expected wg-fail, wg-restore, wg-expiry-observed, peer-present, ledgers-compacted, or crash' >&2; exit 2 ;;
+  *) echo 'expected nft-fail, nft-restore, wg-fail, wg-restore, wg-expiry-observed, peer-present, ledgers-compacted, or crash' >&2; exit 2 ;;
 esac

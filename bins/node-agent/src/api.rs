@@ -1,4 +1,5 @@
 use authority_contracts_model::protocol::NODE_AGENT_AUDIENCE;
+use authority_device_auth_core::{decode_base64url, encode_base64url};
 use std::{
     fs,
     net::IpAddr,
@@ -75,7 +76,7 @@ async fn open_ssh_terminal(
     let token = protocol
         .strip_prefix("authority.")
         .ok_or_else(|| ApiError::forbidden("invalid_terminal_capability"))?;
-    if token.len() != 43 || !token.bytes().all(is_base64url_character) {
+    if token.len() != 43 || decode_base64url(token).is_none_or(|bytes| bytes.len() != 32) {
         return Err(ApiError::forbidden("invalid_terminal_capability"));
     }
     let token_hash = encode_base64url(&sha256(token.as_bytes()));
@@ -348,32 +349,6 @@ fn unix_timestamp() -> Result<i64, ApiError> {
         .map_err(ApiError::internal)?
         .as_secs();
     i64::try_from(seconds).map_err(ApiError::internal)
-}
-
-fn encode_base64url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        output.push(char::from(ALPHABET[usize::from(chunk[0] >> 2)]));
-        output.push(char::from(
-            ALPHABET[usize::from(((chunk[0] & 3) << 4) | (second >> 4))],
-        ));
-        if chunk.len() > 1 {
-            output.push(char::from(
-                ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))],
-            ));
-        }
-        if chunk.len() > 2 {
-            output.push(char::from(ALPHABET[usize::from(third & 63)]));
-        }
-    }
-    output
-}
-
-fn is_base64url_character(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
 }
 
 #[derive(Debug)]

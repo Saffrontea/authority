@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 authority-contracts-model.workspace = true
+authority-device-auth-core.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-issuer-core.workspace = true
 axum.workspace = true

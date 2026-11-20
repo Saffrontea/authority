@@ -25,7 +25,7 @@ use x509_ocsp::{
     ResponseData, RevokedInfo, SingleResponse,
 };
 type Error = Box<dyn std::error::Error + Send + Sync>;
-const VALIDITY: i64 = 30;
+pub const STATUS_VALIDITY_SECONDS: i64 = 30;
 
 fn time(seconds: i64) -> Result<OcspGeneralizedTime, Error> {
     Ok((UNIX_EPOCH + Duration::from_secs(u64::try_from(seconds)?)).try_into()?)
@@ -49,7 +49,7 @@ pub async fn crl(
     let mut crl = X509CrlBuilder::new()?;
     crl.set_issuer_name(ca.subject_name())?;
     crl.set_last_update(Asn1Time::from_unix(now)?.as_ref())?;
-    crl.set_next_update(Asn1Time::from_unix(now + VALIDITY)?.as_ref())?;
+    crl.set_next_update(Asn1Time::from_unix(now + STATUS_VALIDITY_SECONDS)?.as_ref())?;
     let dummy = X509::builder()?;
     crl.append_extension(
         AuthorityKeyIdentifier::new()
@@ -156,7 +156,7 @@ pub async fn ocsp(
             cert_id: entry.req_cert,
             cert_status,
             this_update: time(now)?,
-            next_update: Some(time(now + VALIDITY)?),
+            next_update: Some(time(now + STATUS_VALIDITY_SECONDS)?),
             single_extensions: None,
         });
     }

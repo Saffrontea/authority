@@ -65,7 +65,15 @@ The UI reports persistence, not an acknowledgement from the enforcement agent.
 
 Manual reconciliation can also read
 `GET /v1/revocations?target_node_id=...&after=...` (Pull) and submit the same
-signed envelope to the agent. Applying it twice is intentionally idempotent.
+signed envelope to the agent. Pull requires a session and a device proof for
+`revocations.read`, binding the target UUID and cursor. It returns only notices
+for that session's user and device; anonymous enumeration is rejected. The browser
+helper `authorityPullRevocations(targetNodeId, after)` supplies these proofs.
+Applying a notice twice is intentionally idempotent.
+Kernel grant application reserves its replay nonce durably before mutation. A
+reported kernel failure releases that reservation durably, allowing the same
+grant to be retried; process crashes retain the reservation and fail closed.
+Successful grants remain replay-protected across restarts.
 The PoC UI exposes **Revoke current access**, and `mise run poc:e2e` proves
 Push removal, Pull reconciliation, late-Grant rejection, and SSH-over-WireGuard
 denial while the SSH certificate itself is still valid. It also issues a

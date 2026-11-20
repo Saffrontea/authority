@@ -1,3 +1,5 @@
+mod crl_cache;
+
 use authority_contracts_model::SignedDecisionRevocationNoticeV2;
 use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
 use authority_mtls_core::{certificate_lifetime, client_identity, wait_closed};
@@ -21,6 +23,7 @@ use tracing::{info, warn};
 
 #[derive(Clone)]
 struct Service {
+    crl_cache: Arc<crl_cache::RefreshCache<Arc<SslAcceptor>>>,
     connections: Connections,
     database: AuthorityDb,
     lease: tokio::sync::watch::Receiver<Option<tokio::time::Instant>>,
@@ -44,6 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "AUTHORITY_MTLS_CA_CERTIFICATE_FILE",
     )?)?)?;
     let service = Service {
+        crl_cache: Arc::new(crl_cache::RefreshCache::default()),
         connections: Connections::default(),
         database,
         lease,
@@ -71,19 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         subscribe(subscriber, instance, lease_sender).await;
     });
-    let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())?;
-    acceptor.set_private_key_file(
-        required("AUTHORITY_MTLS_SERVICE_KEY_FILE")?,
-        SslFiletype::PEM,
-    )?;
-    acceptor.set_certificate_chain_file(required("AUTHORITY_MTLS_SERVICE_CERTIFICATE_FILE")?)?;
-    acceptor.check_private_key()?;
-    acceptor.set_ca_file(required("AUTHORITY_MTLS_CA_CERTIFICATE_FILE")?)?;
-    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
-    acceptor.set_options(SslOptions::NO_TICKET);
-    acceptor.set_session_cache_mode(SslSessionCacheMode::OFF);
-    acceptor.set_num_tickets(0)?;
-    let acceptor = Arc::new(acceptor.build());
+    let _ = tls_acceptor(None)?;
     let tls = TcpListener::bind(required("AUTHORITY_MTLS_SERVICE_TLS_BIND")?).await?;
     let listener = TcpListener::bind(required("AUTHORITY_MTLS_SERVICE_BIND")?).await?;
     let tls_service = service.clone();
@@ -100,11 +92,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let Ok(permit) = slots.clone().try_acquire_owned() else {
                 continue;
             };
-            let acceptor = acceptor.clone();
             let service = tls_service.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                if let Err(cause) = connection(stream, acceptor, service).await {
+                if let Err(cause) = connection(stream, service).await {
                     info!(%cause, "TLS connection closed");
                 }
             });
@@ -120,6 +111,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     Ok(())
+}
+
+fn tls_acceptor(
+    store: Option<openssl::x509::store::X509Store>,
+) -> Result<Arc<SslAcceptor>, String> {
+    let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
+        .map_err(|error| error.to_string())?;
+    acceptor
+        .set_private_key_file(
+            required("AUTHORITY_MTLS_SERVICE_KEY_FILE")?,
+            SslFiletype::PEM,
+        )
+        .map_err(|error| error.to_string())?;
+    acceptor
+        .set_certificate_chain_file(required("AUTHORITY_MTLS_SERVICE_CERTIFICATE_FILE")?)
+        .map_err(|error| error.to_string())?;
+    acceptor
+        .check_private_key()
+        .map_err(|error| error.to_string())?;
+    acceptor
+        .set_ca_file(required("AUTHORITY_MTLS_CA_CERTIFICATE_FILE")?)
+        .map_err(|error| error.to_string())?;
+    acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    acceptor.set_options(SslOptions::NO_TICKET);
+    acceptor.set_session_cache_mode(SslSessionCacheMode::OFF);
+    acceptor
+        .set_num_tickets(0)
+        .map_err(|error| error.to_string())?;
+    if let Some(store) = store {
+        acceptor.set_cert_store(store);
+    }
+    Ok(Arc::new(acceptor.build()))
 }
 
 async fn health(State(state): State<Service>) -> StatusCode {
@@ -180,15 +203,9 @@ async fn revoke(
     ))
 }
 
-async fn connection(
-    tcp: TcpStream,
-    acceptor: Arc<SslAcceptor>,
-    state: Service,
-) -> Result<(), String> {
-    let store = crl_store(&state).await?;
-    let mut ssl = Ssl::new(acceptor.context()).map_err(|e| e.to_string())?;
-    ssl.set_verify_cert_store(store)
-        .map_err(|e| e.to_string())?;
+async fn connection(tcp: TcpStream, state: Service) -> Result<(), String> {
+    let acceptor = crl_acceptor(&state).await?;
+    let ssl = Ssl::new(acceptor.context()).map_err(|e| e.to_string())?;
     let mut tls = SslStream::new(ssl, tcp).map_err(|e| e.to_string())?;
     tokio::time::timeout(Duration::from_secs(5), Pin::new(&mut tls).accept())
         .await
@@ -330,57 +347,63 @@ fn required(name: &str) -> Result<String, String> {
 
 // A derived CRL is never authoritative local state. OpenSSL checks its CA
 // signature and thisUpdate/nextUpdate while verifying the client chain.
-async fn crl_store(state: &Service) -> Result<openssl::x509::store::X509Store, String> {
-    use openssl::x509::{
-        store::{X509Lookup, X509StoreBuilder},
-        verify::X509VerifyFlags,
-    };
-    use std::io::Write;
-    struct Remove(std::path::PathBuf);
-    impl Drop for Remove {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-    let url = format!(
-        "{}/v1/pki/{}/crl",
-        state.pki_origin.trim_end_matches('/'),
-        state.ca_id
-    );
-    let mut response = state
-        .client
-        .get(url)
-        .send()
+async fn crl_acceptor(state: &Service) -> Result<Arc<SslAcceptor>, String> {
+    state
+        .crl_cache
+        .get_or_refresh(|| async {
+            use openssl::x509::{
+                store::{X509Lookup, X509StoreBuilder},
+                verify::X509VerifyFlags,
+            };
+            use std::io::Write;
+            struct Remove(std::path::PathBuf);
+            impl Drop for Remove {
+                fn drop(&mut self) {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+            let url = format!(
+                "{}/v1/pki/{}/crl",
+                state.pki_origin.trim_end_matches('/'),
+                state.ca_id
+            );
+            let mut response = state
+                .client
+                .get(url)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?
+                .error_for_status()
+                .map_err(|e| e.to_string())?;
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+                if bytes.len() + chunk.len() > 1024 * 1024 {
+                    return Err("CRL exceeds size limit".into());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let deadline = crl_cache::validated_deadline(&bytes, &state.ca)?;
+            let path = std::env::temp_dir().join(format!("authority-crl-{}", uuid::Uuid::new_v4()));
+            let _remove = Remove(path.clone());
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|e| e.to_string())?;
+            file.write_all(&bytes).map_err(|e| e.to_string())?;
+            let mut store = X509StoreBuilder::new().map_err(|e| e.to_string())?;
+            store
+                .add_cert(state.ca.clone())
+                .map_err(|e| e.to_string())?;
+            store
+                .add_lookup(X509Lookup::file())
+                .map_err(|e| e.to_string())?
+                .load_crl_file(&path, SslFiletype::ASN1)
+                .map_err(|e| e.to_string())?;
+            store
+                .set_flags(X509VerifyFlags::CRL_CHECK)
+                .map_err(|e| e.to_string())?;
+            Ok((tls_acceptor(Some(store.build()))?, deadline))
+        })
         .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
-        if bytes.len() + chunk.len() > 1024 * 1024 {
-            return Err("CRL exceeds size limit".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let path = std::env::temp_dir().join(format!("authority-crl-{}", uuid::Uuid::new_v4()));
-    let _remove = Remove(path.clone());
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
-    let mut store = X509StoreBuilder::new().map_err(|e| e.to_string())?;
-    store
-        .add_cert(state.ca.clone())
-        .map_err(|e| e.to_string())?;
-    store
-        .add_lookup(X509Lookup::file())
-        .map_err(|e| e.to_string())?
-        .load_crl_file(&path, SslFiletype::ASN1)
-        .map_err(|e| e.to_string())?;
-    store
-        .set_flags(X509VerifyFlags::CRL_CHECK)
-        .map_err(|e| e.to_string())?;
-    Ok(store.build())
 }

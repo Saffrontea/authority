@@ -361,6 +361,12 @@
       return authorization.network_grant;
     };
 
+    window.authorityPullRevocations = async function (targetNodeId, after = 0) {
+      const token = sessionStorage.getItem('authority-session');
+      return getJson(`/v1/revocations?target_node_id=${encodeURIComponent(targetNodeId)}&after=${after}`,
+        await deviceProofHeaders(token, 'revocations.read', [targetNodeId, String(after)]));
+    };
+
     window.authorityReadRevocationStatus = async function (decisionId) {
       const token = sessionStorage.getItem('authority-session');
       return getJson(`/v1/access-authorizations/${decisionId}/revocations/status`,

@@ -92,6 +92,37 @@ impl ReplayLedger {
         self.entries.get(nonce).is_some_and(|expiry| *expiry > now)
     }
 
+    /// Persist a reservation before a serialized, retry-safe operation. Failed
+    /// operations release it durably; crashes keep it consumed (fail closed).
+    /// The caller must serialize this with the operation's other state changes.
+    /// # Errors
+    /// Rejects invalid input, storage errors and operation failures. A rollback
+    /// failure retains the in-memory reservation and requires operator recovery.
+    pub fn consume_with<T>(
+        &mut self,
+        nonce: &str,
+        expires_at: i64,
+        now: i64,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        if !self.consume(nonce, expires_at, now)? {
+            return Ok(None);
+        }
+        match operation() {
+            Ok(result) => Ok(Some(result)),
+            Err(cause) => {
+                self.entries.remove(nonce);
+                if let Err(rollback) = self.compact() {
+                    self.entries.insert(nonce.to_owned(), expires_at);
+                    return Err(format!(
+                        "{cause}; replay reservation rollback failed: {rollback}"
+                    ));
+                }
+                Err(cause)
+            }
+        }
+    }
+
     fn compact(&mut self) -> Result<(), String> {
         let temporary = self.path.with_extension("tmp");
         let mut file = secure_truncate(&temporary)?;
@@ -150,6 +181,41 @@ fn sync_parent(path: &Path) -> Result<(), String> {
 mod tests {
     use super::ReplayLedger;
     use std::{fs, time::SystemTime};
+
+    #[test]
+    fn failed_apply_can_retry_and_success_remains_consumed_after_restart() {
+        let directory = std::env::temp_dir().join(format!(
+            "authority-retry-{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("ledger");
+        let mut ledger = ReplayLedger::open(&path, 100).unwrap();
+        assert!(
+            ledger
+                .consume_with::<()>("grant", 200, 100, || Err("kernel unavailable".into()))
+                .is_err()
+        );
+        drop(ledger);
+        let mut ledger = ReplayLedger::open(&path, 101).unwrap();
+        assert_eq!(
+            ledger.consume_with("grant", 200, 101, || Ok(7)).unwrap(),
+            Some(7)
+        );
+        drop(ledger);
+        let mut ledger = ReplayLedger::open(&path, 102).unwrap();
+        assert_eq!(
+            ledger
+                .consume_with("grant", 200, 102, || -> Result<i32, String> {
+                    panic!("replay must not run")
+                })
+                .unwrap(),
+            None
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn replay_remains_rejected_after_restart_and_expires() {

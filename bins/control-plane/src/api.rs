@@ -53,6 +53,7 @@ use crate::{
 const CHALLENGE_TTL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_mins(15);
 const MAX_SESSIONS: usize = 256;
+const DEVICE_PROOF_SKEW_SECONDS: i64 = 30;
 const MAX_SESSION_NONCES: usize = 1024;
 const MAX_PENDING_CHALLENGES: usize = 256;
 
@@ -249,7 +250,13 @@ async fn create_demo_access(
     .fetch_one(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
-    let client_mesh_address = allocate_mesh_address(&mut transaction, "device", device_id).await?;
+    let client_mesh_address = allocate_mesh_address(
+        &mut transaction,
+        "device",
+        device_id,
+        state.target_mesh_address(),
+    )
+    .await?;
     sqlx::query("UPDATE device.devices SET mesh_address = $2::inet WHERE id = $1")
         .bind(device_id)
         .bind(&client_mesh_address)
@@ -359,6 +366,7 @@ async fn allocate_mesh_address(
     transaction: &mut Transaction<'_, Postgres>,
     owner_kind: &str,
     owner_id: Uuid,
+    reserved_target: &str,
 ) -> Result<String, ApiError> {
     sqlx::query("SELECT pg_advisory_xact_lock(617284901)")
         .execute(&mut **transaction)
@@ -383,7 +391,7 @@ async fn allocate_mesh_address(
              SELECT ('10.77.0.' || value)::inet AS address \
              FROM generate_series(1, 254) AS value \
          ) AS candidate \
-         WHERE NOT EXISTS ( \
+         WHERE candidate.address <> $3::inet AND NOT EXISTS ( \
              SELECT 1 FROM device.mesh_addresses allocated \
              WHERE allocated.address = candidate.address \
          ) \
@@ -393,6 +401,7 @@ async fn allocate_mesh_address(
     )
     .bind(owner_kind)
     .bind(owner_id)
+    .bind(reserved_target)
     .fetch_one(&mut **transaction)
     .await
     .map_err(ApiError::internal)
@@ -829,7 +838,7 @@ async fn authenticated_session(
     let timestamp_value = timestamp
         .parse::<i64>()
         .map_err(|_| ApiError::unauthorized("invalid_device_proof"))?;
-    if unix_timestamp()?.abs_diff(timestamp_value) > 30 {
+    if unix_timestamp()?.abs_diff(timestamp_value) > DEVICE_PROOF_SKEW_SECONDS.unsigned_abs() {
         return Err(ApiError::unauthorized("stale_device_proof"));
     }
     let nonce = required_header(headers, "x-authority-nonce")?;
@@ -866,6 +875,22 @@ async fn authenticated_session(
     {
         return Err(ApiError::unauthorized("invalid_device_proof"));
     }
+    // Recheck after the session lock: waiting must not extend a signed proof.
+    let now = unix_timestamp()?;
+    if now.abs_diff(timestamp_value) > DEVICE_PROOF_SKEW_SECONDS.unsigned_abs() {
+        return Err(ApiError::unauthorized("stale_device_proof"));
+    }
+    let proof_expires_at = timestamp_value
+        .checked_add(DEVICE_PROOF_SKEW_SECONDS)
+        .ok_or_else(|| ApiError::unauthorized("invalid_device_proof"))?;
+    sqlx::query(
+        "DELETE FROM identity.session_nonces WHERE token_digest=$1 AND proof_expires_at < $2",
+    )
+    .bind(token_digest.as_slice())
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .map_err(ApiError::internal)?;
     let count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM identity.session_nonces WHERE token_digest=$1")
             .bind(token_digest.as_slice())
@@ -873,10 +898,13 @@ async fn authenticated_session(
             .await
             .map_err(ApiError::internal)?;
     if count >= i64::try_from(MAX_SESSION_NONCES).map_err(ApiError::internal)? {
-        return Err(ApiError::unauthorized("session_proof_capacity_reached"));
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "session_proof_capacity_reached",
+        });
     }
-    let inserted = sqlx::query("INSERT INTO identity.session_nonces(token_digest,nonce) VALUES($1,$2) ON CONFLICT DO NOTHING")
-        .bind(token_digest.as_slice()).bind(nonce).execute(&mut *transaction).await.map_err(ApiError::internal)?.rows_affected();
+    let inserted = sqlx::query("INSERT INTO identity.session_nonces(token_digest,nonce,proof_expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+        .bind(token_digest.as_slice()).bind(nonce).bind(proof_expires_at).execute(&mut *transaction).await.map_err(ApiError::internal)?.rows_affected();
     if inserted == 0 {
         return Err(ApiError::unauthorized("device_proof_replayed"));
     }
@@ -1281,7 +1309,15 @@ struct PullRevocationsResponse {
 async fn pull_revocations(
     State(state): State<AppState>,
     Query(query): Query<PullRevocationsQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<PullRevocationsResponse>, ApiError> {
+    let session = authenticated_session(
+        &state,
+        &headers,
+        "revocations.read",
+        &[query.target_node_id.to_string(), query.after.to_string()],
+    )
+    .await?;
     if query.after < 0 {
         return Err(ApiError::bad_request("invalid_revocation_cursor"));
     }
@@ -1289,11 +1325,18 @@ async fn pull_revocations(
         "SELECT sequence, envelope FROM policy.revocation_notices \
          WHERE domain_id = $1 AND target_node_id = $2 AND sequence > $3 \
            AND expires_at > now() AND envelope->'notice' ? 'adapter_kinds' \
+           AND EXISTS (SELECT 1 FROM policy.issued_ability_grants g \
+             WHERE g.domain_id = policy.revocation_notices.domain_id \
+               AND g.target_node_id = policy.revocation_notices.target_node_id \
+               AND g.decision_id = policy.revocation_notices.decision_id \
+               AND g.subject_user_id = $4 AND g.device_id = $5) \
          ORDER BY sequence LIMIT 100",
     )
     .bind(state.domain_id())
     .bind(query.target_node_id)
     .bind(query.after)
+    .bind(session.user_id)
+    .bind(session.device_id)
     .fetch_all(state.pool())
     .await
     .map_err(ApiError::internal)?;
@@ -2302,3 +2345,7 @@ fn revocable_decision(payload: Value) -> Result<RevocableDecision, ApiError> {
         issued_kinds,
     })
 }
+
+#[cfg(test)]
+#[path = "api_security_tests.rs"]
+mod security_tests;

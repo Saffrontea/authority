@@ -114,7 +114,9 @@ fn decode_fixed<const N: usize>(value: &str) -> Option<[u8; N]> {
     decoded.try_into().ok()
 }
 
-fn decode_base64url(value: &str) -> Option<Vec<u8>> {
+/// Decode canonical, nonempty, unpadded base64url; reject alternate encodings.
+#[must_use]
+pub fn decode_base64url(value: &str) -> Option<Vec<u8>> {
     if value.is_empty() || value.len() % 4 == 1 || value.contains('=') {
         return None;
     }

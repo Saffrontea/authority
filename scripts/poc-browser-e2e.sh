@@ -411,8 +411,11 @@ if [[ -n "${wireguard_public_key}" ]]; then
     printf 'SSH over WireGuard: reconnect denied immediately after push revocation\n'
 
     target_node_id="$(jq -r '.network_grant.grant.target_node_id' <<<"${decision}")"
-    pulled_page="$(curl --silent --fail --show-error \
+    anonymous_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
         "${control_origin}/v1/revocations?target_node_id=${target_node_id}&after=0")"
+    [[ "${anonymous_status}" == '401' ]] || die "anonymous revocation feed returned ${anonymous_status}"
+    pulled_page="$(webdriver POST "/session/${session}/execute/async" \
+        "$(jq -cn --arg target "${target_node_id}" '{script:"const done=arguments[arguments.length-1]; window.authorityPullRevocations(arguments[0],0).then(done).catch(error=>done({error:error.message}));",args:[$target]}')")"
     pulled="$(jq -c --arg decision "${decision_id}" \
         '.notices[] | select(.notice.decision_id == $decision)' <<<"${pulled_page}")"
     [[ -n "${pulled}" ]] || die 'pull feed omitted the persisted revocation notice'

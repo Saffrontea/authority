@@ -1,5 +1,7 @@
 //! Cryptographic ports and application logic for issuance authorization.
 
+use authority_device_auth_core::{decode_base64url, encode_base64url};
+
 use authority_contracts_model::protocol::{NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
     AdapterGrantKindV1, ContractError, DecisionRevocationNoticeV1, DecisionRevocationNoticeV2,
@@ -311,61 +313,6 @@ pub fn verify_mtls_authorization(
     Ok(())
 }
 
-fn encode_base64url(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let first = chunk[0];
-        let second = chunk.get(1).copied().unwrap_or(0);
-        let third = chunk.get(2).copied().unwrap_or(0);
-        output.push(char::from(ALPHABET[usize::from(first >> 2)]));
-        output.push(char::from(
-            ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))],
-        ));
-        if chunk.len() > 1 {
-            output.push(char::from(
-                ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))],
-            ));
-        }
-        if chunk.len() > 2 {
-            output.push(char::from(ALPHABET[usize::from(third & 0x3f)]));
-        }
-    }
-    output
-}
-
-fn decode_base64url(input: &str) -> Option<Vec<u8>> {
-    if input.len() % 4 == 1 {
-        return None;
-    }
-    let mut output = Vec::with_capacity(input.len() * 3 / 4);
-    for chunk in input.as_bytes().chunks(4) {
-        let a = decode_character(chunk[0])?;
-        let b = decode_character(chunk[1])?;
-        output.push((a << 2) | (b >> 4));
-        if chunk.len() > 2 {
-            let c = decode_character(chunk[2])?;
-            output.push((b << 4) | (c >> 2));
-            if chunk.len() > 3 {
-                let d = decode_character(chunk[3])?;
-                output.push((c << 6) | d);
-            }
-        }
-    }
-    Some(output)
-}
-
-fn decode_character(value: u8) -> Option<u8> {
-    match value {
-        b'A'..=b'Z' => Some(value - b'A'),
-        b'a'..=b'z' => Some(value - b'a' + 26),
-        b'0'..=b'9' => Some(value - b'0' + 52),
-        b'-' => Some(62),
-        b'_' => Some(63),
-        _ => None,
-    }
-}
-
 /// Signs a port-scoped TCP admission grant.
 ///
 /// # Errors
@@ -503,6 +450,24 @@ mod tests {
         assert!(matches!(
             verify_authorization(&envelope, &crypto),
             Err(AuthorizationEnvelopeError::VerificationFailed)
+        ));
+    }
+
+    #[test]
+    fn noncanonical_signature_alias_is_rejected_before_crypto() {
+        let crypto = FakeCrypto::default();
+        let mut envelope = sign_authorization(fixture(), &crypto).unwrap();
+        let alias = match envelope.signature.pop().unwrap() {
+            'A' => 'B',
+            'Q' => 'R',
+            'g' => 'h',
+            'w' => 'x',
+            _ => panic!("64-byte signature must have four unused trailing bits"),
+        };
+        envelope.signature.push(alias);
+        assert!(matches!(
+            verify_authorization(&envelope, &crypto),
+            Err(AuthorizationEnvelopeError::InvalidSignatureEncoding)
         ));
     }
 

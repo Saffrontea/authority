@@ -67,10 +67,15 @@ unknown serials or other issuers do not become good. SHA-1 and SHA-256 CertIDs a
 supported. The implementation uses typed ASN.1 and OpenSSL signing, with no
 external signing command or curl dependency.
 
-The reference service fetches a bounded fresh CRL for each handshake and enables
-OpenSSL `CRL_CHECK`, which checks its signature and validity. Fetch failure fails
-closed. The temporary CRL file is derived verification input, immediately removed;
-it stores no authoritative state. The additional DB admission check provides a
+The reference service shares a TLS verification context built from a bounded,
+CA-signed CRL. Concurrent handshakes coalesce into one refresh. The service checks
+the CRL issuer, signature, thisUpdate and nextUpdate before publishing the context;
+its cache expires at nextUpdate or the shared 30-second status validity bound,
+whichever comes first. OpenSSL `CRL_CHECK` still validates each client chain.
+Expired contexts are never reused after refresh failure; a one-second retry delay
+prevents queued unauthenticated handshakes from amplifying an issuer outage.
+Temporary CRL files are created only on refresh and removed immediately. They
+store no authoritative state. The additional DB admission check provides a
 current fence even when a signed CRL from just before revocation remains valid.
 External consumers must configure CRL or OCSP verification and enforce freshness;
 trusting the CA alone does not enforce revocation. Their cache window can delay
@@ -147,3 +152,10 @@ Validation for this change: the shared-DB tests (2), Control Plane DB regression
 the full verification gate with `PROPTEST_CASES=4096` pass. Both LXC route modes passed: default route with seed 7 and existing route with
 seed 42. Long-running proof jobs now report each verification
 start and completion without buffered output.
+
+Database TLS configuration uses `AUTHORITY_DB_SSLMODE` for the control plane,
+issuer and reference service (PoC default: `disable`). Invalid values fail startup.
+Device-proof replay records expire only after their signed timestamp's entire
+acceptance window has elapsed. Live proofs remain protected; exhausting the
+1024 live-nonce limit returns `429 session_proof_capacity_reached`, not a session
+expiry error.

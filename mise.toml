@@ -99,6 +99,14 @@ run = "cargo build --offline -p authority-network-agent && ./scripts/authority-a
 description = "Restart the target network agent with its durable ledgers retained"
 run = "./scripts/authority-agent.sh run _mesh:agent-restart"
 
+[tasks."mesh:test:nft-fail"]
+description = "E2E only: temporarily fail kernel TCP admission commands"
+run = "./scripts/authority-agent.sh run _mesh:test-nft-fail"
+
+[tasks."mesh:test:nft-restore"]
+description = "E2E only: restore kernel TCP admission commands"
+run = "./scripts/authority-agent.sh run _mesh:test-nft-restore"
+
 [tasks."mesh:test:wg-fail"]
 description = "E2E only: receiver wg-fail"
 run = "./scripts/authority-agent.sh run _mesh:test-wg-fail"
@@ -237,6 +245,14 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-install"
 [tasks."_mesh:agent-restart"]
 description = "Internal: restart the target network agent"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-restart"
+
+[tasks."_mesh:test-nft-fail"]
+description = "Internal E2E only: fail nft commands"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh nft-fail"
+
+[tasks."_mesh:test-nft-restore"]
+description = "Internal E2E only: restore nft commands"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh nft-restore"
 
 [tasks."_mesh:test-wg-fail"]
 description = "Internal E2E only: receiver wg-fail"

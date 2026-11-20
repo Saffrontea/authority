@@ -6,7 +6,7 @@ use axum::{
 
 use crate::state::AppState;
 
-const CSP_SCRIPT_HASH: &str = "DXCw56Ya8qCT448ZzPGNjBqb5LfEvmGOOtTMpH5vK5o=";
+const CSP_SCRIPT_HASH: &str = "nR1BxaPVh+wefo9yHIs6ghPqaxKUTp1oPzNXi9241Jw=";
 
 pub async fn index(State(state): State<AppState>) -> Response {
     let mut headers = HeaderMap::new();
@@ -38,7 +38,7 @@ pub async fn index(State(state): State<AppState>) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use openssl::sha::sha256;
+    use openssl::{base64::encode_block, sha::sha256};
 
     use super::CSP_SCRIPT_HASH;
 
@@ -50,31 +50,6 @@ mod tests {
             .and_then(|(_, tail)| tail.split_once("</script>"))
             .map(|(script, _)| script)
             .expect("one inline script");
-        assert_eq!(encode_base64(&sha256(script.as_bytes())), CSP_SCRIPT_HASH);
-    }
-
-    fn encode_base64(input: &[u8]) -> String {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-        for chunk in input.chunks(3) {
-            let second = chunk.get(1).copied().unwrap_or(0);
-            let third = chunk.get(2).copied().unwrap_or(0);
-            output.push(char::from(ALPHABET[usize::from(chunk[0] >> 2)]));
-            output.push(char::from(
-                ALPHABET[usize::from(((chunk[0] & 3) << 4) | (second >> 4))],
-            ));
-            output.push(if chunk.len() > 1 {
-                char::from(ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))])
-            } else {
-                '='
-            });
-            output.push(if chunk.len() > 2 {
-                char::from(ALPHABET[usize::from(third & 63)])
-            } else {
-                '='
-            });
-        }
-        output
+        assert_eq!(encode_block(&sha256(script.as_bytes())), CSP_SCRIPT_HASH);
     }
 }

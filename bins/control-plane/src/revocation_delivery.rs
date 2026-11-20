@@ -100,6 +100,8 @@ async fn deliver(
         .send()
         .await?
         .error_for_status()?;
+    // error_for_status rejects 4xx/5xx, but redirects remain non-errors.
+    // The client disables redirect following, so require an actual 2xx ACK.
     if !response.status().is_success() {
         return Err(format!(
             "network agent did not acknowledge revocation: {}",

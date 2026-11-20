@@ -107,7 +107,11 @@ impl Config {
             .username(&value("AUTHORITY_DB_USER", "authority")?)
             .password(&password)
             .database(&value("AUTHORITY_DB_NAME", "authority")?)
-            .ssl_mode(PgSslMode::Disable);
+            .ssl_mode(
+                value("AUTHORITY_DB_SSLMODE", "disable")?
+                    .parse::<PgSslMode>()
+                    .map_err(|error| format!("AUTHORITY_DB_SSLMODE is invalid: {error}"))?,
+            );
 
         Ok(Self {
             bind,

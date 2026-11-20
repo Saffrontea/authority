@@ -50,6 +50,9 @@ cleanup() {
     cleaned_up=1
     "${SCRIPT_DIR}/authority-agent.sh" run _mesh:mtls-restore >/dev/null 2>&1 || true
     rm -rf -- "${bootstrap_directory}"
+    if ! mise run mesh:test:nft-restore >/dev/null 2>&1; then
+        echo "poc:e2e: failed to restore receiver nft command permissions" >&2
+    fi
     if ! mise run mesh:test:wg-restore >/dev/null 2>&1; then
         echo "poc:e2e: failed to restore receiver wg command permissions" >&2
     fi

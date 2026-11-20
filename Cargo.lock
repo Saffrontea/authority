@@ -218,6 +218,7 @@ name = "authority-issuer-core"
 version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
+ "authority-device-auth-core",
  "thiserror 2.0.21",
 ]
 
@@ -293,6 +294,7 @@ version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
  "authority-credential-crypto-openssl",
+ "authority-device-auth-core",
  "authority-issuer-core",
  "authority-projection-core",
  "axum",

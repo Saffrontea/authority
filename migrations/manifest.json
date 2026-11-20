@@ -38,6 +38,9 @@
     },
     "0013_issued_ability_grants.sql": {
       "sha256": "369a68f7e84cf10cd4744ef56ca4d97e8b9ee94f58c5e59d4e3e1ba7538c160a"
+    },
+    "0014_session_proof_expiry.sql": {
+      "sha256": "547ee0304f8afdfe42dd68d5ee90de7b50df646ffaac142dd5b94f7c76af3c14"
     }
   }
 }
