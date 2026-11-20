@@ -152,14 +152,20 @@ fn automatic_selection_chooses_the_smallest_authorized_implementation() {
     let (decision, plan) = fixture.alternatives(&fixture.automatic()).unwrap();
     assert_eq!(decision.intent.route, Route::Direct);
     assert_eq!(plan.evidence().selected, Some(CandidateId::ExistingRoute));
-    assert_eq!(
+    assert!(matches!(
         plan.evidence().candidates[0].result,
-        CandidateResult::Authorized { mechanism_count: 1 }
-    );
-    assert_eq!(
+        CandidateResult::Authorized {
+            mechanism_count: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
         plan.evidence().candidates[1].result,
-        CandidateResult::Authorized { mechanism_count: 2 }
-    );
+        CandidateResult::Authorized {
+            mechanism_count: 2,
+            ..
+        }
+    ));
     assert!(plan.evidence().is_consistent());
     let serialized = serde_json::to_vec(plan.evidence()).unwrap();
     let restored: PlanningEvidence = serde_json::from_slice(&serialized).unwrap();

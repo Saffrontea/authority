@@ -123,6 +123,7 @@ impl SelectionOptions {
 pub enum CandidateResult {
     Authorized {
         mechanism_count: usize,
+        plan: Box<PlanEvidence>,
     },
     Rejected {
         reason: String,
@@ -207,7 +208,7 @@ impl PlanningEvidence {
         if self.version != authority_contracts_model::protocol::PLANNING_EVIDENCE_VERSION_V2
             || self.evaluated_at < 0
             || self.outcomes.is_empty()
-            || self.selection_rule != authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1
+            || self.selection_rule != authority_contracts_model::protocol::PLAN_SELECTION_RULE_V2
         {
             return false;
         }
@@ -230,13 +231,29 @@ impl PlanningEvidence {
         let mut authorized = Vec::new();
         for evaluation in &self.candidates {
             match &evaluation.result {
-                CandidateResult::Authorized { mechanism_count } => {
+                CandidateResult::Authorized {
+                    mechanism_count,
+                    plan,
+                } => {
                     if !(1..=authority_contracts_model::protocol::MAX_PLAN_MECHANISMS_V1)
                         .contains(mechanism_count)
                     {
                         return false;
                     }
-                    authorized.push((*mechanism_count, evaluation.candidate));
+                    if plan.steps.len() != *mechanism_count
+                        || !self.resources.as_ref().is_some_and(|resources| {
+                            plan.consistent(
+                                self.binding,
+                                self.evaluated_at,
+                                evaluation.candidate,
+                                &self.outcomes,
+                                resources,
+                            )
+                        })
+                    {
+                        return false;
+                    }
+                    authorized.push((evaluation.candidate, plan.as_ref()));
                 }
                 CandidateResult::Rejected { reason, capability } => {
                     if reason.is_empty()
@@ -254,7 +271,14 @@ impl PlanningEvidence {
         match (self.selected, &self.plan) {
             (None, None) => authorized.is_empty(),
             (Some(selected), Some(plan)) => {
-                authorized.into_iter().min() == Some((plan.steps.len(), selected))
+                let frontier = authority_planning_core::minimal_indices(&authorized, |a, b| {
+                    evidence_leq(a.1, b.1)
+                });
+                let winner = frontier
+                    .into_iter()
+                    .map(|i| authorized[i])
+                    .min_by_key(|(candidate, proof)| (proof.steps.len(), *candidate));
+                winner.is_some_and(|(candidate, proof)| candidate == selected && proof == plan)
                     && self.resources.as_ref().is_some_and(|resources| {
                         plan.consistent(
                             self.binding,
@@ -303,7 +327,7 @@ impl PlanningEvidence {
             route_choice: choice,
             resources: None,
             deployment: None,
-            selection_rule: authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1.to_owned(),
+            selection_rule: authority_contracts_model::protocol::PLAN_SELECTION_RULE_V2.to_owned(),
             candidates: Vec::new(),
             selected: None,
             plan: None,
@@ -321,6 +345,7 @@ impl PlanningEvidence {
                 candidate,
                 result: CandidateResult::Authorized {
                     mechanism_count: plan.steps.len(),
+                    plan: Box::new(plan.clone()),
                 },
             }],
             selected: Some(candidate),
@@ -329,6 +354,13 @@ impl PlanningEvidence {
             ..Self::base(request, RouteChoice::Exact(request.intent.route))
         }
     }
+}
+
+fn evidence_leq(left: &PlanEvidence, right: &PlanEvidence) -> bool {
+    crate::ability_policy::authority_leq(
+        &left.abilities.iter().map(|a| a.ability.clone()).collect(),
+        &right.abilities.iter().map(|a| a.ability.clone()).collect(),
+    )
 }
 
 impl PlanEvidence {
@@ -642,6 +674,16 @@ pub(crate) fn evaluate_with<D>(
                     candidate,
                     result: CandidateResult::Authorized {
                         mechanism_count: count,
+                        plan: Box::new(
+                            plan.evidence()
+                                .plan
+                                .as_ref()
+                                .ok_or(ScopeError::InvalidRequest)
+                                .map_err(|reason| {
+                                    SelectionFailure::rejected(request, options, reason)
+                                })?
+                                .clone(),
+                        ),
                     },
                 });
                 authorized.push(((count, candidate), decision, plan));
@@ -652,7 +694,21 @@ pub(crate) fn evaluate_with<D>(
             }
         }
     }
-    if let Some((_, decision, mut plan)) = authorized.into_iter().min_by_key(|(key, _, _)| *key) {
+    let frontier = authority_planning_core::minimal_indices(&authorized, |a, b| {
+        evidence_leq(
+            a.2.evidence()
+                .plan
+                .as_ref()
+                .expect("authorized plan has evidence"),
+            b.2.evidence()
+                .plan
+                .as_ref()
+                .expect("authorized plan has evidence"),
+        )
+    });
+    let selected = frontier.into_iter().min_by_key(|&i| authorized[i].0);
+    if let Some(index) = selected {
+        let (_, decision, mut plan) = authorized.swap_remove(index);
         plan.set_selection(options, evaluations);
         return Ok((decision, plan));
     }

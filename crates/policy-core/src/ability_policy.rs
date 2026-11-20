@@ -83,16 +83,38 @@ pub fn authorize(
     {
         return Err(PermissionError::InvalidRule);
     }
+    let authorities: Vec<_> = rules.iter().map(|rule| &rule.authority).collect();
+    let mut sources = BTreeSet::new();
+    for atom in fragments(requested, &authorities) {
+        let winner = rules
+            .iter()
+            .filter(|rule| rule.authority.contains(&atom))
+            .max_by_key(|rule| {
+                (
+                    rule.priority,
+                    rule.effect == Effect::Deny,
+                    rule.policy.policy_id,
+                )
+            })
+            .ok_or(PermissionError::Uncovered)?;
+        if winner.effect == Effect::Deny {
+            return Err(PermissionError::ExplicitDeny(winner.policy));
+        }
+        sources.insert(winner.policy);
+    }
+    Ok(sources)
+}
+
+// Resource/time partitioning is shared by permission evaluation and authority order.
+// The current finite port/principal representation is deliberately bounded.
+fn fragments(requested: &ScopedAbility, authorities: &[&ScopedAbility]) -> Vec<ScopedAbility> {
     let mut boundaries =
         BTreeSet::from([requested.validity.not_before, requested.validity.expires_at]);
-    for rule in rules {
-        if rule.authority.binding == requested.binding
-            && rule.authority.scope.kind() == requested.scope.kind()
+    for authority in authorities {
+        if authority.binding == requested.binding
+            && authority.scope.kind() == requested.scope.kind()
         {
-            for boundary in [
-                rule.authority.validity.not_before,
-                rule.authority.validity.expires_at,
-            ] {
+            for boundary in [authority.validity.not_before, authority.validity.expires_at] {
                 if requested.validity.not_before < boundary
                     && boundary < requested.validity.expires_at
                 {
@@ -102,35 +124,33 @@ pub fn authorize(
         }
     }
     let boundaries: Vec<_> = boundaries.into_iter().collect();
-    let mut sources = BTreeSet::new();
+    let mut fragments = Vec::new();
     for scope in atoms(&requested.scope) {
         for interval in boundaries.windows(2) {
-            let atom = ScopedAbility {
+            fragments.push(ScopedAbility {
                 binding: requested.binding,
                 validity: Validity {
                     not_before: interval[0],
                     expires_at: interval[1],
                 },
                 scope: scope.clone(),
-            };
-            let winner = rules
-                .iter()
-                .filter(|rule| rule.authority.contains(&atom))
-                .max_by_key(|rule| {
-                    (
-                        rule.priority,
-                        rule.effect == Effect::Deny,
-                        rule.policy.policy_id,
-                    )
-                })
-                .ok_or(PermissionError::Uncovered)?;
-            if winner.effect == Effect::Deny {
-                return Err(PermissionError::ExplicitDeny(winner.policy));
-            }
-            sources.insert(winner.policy);
+            });
         }
     }
-    Ok(sources)
+    fragments
+}
+
+/// Semantic inclusion of unions, including split resource sets and adjacent time intervals.
+/// Kinds without an explicit containment relation remain incomparable.
+#[must_use]
+pub fn authority_leq(left: &BTreeSet<ScopedAbility>, right: &BTreeSet<ScopedAbility>) -> bool {
+    let cover: Vec<_> = right.iter().collect();
+    left.iter().all(|requested| {
+        requested.contains(requested)
+            && fragments(requested, &cover)
+                .iter()
+                .all(|part| right.iter().any(|ability| ability.contains(part)))
+    })
 }
 
 /// Key choice is explicit policy: request possession or an exact pinned key.
@@ -472,8 +492,31 @@ mod tests {
     use proptest::prelude::*;
     use uuid::Uuid;
 
+    #[test]
+    fn authority_union_covers_split_resources_and_time_but_never_fills_gaps() {
+        let whole = BTreeSet::from([authority(&[80, 443], 10, 30)]);
+        let cover = BTreeSet::from([
+            authority(&[80], 10, 20),
+            authority(&[80], 20, 30),
+            authority(&[443], 10, 30),
+        ]);
+        assert!(authority_leq(&whole, &cover));
+        assert!(authority_leq(&cover, &whole));
+        let hole = BTreeSet::from([
+            authority(&[80], 10, 19),
+            authority(&[80], 20, 30),
+            authority(&[443], 10, 30),
+        ]);
+        assert!(!authority_leq(&whole, &hole));
+        assert!(authority_leq(&hole, &whole));
+        assert!(!authority_leq(
+            &BTreeSet::from([authority(&[22], 10, 30)]),
+            &whole
+        ));
+    }
+
     proptest! {
-        #[test]
+    #[test]
         fn same_priority_deny_wins_independently_of_policy_revisions(
             allow_revision in 1_i64..=i64::MAX, deny_revision in 1_i64..=i64::MAX,
             priority in any::<i32>(),

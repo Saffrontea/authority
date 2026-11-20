@@ -46,7 +46,7 @@
     },
     "artifacts/policy-plan-evaluated-v2.schema.json": {
       "version": 2,
-      "sha256": "5ce0ffde192e2747b83204d9ec19db38274b41503f1c6d14c62be7bf6a3d98cd"
+      "sha256": "a171c5a7aff79e8547e0632dd96ed31c19f563954a55459265f31692f8a7548d"
     },
     "artifacts/policy-decision-evaluated-v2.schema.json": {
       "version": 2,

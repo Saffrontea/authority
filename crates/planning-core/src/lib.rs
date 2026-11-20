@@ -147,6 +147,109 @@ pub fn solve<A: Ord + Clone, M: Ord + Clone>(
     Err(PlanningError::NoSolution)
 }
 
+/// Indices of elements not strictly dominated under the supplied authority preorder.
+/// Equivalent and incomparable elements survive; no scalar privilege weights are invented.
+pub fn minimal_indices<T>(items: &[T], leq: impl Fn(&T, &T) -> bool) -> Vec<usize> {
+    (0..items.len())
+        .filter(|&i| {
+            !(0..items.len()).any(|j| leq(&items[j], &items[i]) && !leq(&items[i], &items[j]))
+        })
+        .collect()
+}
+
+/// Enumerates the complete authorized Pareto frontier within the search bounds.
+/// `authority_leq(a,b)` means every authority/effect of `a` is covered by `b`.
+/// It must be a pure preorder. Initial abilities and mandatory closure are included.
+/// A goal-reaching plan is still expanded: constraints need not be downward closed.
+/// Exhausting the budget discards all partial results, even if a feasible plan was found.
+///
+/// # Errors
+/// Returns invalid-catalog, no-solution or search-budget errors, just like `solve`.
+pub fn solve_frontier<A: Ord + Clone, M: Ord + Clone>(
+    model: &Model<A, M>,
+    request: &Request<A, M>,
+    satisfies: impl Fn(&Plan<A, M>) -> bool,
+    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> bool,
+) -> Result<Vec<Plan<A, M>>, PlanningError> {
+    let catalog: BTreeMap<_, _> = model.mechanisms.iter().map(|m| (m.id.clone(), m)).collect();
+    if catalog.len() != model.mechanisms.len() {
+        return Err(PlanningError::DuplicateMechanism);
+    }
+    if request.max_states == 0 {
+        return Err(PlanningError::SearchLimit);
+    }
+    let mut initial = request.available.clone();
+    closure(&mut initial, &model.derivations);
+    if !initial.is_subset(&request.permitted) {
+        return Err(PlanningError::NoSolution);
+    }
+    let mut queue = VecDeque::from([Plan {
+        mechanisms: Vec::new(),
+        abilities: initial,
+    }]);
+    let mut visited = BTreeSet::from([BTreeSet::<M>::new()]);
+    let mut feasible = Vec::new();
+    while let Some(plan) = queue.pop_front() {
+        if request.goals.is_subset(&plan.abilities) && satisfies(&plan) {
+            feasible.push(plan.clone());
+        }
+        if plan.mechanisms.len() >= request.max_mechanisms {
+            continue;
+        }
+        let selected: BTreeSet<_> = plan.mechanisms.iter().cloned().collect();
+        for (id, mechanism) in &catalog {
+            if selected.contains(id)
+                || request.forbidden_mechanisms.contains(id)
+                || !mechanism.requires.is_subset(&plan.abilities)
+            {
+                continue;
+            }
+            let mut next_selected = selected.clone();
+            next_selected.insert(id.clone());
+            if visited.contains(&next_selected) {
+                continue;
+            }
+            let mut next = plan.clone();
+            next.mechanisms.push(id.clone());
+            next.abilities.extend(mechanism.provides.iter().cloned());
+            closure(&mut next.abilities, &model.derivations);
+            if !next.abilities.is_subset(&request.permitted) {
+                continue;
+            }
+            if visited.len() >= request.max_states {
+                return Err(PlanningError::SearchLimit);
+            }
+            visited.insert(next_selected);
+            queue.push_back(next);
+        }
+    }
+    let indices = minimal_indices(&feasible, |a, b| authority_leq(&a.abilities, &b.abilities));
+    if indices.is_empty() {
+        return Err(PlanningError::NoSolution);
+    }
+    let mut result: Vec<_> = indices.into_iter().map(|i| feasible[i].clone()).collect();
+    result.sort_by(|a, b| {
+        (a.mechanisms.len(), &a.mechanisms).cmp(&(b.mechanisms.len(), &b.mechanisms))
+    });
+    Ok(result)
+}
+
+/// Selects a Pareto-minimal plan, then breaks ties by mechanism count and stable IDs.
+///
+/// # Errors
+/// Propagates `solve_frontier` errors; never selects from an incomplete search.
+pub fn solve_minimal_authority<A: Ord + Clone, M: Ord + Clone>(
+    model: &Model<A, M>,
+    request: &Request<A, M>,
+    satisfies: impl Fn(&Plan<A, M>) -> bool,
+    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> bool,
+) -> Result<Plan<A, M>, PlanningError> {
+    solve_frontier(model, request, satisfies, authority_leq)?
+        .into_iter()
+        .next()
+        .ok_or(PlanningError::NoSolution)
+}
+
 #[cfg(test)]
 mod closure_properties {
     use super::{Derivation, closure};

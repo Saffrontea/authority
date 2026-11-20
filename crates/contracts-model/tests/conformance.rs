@@ -22,7 +22,7 @@ fn protocol_bounds_match_the_versioned_wire_schemas() {
     .unwrap();
     assert_eq!(
         plan["$defs"]["planning"]["properties"]["selection_rule"]["const"].as_str(),
-        Some(authority_contracts_model::protocol::PLAN_SELECTION_RULE_V1)
+        Some(authority_contracts_model::protocol::PLAN_SELECTION_RULE_V2)
     );
     assert_eq!(
         plan["$defs"]["planning"]["properties"]["version"]["const"].as_u64(),

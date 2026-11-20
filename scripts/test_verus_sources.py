@@ -83,8 +83,10 @@ class SourceExtraction(unittest.TestCase):
         read_text = type(path).read_text
         source = path.read_text()
         header = "for (id, mechanism) in &catalog {"
-        self.assertEqual(source.count(header), 1)
-        reversed_scan = source.replace(header, "for (id, mechanism) in catalog.iter().rev() {")
+        _, solver = block(source, "pub fn solve<A: Ord + Clone, M: Ord + Clone>(")
+        self.assertEqual(solver.count(header), 1)
+        self.assertEqual(source.count(solver), 1)
+        reversed_scan = source.replace(solver, solver.replace(header, "for (id, mechanism) in catalog.iter().rev() {"))
 
         def changed_read(current, *args, **kwargs):
             return reversed_scan if current == path else read_text(current, *args, **kwargs)

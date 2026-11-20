@@ -153,6 +153,10 @@ the LXC installer installs it before starting the Network Agent.
 
 Authorization now selects a realization from an ability/mechanism hypergraph
 inside the effective policy envelope, then projects only its selected adapters.
+Selection removes plans strictly dominated by the semantic union of another
+plan's complete scoped authority, then breaks ties by mechanism count and stable
+IDs. Incomparable minima remain incomparable; layer names are not privilege
+weights. Candidate evidence includes complete plans for selection replay.
 The authorized plan binds identity, target, keys, ports, principals and independent
 validity intervals; projection consumes these immutable scopes directly. Requested
 leases cannot outlive their winning policies or configured TTL limits.
@@ -163,7 +167,7 @@ Existing-route availability requires the server's optional
 candidates, scoped permissions and dependencies are recorded in `access.plan`
 and `policy.plan.evaluated` v2 within the authorization transaction. Policy reads,
 scoped evaluation and all decision writes share one READ COMMITTED transaction with
-shared locks on the policy/device/target rows; responses are returned after commit.
+a shared advisory policy guard and device/target row locks; responses are returned after commit.
 The graph separates direct credential/admission authority from derived usable
 abilities. Trusted endpoint and route facts come from `device.nodes.endpoint_facts`;
 new or upgraded nodes default to an empty manifest and fail closed until configured.
@@ -172,6 +176,11 @@ complete derivation trace. Only the current planning format is accepted; there i
 no legacy catalog or replay fallback.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
+Signed live endpoint observations, subject/device revocation fences, symbolic
+resource ranges and scoped administration remain unimplemented. The demo
+bootstrap token is an external trust root; operator-written facts are not live
+attestation. [The next authority-model iteration](docs/authority-model-next.md)
+specifies these remaining contracts, trust assumptions and acceptance checks.
 
 ## Testing without Passkey hardware
 

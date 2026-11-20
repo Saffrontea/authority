@@ -35,14 +35,16 @@ inclusion. The access integration normalizes scope containment into the finite s
 of requested scoped abilities before solving. It does not enumerate every port or
 every timestamp as a separate graph node.
 
-The solver selects the fewest mechanisms and breaks ties deterministically by
-mechanism ID and executable order. This is not an ordering of privilege: a broader
-allowed plan may use fewer mechanisms. Final constraint predicates may depend on
-the selected mechanism set and abilities, but not their execution order. Mechanism
-exclusions and maximum plan size are also supported. Exhausting the explicit search
-budget returns an error, never an allow decision. Search is exponential in the
-worst case; each solve over the bounded access catalog retains a
-32-state budget. Deployment selection evaluates at most two candidate catalogs.
+Production scoped planning uses `solve_minimal_authority`: it enumerates feasible
+plans under the search bound, removes plans strictly dominated by the semantic
+union of another plan's complete authority closure, then breaks ties by mechanism
+count and stable IDs. Equivalent or incomparable minima survive the partial
+order. It does not infer privilege weights from layer names. Exhausting the
+search budget denies even if a feasible plan was already found. The generic
+`solve_frontier` exposes all minima; the separate mechanism-minimizing `solve`
+primitive remains available for model tests and its existing Verus proof boundary.
+Final constraints must depend on the selected set and abilities, not execution
+order. The bounded access catalog retains a 32-state budget per route.
 
 Models must declare complete effects. The solver proves properties of that model;
 it cannot discover capabilities an adapter exposes but its catalog omits. Models
@@ -174,8 +176,9 @@ the production signing path.
 
 `policy-core::selection::evaluate_selection` evaluates each available deployment
 implementation against the same immutable policy snapshot and scoped inputs. It
-then chooses the authorized plan with the fewest mechanisms, breaking ties by
-candidate ID. An unavailable or rejected implementation cannot abort another
+then removes authority-dominated candidate plans before breaking ties by mechanism
+count and candidate ID. Each authorized candidate carries complete plan evidence
+so replay checks its closure and the authority-order selection. An unavailable or rejected implementation cannot abort another
 valid candidate. Availability is a deployment fact, never an authorization grant;
 all selected abilities still have to pass scoped policy evaluation.
 
@@ -416,3 +419,13 @@ runs verify v2 audit/outbox agreement with the actually issued TCP scopes. The D
 regressions additionally check endpoint-manifest row locking and fail-closed
 handling of missing or unknown environment facts. Workspace clippy passes with
 warnings denied.
+
+
+## Outstanding trust-model changes
+
+Signed live environment observations, subject/device issuance fences, symbolic
+resource ranges, and scoped administration/genesis are not yet implemented.
+[Authority model next iteration](authority-model-next.md) specifies their trust
+assumptions, wire/transaction changes and acceptance checks. In particular,
+operator-declared `endpoint_facts` and the demo bootstrap token are explicit
+remaining limits; they are not attestation or modeled administrative authority.

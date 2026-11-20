@@ -15,7 +15,7 @@
     "route_choice": {
       "mode": "automatic"
     },
-    "selection_rule": "fewest_mechanisms_then_candidate_id",
+    "selection_rule": "minimal_authority_then_fewest_mechanisms_then_candidate_id",
     "candidates": [
       {
         "candidate": "existing_route",

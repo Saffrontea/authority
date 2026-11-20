@@ -506,7 +506,8 @@
               "additionalProperties": false,
               "required": [
                 "status",
-                "mechanism_count"
+                "mechanism_count",
+                "plan"
               ],
               "properties": {
                 "status": {
@@ -516,6 +517,9 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 5
+                },
+                "plan": {
+                  "$ref": "#/$defs/plan"
                 }
               }
             },
@@ -635,7 +639,7 @@
           ]
         },
         "selection_rule": {
-          "const": "fewest_mechanisms_then_candidate_id"
+          "const": "minimal_authority_then_fewest_mechanisms_then_candidate_id"
         },
         "candidates": {
           "type": "array",

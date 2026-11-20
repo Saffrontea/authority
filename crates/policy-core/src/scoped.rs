@@ -9,7 +9,9 @@ use std::{
     net::Ipv4Addr,
 };
 
-use authority_planning_core::{Derivation, Mechanism, Model, Plan, Request, solve};
+use authority_planning_core::{
+    Derivation, Mechanism, Model, Plan, Request, solve_minimal_authority,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -782,7 +784,7 @@ pub fn evaluate_scoped(
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let model = instantiate(request, &abilities, resources);
-    let realization = solve(
+    let realization = solve_minimal_authority(
         &model,
         &Request {
             goals: goals.clone(),
@@ -793,6 +795,7 @@ pub fn evaluate_scoped(
             max_states: crate::realization::ACCESS_PLANNING_STATES,
         },
         |_| true,
+        crate::ability_policy::authority_leq,
     )
     .map_err(|error| ScopeError::Policy(DenialReason::from(error)))?;
     let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
@@ -1016,7 +1019,7 @@ pub fn evaluate_ability_scoped(
         })
         .collect::<Result<_, _>>()?;
     let model = instantiate(request, &abilities, resources);
-    let realization = solve(
+    let realization = solve_minimal_authority(
         &model,
         &Request {
             goals: goals.clone(),
@@ -1030,6 +1033,7 @@ pub fn evaluate_ability_scoped(
             max_states: crate::realization::ACCESS_PLANNING_STATES,
         },
         |_| true,
+        crate::ability_policy::authority_leq,
     )
     .map_err(|error| {
         if error == authority_planning_core::PlanningError::NoSolution {
