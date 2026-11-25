@@ -13,7 +13,12 @@ struct SessionFixture {
 }
 impl SessionFixture {
     async fn new(pool: sqlx::PgPool) -> Self {
-        Self::for_identity(pool, Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()).await
+        let (domain, user, device) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        sqlx::query("INSERT INTO identity.users(id,domain_id,display_name,username,status) VALUES($1,$2,'fixture',$3,'active')")
+            .bind(user).bind(domain).bind(user.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO device.devices(id,domain_id,owner_user_id,device_public_key,wireguard_public_key,status,owner_kind) VALUES($1,$2,$3,$4,$5,'active','user')")
+            .bind(device).bind(domain).bind(user).bind(vec![0_u8;32]).bind(vec![1_u8;32]).execute(&pool).await.unwrap();
+        Self::for_identity(pool, domain, user, device).await
     }
     async fn for_identity(pool: sqlx::PgPool, domain: Uuid, user: Uuid, device: Uuid) -> Self {
         let signer = OpenSslEd25519Signer::generate("test-device").unwrap();
@@ -124,6 +129,10 @@ async fn nonce_window_prunes_expired_entries_but_keeps_live_replays_and_reports_
 
 async fn notice(fixture: &SessionFixture, target: Uuid, user: Uuid, device: Uuid) -> String {
     use authority_policy_core::scoped::{AbilityScope, AccessBinding, ScopedAbility, Validity};
+    sqlx::query("INSERT INTO identity.users(id,domain_id,display_name,username,status) VALUES($1,$2,'fixture',$3,'active') ON CONFLICT DO NOTHING")
+        .bind(user).bind(fixture.state.domain_id()).bind(user.to_string()).execute(fixture.state.pool()).await.unwrap();
+    sqlx::query("INSERT INTO device.devices(id,domain_id,owner_user_id,device_public_key,wireguard_public_key,status,owner_kind) VALUES($1,$2,$3,$4,$5,'active','user') ON CONFLICT DO NOTHING")
+        .bind(device).bind(fixture.state.domain_id()).bind(user).bind(device.as_bytes().to_vec()).bind(device.as_bytes().to_vec()).execute(fixture.state.pool()).await.unwrap();
     let decision = Uuid::new_v4().simple().to_string();
     let now = unix_timestamp().unwrap();
     let ability = ScopedAbility {
@@ -140,7 +149,7 @@ async fn notice(fixture: &SessionFixture, target: Uuid, user: Uuid, device: Uuid
         scope: AbilityScope::TcpAdmission {
             source: [10, 77, 0, 1].into(),
             destination: [10, 77, 0, 2].into(),
-            ports: [8080].into(),
+            ports: "8080".parse().unwrap(),
         },
     };
     sqlx::query("INSERT INTO policy.issued_ability_grants(domain_id,subject_user_id,device_id,target_node_id,decision_id,ability_kind,ability,policy_refs,not_before,expires_at) VALUES($1,$2,$3,$4,$5,'tcp_admission',$6,'[{\"policy_id\":\"test\",\"revision\":1}]',$7,$8)")
@@ -178,7 +187,7 @@ async fn revocation_pull_requires_bound_device_proof_and_filters_other_owners() 
     let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(2).await).await;
     let target = Uuid::new_v4();
     let own = notice(&fixture, target, fixture.user, fixture.device).await;
-    notice(&fixture, target, Uuid::new_v4(), fixture.device).await;
+    notice(&fixture, target, Uuid::new_v4(), Uuid::new_v4()).await;
     notice(&fixture, target, fixture.user, Uuid::new_v4()).await;
     let query = || {
         Query(PullRevocationsQuery {
@@ -363,9 +372,14 @@ async fn session_pressure_evicts_only_the_authenticated_users_oldest_sessions() 
     let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(2).await).await;
     fixture.state.initialize_auth().await.unwrap();
     let other_user = Uuid::new_v4();
+    let other_device = Uuid::new_v4();
+    sqlx::query("INSERT INTO identity.users(id,domain_id,display_name,username,status) VALUES($1,$2,'fixture',$3,'active')")
+        .bind(other_user).bind(fixture.state.domain_id()).bind(other_user.to_string()).execute(fixture.state.pool()).await.unwrap();
+    sqlx::query("INSERT INTO device.devices(id,domain_id,owner_user_id,device_public_key,wireguard_public_key,status,owner_kind) VALUES($1,$2,$3,$4,$5,'active','user')")
+        .bind(other_device).bind(fixture.state.domain_id()).bind(other_user).bind(other_device.as_bytes().to_vec()).bind(other_device.as_bytes().to_vec()).execute(fixture.state.pool()).await.unwrap();
     let other_digest = sha256(Uuid::new_v4().as_bytes());
     sqlx::query("INSERT INTO identity.sessions(domain_id,token_digest,user_id,device_id,device_public_key,expires_at) VALUES($1,$2,$3,$4,$5,clock_timestamp()+interval '1 minute')")
-        .bind(fixture.state.domain_id()).bind(other_digest.as_slice()).bind(other_user).bind(Uuid::new_v4()).bind(fixture.signer.public_key_raw().unwrap())
+        .bind(fixture.state.domain_id()).bind(other_digest.as_slice()).bind(other_user).bind(other_device).bind(fixture.signer.public_key_raw().unwrap())
         .execute(fixture.state.pool()).await.unwrap();
     for _ in 0..16 {
         let mut tx = crate::access_policy::begin_authorization(fixture.state.pool())
@@ -427,7 +441,7 @@ async fn session_pressure_evicts_only_the_authenticated_users_oldest_sessions() 
 
 #[tokio::test]
 #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
-async fn transferred_device_returns_forbidden_and_commits_a_deny_audit() {
+async fn transferred_device_invalidates_the_old_session_before_policy_issuance() {
     let pool = crate::access_policy::tests::lxc_pool(3).await;
     let (live, _) = crate::access_policy::tests::live_tcp_request(&pool).await;
     let fixture =
@@ -446,9 +460,11 @@ async fn transferred_device_returns_forbidden_and_commits_a_deny_audit() {
     .await
     .unwrap();
     let request = IssueTcpAuthorizationRequest {
+        source_addresses: None,
+        destination_addresses: None,
         device_id: live.device_id,
         target_node_id: live.target_node_id,
-        destination_ports: vec![8080],
+        destination_ports: "8080".parse().unwrap(),
         include_network: false,
         ttl_seconds: 10,
         automatic_route: false,
@@ -479,12 +495,9 @@ async fn transferred_device_returns_forbidden_and_commits_a_deny_audit() {
     fixture.cleanup().await;
     let error = result.err().expect("a transferred device must be denied");
     assert_eq!(grants_before, grants_after);
-    assert_eq!(error.status, StatusCode::FORBIDDEN);
-    assert_eq!(error.code, "policy_denied");
-    assert_eq!(
-        audit,
-        vec![("deny".to_owned(), Some("device_mismatch".to_owned()))]
-    );
+    assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(error.code, "invalid_session");
+    assert!(audit.is_empty());
 }
 
 #[tokio::test]
@@ -529,4 +542,95 @@ async fn malformed_access_identifiers_and_oversized_fingerprints_are_rejected_be
     fixture.cleanup().await;
     assert_eq!(error.status, StatusCode::BAD_REQUEST);
     assert_eq!(error.code, "invalid_decision_id");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL migrations"]
+async fn root_identity_revocation_is_authenticated_idempotent_and_does_not_revive_sessions() {
+    use authority_contracts_model::administration::{
+        IdentityRevocationCommandV1, IdentitySelector,
+    };
+    let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(4).await).await;
+    let now = unix_timestamp().unwrap();
+    for (index, selector) in [
+        IdentitySelector::Device {
+            device_id: fixture.device.to_string(),
+        },
+        IdentitySelector::Subject {
+            subject_user_id: fixture.user.to_string(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let command = IdentityRevocationCommandV1 {
+            version: 1,
+            domain_id: fixture.state.domain_id().to_string(),
+            selector,
+            nonce: format!("{}{}", "A".repeat(42), index),
+            reason: "compromised".into(),
+            issued_at: now,
+            expires_at: now + 30,
+        };
+        let signed =
+            authority_issuer_core::fence::sign_command(command, fixture.state.signer()).unwrap();
+        let mut forged = signed.clone();
+        forged.command.reason = "forged".into();
+        assert_eq!(
+            crate::identity_revocation::revoke(State(fixture.state.clone()), Json(forged))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+        let Json(first) =
+            crate::identity_revocation::revoke(State(fixture.state.clone()), Json(signed.clone()))
+                .await
+                .unwrap();
+        assert_eq!(first["completed"], true);
+        let Json(second) =
+            crate::identity_revocation::revoke(State(fixture.state.clone()), Json(signed.clone()))
+                .await
+                .unwrap();
+        assert_eq!(first, second);
+        let mut changed = signed.command.clone();
+        changed.reason = "different_intent".into();
+        let changed =
+            authority_issuer_core::fence::sign_command(changed, fixture.state.signer()).unwrap();
+        assert_eq!(
+            crate::identity_revocation::revoke(State(fixture.state.clone()), Json(changed))
+                .await
+                .unwrap_err()
+                .code,
+            "operation_nonce_reused"
+        );
+        sqlx::query("UPDATE identity.users SET status='active' WHERE id=$1")
+            .bind(fixture.user)
+            .execute(fixture.state.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE device.devices SET status='active' WHERE id=$1")
+            .bind(fixture.device)
+            .execute(fixture.state.pool())
+            .await
+            .unwrap();
+        let headers = fixture.headers(
+            "session.read",
+            &[],
+            &format!("old_session_nonce_01234567890123{index}"),
+            unix_timestamp().unwrap(),
+        );
+        assert_eq!(
+            authenticated_session(&fixture.state, &headers, "session.read", &[])
+                .await
+                .err()
+                .expect("old session rejected")
+                .code,
+            "invalid_session"
+        );
+    }
+    let generations: (i64, i64) = sqlx::query_as("SELECT u.generation,d.generation FROM identity.users u JOIN device.devices d ON d.owner_user_id=u.id WHERE u.id=$1 AND d.id=$2")
+        .bind(fixture.user).bind(fixture.device).fetch_one(fixture.state.pool()).await.unwrap();
+    assert_eq!(generations, (3, 3));
+    fixture.cleanup().await;
 }

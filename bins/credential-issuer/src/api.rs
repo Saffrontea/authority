@@ -1,7 +1,7 @@
 use authority_contracts_model::protocol::CREDENTIAL_ISSUER_AUDIENCE;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use authority_contracts_model::{SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1};
+use authority_contracts_model::{SignedIssuanceAuthorizationV2, SignedMtlsIssuanceAuthorizationV2};
 use authority_issuer_core::{verify_authorization, verify_mtls_authorization};
 use axum::http::{HeaderValue, Method, header::CONTENT_TYPE};
 use axum::{
@@ -156,7 +156,7 @@ async fn health() -> StatusCode {
 
 #[derive(Deserialize)]
 struct IssueSshCertificateRequest {
-    authorization: SignedIssuanceAuthorizationV1,
+    authorization: SignedIssuanceAuthorizationV2,
     ssh_public_key: String,
 }
 
@@ -174,24 +174,24 @@ async fn issue_ssh_certificate(
     Json(request): Json<IssueSshCertificateRequest>,
 ) -> Result<Json<IssueSshCertificateResponse>, ApiError> {
     let public_key = checked_ssh_key(&state, &request, unix_timestamp()?)?;
-    let claims = &request.authorization.authorization;
-    let serial = state
+    state
         .database()
         .map_err(ApiError::internal)?
-        .consume_serial(
-            authority_contracts_model::AdapterGrantKindV1::SshCertificate.as_str(),
-            &claims.nonce,
-            claims.expires_at,
-        )
+        .issue_ssh(&request.authorization, |serial| {
+            let response = sign_ssh_certificate(&state, &request, &public_key, serial)
+                .map_err(|e| e.code.to_owned())?;
+            let certificate = response.certificate.clone();
+            let ca = response.ca_fingerprint.clone();
+            Ok((response, certificate, ca))
+        })
         .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::conflict("authorization_replayed"))?;
-    sign_ssh_certificate(&state, &request, &public_key, serial).map(Json)
+        .map_err(mtls_access_error)
+        .map(Json)
 }
 
 #[derive(Deserialize)]
 struct IssueMtlsCertificateRequest {
-    authorization: SignedMtlsIssuanceAuthorizationV1,
+    authorization: SignedMtlsIssuanceAuthorizationV2,
     public_key_pem: String,
 }
 
@@ -215,18 +215,23 @@ async fn issue_mtls_certificate(
     let certificate = state
         .database()
         .map_err(ApiError::internal)?
-        .issue(&ca_id, &request.authorization.authorization, |serial| {
-            state.with_mtls_ca(|ca| {
-                build_mtls_certificate(
-                    &public_key,
-                    &request.authorization.authorization,
-                    ca,
-                    serial,
-                    extensions,
-                )
-                .map_err(|e| e.to_string())
-            })
-        })
+        .issue(
+            &ca_id,
+            &request.authorization.authorization,
+            &request.authorization.generation,
+            |serial| {
+                state.with_mtls_ca(|ca| {
+                    build_mtls_certificate(
+                        &public_key,
+                        &request.authorization.authorization,
+                        ca,
+                        serial,
+                        extensions,
+                    )
+                    .map_err(|e| e.to_string())
+                })
+            },
+        )
         .await
         .map_err(mtls_access_error)?;
     mtls_response(&state, &request, &certificate).map(Json)
@@ -440,10 +445,10 @@ fn sign_ssh_certificate(
         .cert_type(certificate::CertType::User)
         .map_err(ApiError::internal)?;
     builder
-        .key_id(format!(
-            "{}:{}",
-            authorization.subject_user_id, authorization.device_id
-        ))
+        .key_id(
+            authority_issuer_core::fence::ssh_key_id(&request.authorization)
+                .map_err(ApiError::internal)?,
+        )
         .map_err(ApiError::internal)?;
     for principal in &authorization.principals {
         builder
@@ -541,7 +546,7 @@ mod tests {
         thread,
     };
 
-    use authority_contracts_model::IssuanceAuthorizationV1;
+    use authority_contracts_model::IssuanceAuthorizationV2;
     use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
     use authority_issuer_core::sign_authorization;
     use authority_replay_ledger::ReplayLedger;
@@ -571,8 +576,8 @@ mod tests {
         let subject_key =
             PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("generate subject key");
         let now = unix_timestamp().expect("current timestamp");
-        let authorization = IssuanceAuthorizationV1 {
-            version: "1".to_owned(),
+        let authorization = IssuanceAuthorizationV2 {
+            version: "2".to_owned(),
             issuer: "domain-authority:example".to_owned(),
             domain_id: "domain_example".to_owned(),
             subject_user_id: "user_01".to_owned(),
@@ -584,13 +589,22 @@ mod tests {
                 .to_string(),
             principals: vec!["deploy".to_owned()],
             policy_id: "policy_01".to_owned(),
+            decision_id: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
             nonce: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
             issued_at: now,
             not_before: now,
             expires_at: now + 300,
             audience: "credential-issuer".to_owned(),
         };
-        let envelope = sign_authorization(authorization, &control_signer).expect("sign envelope");
+        let envelope = sign_authorization(
+            authorization,
+            authority_contracts_model::fence::IdentityGenerations {
+                subject: 1,
+                device: 1,
+            },
+            &control_signer,
+        )
+        .expect("sign envelope");
         let request = || IssueSshCertificateRequest {
             authorization: envelope.clone(),
             ssh_public_key: subject_key
@@ -658,8 +672,8 @@ mod tests {
         let state = AppState::new(verifier, old_ca, replay_ledger, 100);
         let request = |nonce: &str| IssueSshCertificateRequest {
             authorization: sign_authorization(
-                IssuanceAuthorizationV1 {
-                    version: "1".to_owned(),
+                IssuanceAuthorizationV2 {
+                    version: "2".to_owned(),
                     issuer: "domain-authority:example".to_owned(),
                     domain_id: "domain_example".to_owned(),
                     subject_user_id: "user_01".to_owned(),
@@ -671,11 +685,16 @@ mod tests {
                         .to_string(),
                     principals: vec!["deploy".to_owned()],
                     policy_id: "policy_01".to_owned(),
+                    decision_id: nonce.to_owned(),
                     nonce: nonce.to_owned(),
                     issued_at: now,
                     not_before: now,
                     expires_at: now + 300,
                     audience: "credential-issuer".to_owned(),
+                },
+                authority_contracts_model::fence::IdentityGenerations {
+                    subject: 1,
+                    device: 1,
                 },
                 &control_signer,
             )

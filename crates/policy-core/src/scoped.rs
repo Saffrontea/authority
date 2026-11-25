@@ -10,7 +10,7 @@ use std::{
 };
 
 use authority_planning_core::{
-    Derivation, Mechanism, Model, Plan, Request, solve_minimal_authority,
+    Derivation, Mechanism, Model, Plan, Request, solve_minimal_authority_checked,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -67,12 +67,12 @@ pub enum AbilityScope {
         address: Ipv4Addr,
     },
     NetworkReachability {
-        source: Ipv4Addr,
-        destination: Ipv4Addr,
+        source: crate::resources::Ipv4Set,
+        destination: crate::resources::Ipv4Set,
     },
     NetworkRouteAuthorization {
-        source: Ipv4Addr,
-        destination: Ipv4Addr,
+        source: crate::resources::Ipv4Set,
+        destination: crate::resources::Ipv4Set,
     },
     SshSession {
         public_key_fingerprint: String,
@@ -95,14 +95,14 @@ pub enum AbilityScope {
         service_audience: String,
     },
     TcpConnection {
-        source: Ipv4Addr,
-        destination: Ipv4Addr,
-        ports: BTreeSet<u16>,
+        source: crate::resources::Ipv4Set,
+        destination: crate::resources::Ipv4Set,
+        ports: crate::resources::PortSet,
     },
     TcpAdmission {
-        source: Ipv4Addr,
-        destination: Ipv4Addr,
-        ports: BTreeSet<u16>,
+        source: crate::resources::Ipv4Set,
+        destination: crate::resources::Ipv4Set,
+        ports: crate::resources::PortSet,
     },
 }
 
@@ -130,8 +130,8 @@ impl AbilityScope {
                 source,
                 destination,
             } => Self::NetworkReachability {
-                source: *source,
-                destination: *destination,
+                source: source.clone(),
+                destination: destination.clone(),
             },
             Self::SshCredential {
                 public_key_fingerprint,
@@ -156,8 +156,8 @@ impl AbilityScope {
                 destination,
                 ports,
             } => Self::TcpConnection {
-                source: *source,
-                destination: *destination,
+                source: source.clone(),
+                destination: destination.clone(),
                 ports: ports.clone(),
             },
             other => other.clone(),
@@ -204,9 +204,35 @@ impl AbilityScope {
         }
     }
 
-    #[allow(clippy::match_same_arms)] // Separate authority kinds keep value-level proof branches explicit.
+    #[allow(clippy::match_same_arms, clippy::too_many_lines)] // Explicit authority-kind branches are extracted for value-level proofs.
     fn contains(&self, requested: &Self) -> bool {
         match (self, requested) {
+            (
+                Self::NetworkRouteAuthorization {
+                    source,
+                    destination,
+                },
+                Self::NetworkRouteAuthorization {
+                    source: from,
+                    destination: to,
+                },
+            )
+            | (
+                Self::NetworkReachability {
+                    source,
+                    destination,
+                },
+                Self::NetworkReachability {
+                    source: from,
+                    destination: to,
+                },
+            ) => {
+                !from.is_empty()
+                    && !to.is_empty()
+                    && from.is_subset(source)
+                    && to.is_subset(destination)
+            }
+
             (
                 Self::SshSession {
                     public_key_fingerprint,
@@ -255,10 +281,11 @@ impl AbilityScope {
                     ports: selected,
                 },
             ) => {
-                source == from
-                    && destination == to
+                !from.is_empty()
+                    && !to.is_empty()
+                    && from.is_subset(source)
+                    && to.is_subset(destination)
                     && !selected.is_empty()
-                    && selected.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
                     && !selected.contains(&0)
                     && selected.is_subset(ports)
             }
@@ -274,10 +301,11 @@ impl AbilityScope {
                     ports: selected,
                 },
             ) => {
-                source == from
-                    && destination == to
+                !from.is_empty()
+                    && !to.is_empty()
+                    && from.is_subset(source)
+                    && to.is_subset(destination)
                     && !selected.is_empty()
-                    && selected.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
                     && !selected.contains(&0)
                     && selected.is_subset(ports)
             }
@@ -308,7 +336,7 @@ impl ScopedAbility {
 pub struct NetworkResources {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation:
-        Option<Box<authority_contracts_model::observation::SignedEndpointObservationV1>>,
+        Option<Box<authority_contracts_model::observation::SignedEndpointObservationV2>>,
     pub source_address: Ipv4Addr,
     pub target_address: Ipv4Addr,
     pub registered_wireguard_key: String,
@@ -320,7 +348,7 @@ pub struct NetworkResources {
 #[derive(Debug, Clone, Default)]
 pub struct PolicyScope {
     pub ssh_principals: BTreeSet<String>,
-    pub tcp_ports: BTreeSet<u16>,
+    pub tcp_ports: crate::resources::PortSet,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -356,7 +384,9 @@ pub struct RequestedMtls {
 
 #[derive(Debug, Clone)]
 pub struct RequestedTcp {
-    pub ports: BTreeSet<u16>,
+    pub ports: crate::resources::PortSet,
+    pub source_addresses: Option<crate::resources::Ipv4Set>,
+    pub destination_addresses: Option<crate::resources::Ipv4Set>,
     pub ttl_seconds: i64,
 }
 
@@ -561,8 +591,16 @@ fn requested_scope(
                 }
             } else {
                 AbilityScope::NetworkReachability {
-                    source: resources.source_address,
-                    destination: resources.target_address,
+                    source: requested
+                        .tcp
+                        .as_ref()
+                        .and_then(|tcp| tcp.source_addresses.clone())
+                        .unwrap_or_else(|| resources.source_address.into()),
+                    destination: requested
+                        .tcp
+                        .as_ref()
+                        .and_then(|tcp| tcp.destination_addresses.clone())
+                        .unwrap_or_else(|| resources.target_address.into()),
                 }
             };
             (scope, input.ttl_seconds)
@@ -597,8 +635,16 @@ fn requested_scope(
             let input = requested.tcp.as_ref().ok_or(ScopeError::InvalidRequest)?;
             (
                 AbilityScope::TcpConnection {
-                    source: resources.source_address,
-                    destination: resources.target_address,
+                    source: requested
+                        .tcp
+                        .as_ref()
+                        .and_then(|tcp| tcp.source_addresses.clone())
+                        .unwrap_or_else(|| resources.source_address.into()),
+                    destination: requested
+                        .tcp
+                        .as_ref()
+                        .and_then(|tcp| tcp.destination_addresses.clone())
+                        .unwrap_or_else(|| resources.target_address.into()),
                     ports: input.ports.clone(),
                 },
                 input.ttl_seconds,
@@ -719,6 +765,17 @@ pub(crate) fn instantiate(
             .mechanisms
             .into_iter()
             .filter_map(|edge| {
+                if edge.id == AccessMechanism::TcpAdmission
+                    && let Some(envelope) = &resources.observation
+                {
+                    let ability = abilities.get(&Ability::TcpAdmission)?;
+                    let AbilityScope::TcpAdmission { ports, .. } = &ability.scope else {
+                        return None;
+                    };
+                    if !ports.is_subset(&envelope.observation.tcp_ports) {
+                        return None;
+                    }
+                }
                 Some(Mechanism {
                     id: edge.id,
                     requires: scope(&edge.requires)?,
@@ -787,7 +844,7 @@ pub fn evaluate_scoped(
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let model = instantiate(request, &abilities, resources);
-    let realization = solve_minimal_authority(
+    let realization = solve_minimal_authority_checked(
         &model,
         &Request {
             goals: goals.clone(),
@@ -798,7 +855,10 @@ pub fn evaluate_scoped(
             max_states: crate::realization::ACCESS_PLANNING_STATES,
         },
         |_| true,
-        crate::ability_policy::authority_leq,
+        |a, b| {
+            crate::ability_policy::authority_leq_checked(a, b)
+                .map_err(|_| authority_planning_core::PlanningError::SearchLimit)
+        },
     )
     .map_err(|error| ScopeError::Policy(DenialReason::from(error)))?;
     let proof = crate::selection::plan_evidence(&realization, &model, &goals, &permissions)?;
@@ -877,9 +937,8 @@ fn authorize_ability(
     match authorize(ability, rules) {
         Ok(sources) => Ok(sources),
         Err(PermissionError::InvalidRule) => Err(DenialReason::InvalidPolicy.into()),
-        Err(PermissionError::InvalidRequest | PermissionError::PartitionBudget) => {
-            Err(ScopeError::InvalidRequest)
-        }
+        Err(PermissionError::InvalidRequest) => Err(ScopeError::InvalidRequest),
+        Err(PermissionError::PartitionBudget) => Err(DenialReason::PlanningSearchLimit.into()),
         Err(PermissionError::ExplicitDeny(_)) => {
             Err(DenialReason::ExplicitAbilityDeny(kind).into())
         }
@@ -919,7 +978,7 @@ fn ability_permissions(
             .flatten()
             .cloned()
             .collect(),
-        tcp_ports: BTreeSet::new(),
+        tcp_ports: crate::resources::PortSet::empty(),
     };
     let mut abilities = BTreeMap::new();
     let mut permissions = BTreeMap::new();
@@ -975,6 +1034,9 @@ fn ability_permissions(
             Ok(sources) => {
                 permissions.insert(kind, (ability.clone(), sources));
             }
+            Err(error @ ScopeError::Policy(DenialReason::PlanningSearchLimit)) => {
+                return Err(error);
+            }
             Err(error) => {
                 denials.insert(kind, error);
             }
@@ -1028,7 +1090,7 @@ pub fn evaluate_ability_scoped(
         })
         .collect::<Result<_, _>>()?;
     let model = instantiate(request, &abilities, resources);
-    let realization = solve_minimal_authority(
+    let realization = solve_minimal_authority_checked(
         &model,
         &Request {
             goals: goals.clone(),
@@ -1042,7 +1104,10 @@ pub fn evaluate_ability_scoped(
             max_states: crate::realization::ACCESS_PLANNING_STATES,
         },
         |_| true,
-        crate::ability_policy::authority_leq,
+        |a, b| {
+            crate::ability_policy::authority_leq_checked(a, b)
+                .map_err(|_| authority_planning_core::PlanningError::SearchLimit)
+        },
     )
     .map_err(|error| {
         if error == authority_planning_core::PlanningError::NoSolution {

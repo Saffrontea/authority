@@ -27,22 +27,6 @@ pub enum PermissionError {
 
 fn atoms(scope: &AbilityScope) -> Vec<AbilityScope> {
     match scope {
-        AbilityScope::TcpAdmission { ports, .. } | AbilityScope::TcpConnection { ports, .. } => {
-            ports
-                .iter()
-                .map(|port| {
-                    let mut atom = scope.clone();
-                    match &mut atom {
-                        AbilityScope::TcpAdmission { ports, .. }
-                        | AbilityScope::TcpConnection { ports, .. } => {
-                            *ports = BTreeSet::from([*port]);
-                        }
-                        _ => unreachable!(),
-                    }
-                    atom
-                })
-                .collect()
-        }
         AbilityScope::SshCredential { principals, .. }
         | AbilityScope::SshSession { principals, .. } => principals
             .iter()
@@ -84,15 +68,15 @@ pub fn authorize(
     {
         return Err(PermissionError::InvalidRule);
     }
-    if let Some(region) = tcp_region(requested) {
+    if let Some(region) = resource_region(requested) {
         let mut symbolic = Vec::new();
         for rule in rules {
-            if same_tcp_identity(requested, &rule.authority) {
+            if same_resource_identity(requested, &rule.authority) {
                 symbolic.push(crate::resources::RegionRule {
                     policy: rule.policy,
                     priority: rule.priority,
                     effect: rule.effect,
-                    region: tcp_region(&rule.authority).ok_or(PermissionError::InvalidRule)?,
+                    region: resource_region(&rule.authority).ok_or(PermissionError::InvalidRule)?,
                 });
             }
         }
@@ -100,7 +84,7 @@ pub fn authorize(
     }
     let authorities: Vec<_> = rules.iter().map(|rule| &rule.authority).collect();
     let mut sources = BTreeSet::new();
-    for atom in fragments(requested, &authorities) {
+    for atom in fragments(requested, &authorities).map_err(|_| PermissionError::PartitionBudget)? {
         let winner = rules
             .iter()
             .filter(|rule| rule.authority.contains(&atom))
@@ -120,57 +104,43 @@ pub fn authorize(
     Ok(sources)
 }
 
-fn same_tcp_identity(left: &ScopedAbility, right: &ScopedAbility) -> bool {
-    if left.binding != right.binding || left.scope.kind() != right.scope.kind() {
-        return false;
-    }
-    match (&left.scope, &right.scope) {
-        (
-            AbilityScope::TcpAdmission {
-                source: a,
-                destination: b,
-                ..
-            },
-            AbilityScope::TcpAdmission {
-                source: c,
-                destination: d,
-                ..
-            },
-        )
-        | (
-            AbilityScope::TcpConnection {
-                source: a,
-                destination: b,
-                ..
-            },
-            AbilityScope::TcpConnection {
-                source: c,
-                destination: d,
-                ..
-            },
-        ) => a == c && b == d,
-        _ => false,
-    }
+fn same_resource_identity(left: &ScopedAbility, right: &ScopedAbility) -> bool {
+    left.binding == right.binding
+        && left.scope.kind() == right.scope.kind()
+        && resource_region(right).is_some()
 }
 
-fn tcp_region(ability: &ScopedAbility) -> Option<crate::resources::Region<2>> {
+fn resource_region(ability: &ScopedAbility) -> Option<crate::resources::Region<4>> {
     use crate::resources::{Interval, IntervalSet, Region};
-    let (AbilityScope::TcpAdmission { ports, .. } | AbilityScope::TcpConnection { ports, .. }) =
-        &ability.scope
-    else {
-        return None;
+    let (source, destination, ports) = match &ability.scope {
+        AbilityScope::TcpAdmission {
+            source,
+            destination,
+            ports,
+        }
+        | AbilityScope::TcpConnection {
+            source,
+            destination,
+            ports,
+        } => (source, destination, ports.as_set().clone()),
+        AbilityScope::NetworkRouteAuthorization {
+            source,
+            destination,
+        }
+        | AbilityScope::NetworkReachability {
+            source,
+            destination,
+        } => (
+            source,
+            destination,
+            IntervalSet::new(vec![Interval { start: 0, end: 1 }]).ok()?,
+        ),
+        _ => return None,
     };
     Some(Region([
-        IntervalSet::new(
-            ports
-                .iter()
-                .map(|p| Interval {
-                    start: u64::from(*p),
-                    end: u64::from(*p) + 1,
-                })
-                .collect(),
-        )
-        .ok()?,
+        source.as_set().clone(),
+        destination.as_set().clone(),
+        ports,
         IntervalSet::new(vec![Interval {
             start: u64::try_from(ability.validity.not_before).ok()?,
             end: u64::try_from(ability.validity.expires_at).ok()?,
@@ -181,7 +151,10 @@ fn tcp_region(ability: &ScopedAbility) -> Option<crate::resources::Region<2>> {
 
 // Resource/time partitioning is shared by permission evaluation and authority order.
 // The current finite port/principal representation is deliberately bounded.
-fn fragments(requested: &ScopedAbility, authorities: &[&ScopedAbility]) -> Vec<ScopedAbility> {
+fn fragments(
+    requested: &ScopedAbility,
+    authorities: &[&ScopedAbility],
+) -> Result<Vec<ScopedAbility>, crate::resources::ResourceError> {
     let mut boundaries =
         BTreeSet::from([requested.validity.not_before, requested.validity.expires_at]);
     for authority in authorities {
@@ -201,6 +174,9 @@ fn fragments(requested: &ScopedAbility, authorities: &[&ScopedAbility]) -> Vec<S
     let mut fragments = Vec::new();
     for scope in atoms(&requested.scope) {
         for interval in boundaries.windows(2) {
+            if fragments.len() >= crate::resources::MAX_INTERVALS {
+                return Err(crate::resources::ResourceError::Budget);
+            }
             fragments.push(ScopedAbility {
                 binding: requested.binding,
                 validity: Validity {
@@ -211,32 +187,48 @@ fn fragments(requested: &ScopedAbility, authorities: &[&ScopedAbility]) -> Vec<S
             });
         }
     }
-    fragments
+    Ok(fragments)
 }
 
 /// Semantic inclusion of unions, including split resource sets and adjacent time intervals.
 /// Kinds without an explicit containment relation remain incomparable.
 #[must_use]
 pub fn authority_leq(left: &BTreeSet<ScopedAbility>, right: &BTreeSet<ScopedAbility>) -> bool {
+    authority_leq_checked(left, right).unwrap_or(false)
+}
+
+/// # Errors
+/// Exact inclusion; callers must reject the whole selection on budget failure.
+pub fn authority_leq_checked(
+    left: &BTreeSet<ScopedAbility>,
+    right: &BTreeSet<ScopedAbility>,
+) -> Result<bool, crate::resources::ResourceError> {
+    use crate::resources::{MAX_INTERVALS, ResourceError, uncovered};
     let cover: Vec<_> = right.iter().collect();
-    left.iter().all(|requested| {
-        if let Some(region) = tcp_region(requested) {
-            if !requested.contains(requested) {
-                return false;
-            }
+    for requested in left {
+        if !requested.contains(requested) || right.iter().any(|r| !r.contains(r)) {
+            return Err(ResourceError::Invalid);
+        }
+        if right.iter().any(|r| r.contains(requested)) {
+            continue;
+        }
+        if let Some(region) = resource_region(requested) {
             let cover: Vec<_> = right
                 .iter()
-                .filter(|r| same_tcp_identity(requested, r))
-                .filter_map(tcp_region)
+                .filter(|r| same_resource_identity(requested, r))
+                .filter_map(resource_region)
                 .collect();
-            return crate::resources::uncovered(&region, &cover, crate::resources::MAX_INTERVALS)
-                .is_ok_and(|r| r.is_empty());
+            if !uncovered(&region, &cover, MAX_INTERVALS)?.is_empty() {
+                return Ok(false);
+            }
+        } else if !fragments(requested, &cover)?
+            .iter()
+            .all(|part| right.iter().any(|r| r.contains(part)))
+        {
+            return Ok(false);
         }
-        requested.contains(requested)
-            && fragments(requested, &cover)
-                .iter()
-                .all(|part| right.iter().any(|ability| ability.contains(part)))
-    })
+    }
+    Ok(true)
 }
 
 /// Key choice is explicit policy: request possession or an exact pinned key.
@@ -431,8 +423,8 @@ impl AbilitySelector {
                 },
                 _,
             ) => AbilityScope::NetworkRouteAuthorization {
-                source: *source,
-                destination: *destination,
+                source: (*source).into(),
+                destination: (*destination).into(),
             },
             (
                 Self::NetworkReachability {
@@ -441,8 +433,8 @@ impl AbilitySelector {
                 },
                 _,
             ) => AbilityScope::NetworkReachability {
-                source: *source,
-                destination: *destination,
+                source: (*source).into(),
+                destination: (*destination).into(),
             },
             (
                 Self::TcpAdmission {
@@ -452,9 +444,9 @@ impl AbilitySelector {
                 },
                 _,
             ) => AbilityScope::TcpAdmission {
-                source: *source,
-                destination: *destination,
-                ports: ports.clone(),
+                source: (*source).into(),
+                destination: (*destination).into(),
+                ports: crate::resources::PortSet::from_ports(ports).ok()?,
             },
             (
                 Self::TcpConnection {
@@ -464,68 +456,50 @@ impl AbilitySelector {
                 },
                 _,
             ) => AbilityScope::TcpConnection {
-                source: *source,
-                destination: *destination,
-                ports: ports.clone(),
+                source: (*source).into(),
+                destination: (*destination).into(),
+                ports: crate::resources::PortSet::from_ports(ports).ok()?,
             },
             _ => return self.key_scope(requested),
         })
     }
 
     fn range_scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
-        match (self, requested) {
-            (
-                Self::TcpAdmissionRange {
-                    source,
-                    destination,
-                    ports,
-                },
-                AbilityScope::TcpAdmission {
-                    source: src,
-                    destination: dst,
-                    ports: requested_ports,
-                },
-            )
-            | (
-                Self::TcpConnectionRange {
-                    source,
-                    destination,
-                    ports,
-                },
-                AbilityScope::TcpConnection {
-                    source: src,
-                    destination: dst,
-                    ports: requested_ports,
-                },
-            ) => {
-                if !source.contains_point(u64::from(u32::from(*src)))
-                    || !destination.contains_point(u64::from(u32::from(*dst)))
-                {
-                    return None;
-                }
-                let intersection: BTreeSet<_> = requested_ports
-                    .iter()
-                    .filter(|p| ports.contains_point(u64::from(**p)))
-                    .copied()
-                    .collect();
-                if intersection.is_empty() {
-                    return None;
-                }
-                Some(match requested {
-                    AbilityScope::TcpAdmission { .. } => AbilityScope::TcpAdmission {
-                        source: *src,
-                        destination: *dst,
-                        ports: intersection,
-                    },
-                    _ => AbilityScope::TcpConnection {
-                        source: *src,
-                        destination: *dst,
-                        ports: intersection,
-                    },
-                })
+        use crate::resources::{Ipv4Set, PortSet};
+        let (source, destination, ports) = match self {
+            Self::TcpAdmissionRange {
+                source,
+                destination,
+                ports,
             }
-            _ => None,
-        }
+            | Self::TcpConnectionRange {
+                source,
+                destination,
+                ports,
+            } => (
+                Ipv4Set::try_from(source.clone()).ok()?,
+                Ipv4Set::try_from(destination.clone()).ok()?,
+                PortSet::try_from(ports.clone()).ok()?,
+            ),
+            _ => return None,
+        };
+        Some(match (self, requested) {
+            (Self::TcpAdmissionRange { .. }, AbilityScope::TcpAdmission { .. }) => {
+                AbilityScope::TcpAdmission {
+                    source,
+                    destination,
+                    ports,
+                }
+            }
+            (Self::TcpConnectionRange { .. }, AbilityScope::TcpConnection { .. }) => {
+                AbilityScope::TcpConnection {
+                    source,
+                    destination,
+                    ports,
+                }
+            }
+            _ => return None,
+        })
     }
 
     fn key_scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
@@ -790,7 +764,8 @@ mod tests {
             scope: AbilityScope::TcpConnection {
                 source: [10, 0, 0, 1].into(),
                 destination: [10, 0, 0, 2].into(),
-                ports: ports.iter().copied().collect(),
+                ports: crate::resources::PortSet::from_ports(&ports.iter().copied().collect())
+                    .unwrap(),
             },
         }
     }

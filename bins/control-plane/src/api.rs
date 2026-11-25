@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use authority_contracts_model::{
     AccessAuthorizationBundleV1, AdapterGrantKindV1, AdapterGrantV1, DecisionRevocationNoticeV2,
     PolicyAbilityV2, PolicyDecisionEvaluatedV2, PolicyIntentV1, PolicyOutcomeV1, PolicyRefV2,
-    PolicyRouteV1, PolicySourceV2, SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV1,
-    SignedMtlsIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    PolicyRouteV1, PolicySourceV2, SignedDecisionRevocationNoticeV2, SignedIssuanceAuthorizationV2,
+    SignedMtlsIssuanceAuthorizationV2, SignedNetworkAccessGrantV2,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{
@@ -87,6 +87,10 @@ pub fn router(state: AppState) -> Router {
             post(revoke_access_authorization),
         )
         .route("/v1/revocations", get(pull_revocations))
+        .route(
+            "/v1/identity-revocations",
+            post(crate::identity_revocation::revoke),
+        )
         .route(
             "/v1/access-authorizations/{decision_id}/revocations/status",
             get(revocation_status),
@@ -298,6 +302,12 @@ async fn create_demo_access(
     .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
+    sqlx::query("UPDATE device.nodes SET enforcement_origin=$2 WHERE id=$1")
+        .bind(target_node_id)
+        .bind(state.network_agent_origin())
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::database)?;
     let request_key = json!({"mode":"request"});
     // Policies use symbolic resources; emitted grants remain the exact concrete
     // request supported by the current adapters, never this entire selector.
@@ -866,14 +876,14 @@ async fn authenticated_session(
     let mut transaction = access_policy::begin_authorization(state.pool())
         .await
         .map_err(ApiError::internal)?;
-    let row = sqlx::query("SELECT user_id,device_id,device_public_key,EXTRACT(EPOCH FROM expires_at)::bigint AS expiry, expires_at>clock_timestamp() AS active FROM identity.sessions WHERE domain_id=$1 AND token_digest=$2 FOR UPDATE")
+    let row = sqlx::query("SELECT s.user_id,s.device_id,s.device_public_key,EXTRACT(EPOCH FROM s.expires_at)::bigint AS expiry, s.expires_at>clock_timestamp() AND u.status='active' AND d.status='active' AND COALESCE(d.owner_user_id=s.user_id,false) AND s.subject_generation=u.generation AND s.device_generation=d.generation AS active FROM identity.sessions s JOIN identity.users u ON u.id=s.user_id AND u.domain_id=s.domain_id JOIN device.devices d ON d.id=s.device_id AND d.domain_id=s.domain_id WHERE s.domain_id=$1 AND s.token_digest=$2 FOR UPDATE OF s")
         .bind(state.domain_id()).bind(token_digest.as_slice()).fetch_optional(&mut *transaction).await.map_err(ApiError::internal)?
         .ok_or_else(||ApiError::unauthorized("invalid_session"))?;
     if !row
         .try_get::<bool, _>("active")
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::unauthorized("expired_session"));
+        return Err(ApiError::unauthorized("invalid_session"));
     }
     let device_public_key: Vec<u8> = row
         .try_get("device_public_key")
@@ -946,11 +956,11 @@ struct IssueAccessAuthorizationRequest {
 struct AccessAuthorizationResponse {
     version: String,
     decision_id: String,
-    ssh_authorization: SignedIssuanceAuthorizationV1,
-    network_grant: SignedNetworkAccessGrantV1,
-    node_authorization: SignedIssuanceAuthorizationV1,
-    mtls_authorization: SignedMtlsIssuanceAuthorizationV1,
-    mtls_node_authorization: SignedMtlsIssuanceAuthorizationV1,
+    ssh_authorization: SignedIssuanceAuthorizationV2,
+    network_grant: SignedNetworkAccessGrantV2,
+    node_authorization: SignedIssuanceAuthorizationV2,
+    mtls_authorization: SignedMtlsIssuanceAuthorizationV2,
+    mtls_node_authorization: SignedMtlsIssuanceAuthorizationV2,
 }
 
 async fn fresh_environment(
@@ -1228,8 +1238,25 @@ async fn persist_revocation(
     }
     if notice
         .adapter_kinds
+        .contains(&AdapterGrantKindV1::SshCertificate)
+        || notice
+            .adapter_kinds
+            .contains(&AdapterGrantKindV1::SshSession)
+    {
+        authority_mtls_core::issuance::revoke_ssh_in(&mut transaction, &envelope)
+            .await
+            .map_err(ApiError::database)?;
+    }
+    if notice
+        .adapter_kinds
         .contains(&AdapterGrantKindV1::WireGuardPeer)
         || notice.adapter_kinds.contains(&AdapterGrantKindV1::TcpPort)
+        || notice
+            .adapter_kinds
+            .contains(&AdapterGrantKindV1::SshCertificate)
+        || notice
+            .adapter_kinds
+            .contains(&AdapterGrantKindV1::SshSession)
     {
         sqlx::query(
             "INSERT INTO policy.adapter_deliveries(sequence,receiver_id,origin) VALUES($1,$2,$3)",
@@ -1436,26 +1463,31 @@ fn build_access_bundle(
     let projected = project_authorized(&common, &decision.plan).map_err(ApiError::internal)?;
     let ssh_authorization = sign_authorization(
         required_contract(projected.ssh_issuance, "SSH")?,
+        decision.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
     let node_authorization = sign_authorization(
         required_contract(projected.ssh_node_install, "SSH installation")?,
+        decision.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
     let network_grant = sign_network_grant(
         required_contract(projected.network_grant, "WireGuard")?,
+        decision.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
     let mtls_authorization = sign_mtls_authorization(
         required_contract(projected.mtls_issuance, "mTLS")?,
+        decision.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
     let mtls_node_authorization = sign_mtls_authorization(
         required_contract(projected.mtls_node_install, "mTLS installation")?,
+        decision.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
@@ -1867,13 +1899,13 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 }
 
 #[derive(Debug)]
-struct ApiError {
+pub(crate) struct ApiError {
     status: StatusCode,
     code: &'static str,
 }
 
 impl ApiError {
-    fn database(cause: sqlx::Error) -> Self {
+    pub(crate) fn database(cause: sqlx::Error) -> Self {
         if matches!(&cause, sqlx::Error::Database(error)
             if error.code().as_deref() == Some("40P01"))
         {
@@ -1883,47 +1915,47 @@ impl ApiError {
         Self::internal(cause)
     }
 
-    fn bad_request(code: &'static str) -> Self {
+    pub(crate) fn bad_request(code: &'static str) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             code,
         }
     }
 
-    fn unauthorized(code: &'static str) -> Self {
+    pub(crate) fn unauthorized(code: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
             code,
         }
     }
 
-    fn unauthorized_with_log(code: &'static str, cause: impl std::fmt::Display) -> Self {
+    pub(crate) fn unauthorized_with_log(code: &'static str, cause: impl std::fmt::Display) -> Self {
         error!(%cause, "WebAuthn verification failed");
         Self::unauthorized(code)
     }
 
-    fn not_found(code: &'static str) -> Self {
+    pub(crate) fn not_found(code: &'static str) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             code,
         }
     }
 
-    fn conflict(code: &'static str) -> Self {
+    pub(crate) fn conflict(code: &'static str) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             code,
         }
     }
 
-    fn forbidden(code: &'static str) -> Self {
+    pub(crate) fn forbidden(code: &'static str) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             code,
         }
     }
 
-    fn internal(cause: impl std::fmt::Display) -> Self {
+    pub(crate) fn internal(cause: impl std::fmt::Display) -> Self {
         error!(%cause, "request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -1931,7 +1963,7 @@ impl ApiError {
         }
     }
 
-    fn unavailable(code: &'static str) -> Self {
+    pub(crate) fn unavailable(code: &'static str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code,
@@ -1987,6 +2019,8 @@ mod tests {
             let subject = Uuid::new_v4();
             let device = Uuid::new_v4();
             let target = Uuid::new_v4();
+            sqlx::query("INSERT INTO identity.users(id,domain_id,display_name,username,status) VALUES($1,$2,'fixture',$3,'active')").bind(subject).bind(domain).bind(subject.to_string()).execute(&mut *transaction).await.unwrap();
+            sqlx::query("INSERT INTO device.devices(id,domain_id,owner_user_id,device_public_key,wireguard_public_key,status,owner_kind) VALUES($1,$2,$3,$4,$5,'active','user')").bind(device).bind(domain).bind(subject).bind(vec![0_u8;32]).bind(vec![1_u8;32]).execute(&mut *transaction).await.unwrap();
             let ability = json!({"scope":{"kind":"mtls_credential"},"binding":{"domain_id":domain,"subject_user_id":subject,"device_id":device,"target_node_id":target},"validity":{"not_before":0,"expires_at":expiry}});
             sqlx::query("INSERT INTO policy.issued_ability_grants(domain_id,subject_user_id,device_id,target_node_id,decision_id,ability_kind,ability,policy_refs,not_before,expires_at) VALUES($1,$2,$3,$4,$5,'mtls_credential',$6,$7,0,$8)")
                 .bind(domain).bind(subject).bind(device).bind(target).bind(&decision).bind(ability).bind(json!([{"policy_id":Uuid::new_v4(),"revision":1}])).bind(expiry)
@@ -2077,7 +2111,7 @@ mod tests {
     fn automatic_route_selection_is_bound_into_the_device_proof() {
         let mut request: IssueTcpAuthorizationRequest = serde_json::from_value(json!({
             "device_id": Uuid::from_u128(1), "target_node_id": Uuid::from_u128(2),
-            "destination_ports": [8080], "include_network": false, "ttl_seconds": 20,
+            "destination_ports": [{"start":8080,"end":8081}], "include_network": false, "ttl_seconds": 20,
         }))
         .unwrap();
         let legacy = tcp_authorization_bindings(&request).unwrap();
@@ -2086,15 +2120,17 @@ mod tests {
             vec![
                 request.device_id.to_string(),
                 request.target_node_id.to_string(),
-                "[8080]".to_owned(),
+                "[{\"start\":8080,\"end\":8081}]".to_owned(),
                 "false".to_owned(),
-                "20".to_owned()
+                "20".to_owned(),
+                "null".to_owned(),
+                "null".to_owned()
             ]
         );
         request.automatic_route = true;
         let automatic = tcp_authorization_bindings(&request).unwrap();
-        assert_eq!(&automatic[..5], legacy);
-        assert_eq!(automatic[5], "automatic");
+        assert_eq!(&automatic[..7], legacy);
+        assert_eq!(automatic[7], "automatic");
         assert_ne!(
             session_request_preimage("session", "access.authorize_tcp", &legacy, "100", "nonce"),
             session_request_preimage(
@@ -2119,7 +2155,11 @@ fn revocation_scope(kinds: &[AdapterGrantKindV1]) -> String {
 struct IssueTcpAuthorizationRequest {
     device_id: Uuid,
     target_node_id: Uuid,
-    destination_ports: Vec<u16>,
+    destination_ports: authority_contracts_model::resources::PortSet,
+    #[serde(default)]
+    source_addresses: Option<authority_contracts_model::resources::Ipv4Set>,
+    #[serde(default)]
+    destination_addresses: Option<authority_contracts_model::resources::Ipv4Set>,
     #[serde(default)]
     include_network: bool,
     ttl_seconds: i64,
@@ -2130,9 +2170,9 @@ struct IssueTcpAuthorizationRequest {
 #[derive(Serialize)]
 struct TcpAuthorizationResponse {
     decision_id: String,
-    tcp_grant: authority_contracts_model::SignedTcpAccessGrantV1,
+    tcp_grant: authority_contracts_model::SignedTcpAccessGrantV2,
     #[serde(skip_serializing_if = "Option::is_none")]
-    network_grant: Option<SignedNetworkAccessGrantV1>,
+    network_grant: Option<SignedNetworkAccessGrantV2>,
 }
 
 fn tcp_authorization_bindings(
@@ -2144,6 +2184,8 @@ fn tcp_authorization_bindings(
         serde_json::to_string(&request.destination_ports).map_err(ApiError::internal)?,
         request.include_network.to_string(),
         request.ttl_seconds.to_string(),
+        serde_json::to_string(&request.source_addresses).map_err(ApiError::internal)?,
+        serde_json::to_string(&request.destination_addresses).map_err(ApiError::internal)?,
     ];
     if request.automatic_route {
         bindings.push("automatic".to_owned());
@@ -2175,6 +2217,7 @@ fn tcp_selection(state: &AppState, request: &IssueTcpAuthorizationRequest) -> Se
     }
 }
 
+#[allow(clippy::too_many_lines)] // Input validation and signed response share one committed authorization boundary.
 async fn issue_tcp_authorization(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2191,12 +2234,14 @@ async fn issue_tcp_authorization(
             ..=state.network_grant_ttl_seconds())
             .contains(&request.ttl_seconds)
         || request.destination_ports.is_empty()
-        || request.destination_ports.len() > authority_contracts_model::protocol::MAX_TCP_PORTS
-        || request.destination_ports.contains(&0)
         || request
-            .destination_ports
-            .windows(2)
-            .any(|ports| ports[0] >= ports[1])
+            .source_addresses
+            .as_ref()
+            .is_some_and(authority_contracts_model::resources::Ipv4Set::is_empty)
+        || request
+            .destination_addresses
+            .as_ref()
+            .is_some_and(authority_contracts_model::resources::Ipv4Set::is_empty)
     {
         return Err(ApiError::bad_request("invalid_tcp_request"));
     }
@@ -2222,7 +2267,9 @@ async fn issue_tcp_authorization(
         ),
         &RequestedAccess {
             tcp: Some(RequestedTcp {
-                ports: request.destination_ports.iter().copied().collect(),
+                source_addresses: request.source_addresses.clone(),
+                destination_addresses: request.destination_addresses.clone(),
+                ports: request.destination_ports.clone(),
                 ttl_seconds: request.ttl_seconds,
             }),
             network: (request.include_network || request.automatic_route).then(|| {
@@ -2286,12 +2333,13 @@ fn build_tcp_response(
     let projected = project_authorized(&common, &evaluated.plan).map_err(ApiError::internal)?;
     let tcp_grant = authority_issuer_core::sign_tcp_grant(
         required_contract(projected.tcp_grant, "TCP admission")?,
+        evaluated.generations,
         state.signer(),
     )
     .map_err(ApiError::internal)?;
     let network_grant = projected
         .network_grant
-        .map(|grant| sign_network_grant(grant, state.signer()))
+        .map(|grant| sign_network_grant(grant, evaluated.generations, state.signer()))
         .transpose()
         .map_err(ApiError::internal)?;
     let mut adapters = vec![AdapterGrantV1 {
@@ -2360,12 +2408,12 @@ struct RevocableDecision {
 fn revocable_decision(payload: Value) -> Result<RevocableDecision, ApiError> {
     let (subject, target_node_id, expires_at, issued_kinds) = if payload.get("tcp_grant").is_some()
     {
-        let grant: authority_contracts_model::SignedTcpAccessGrantV1 =
+        let grant: authority_contracts_model::SignedTcpAccessGrantV2 =
             serde_json::from_value(payload["tcp_grant"].clone()).map_err(ApiError::internal)?;
         let mut kinds = vec![AdapterGrantKindV1::TcpPort];
         let mut expiry = grant.grant.expires_at;
         if !payload["network_grant"].is_null() {
-            let network: SignedNetworkAccessGrantV1 =
+            let network: SignedNetworkAccessGrantV2 =
                 serde_json::from_value(payload["network_grant"].clone())
                     .map_err(ApiError::internal)?;
             expiry = expiry.max(network.grant.expires_at);

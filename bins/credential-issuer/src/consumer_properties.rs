@@ -124,7 +124,7 @@ fn fixture(case: &Case) -> (TempDir, AppState, authority_projection_core::Projec
 }
 
 fn ssh_request(
-    auth: &SignedIssuanceAuthorizationV1,
+    auth: &SignedIssuanceAuthorizationV2,
     key: &PrivateKey,
 ) -> IssueSshCertificateRequest {
     serde_json::from_value(
@@ -133,7 +133,7 @@ fn ssh_request(
     .unwrap()
 }
 fn mtls_request(
-    auth: &SignedMtlsIssuanceAuthorizationV1,
+    auth: &SignedMtlsIssuanceAuthorizationV2,
     key: &PKey<Private>,
 ) -> IssueMtlsCertificateRequest {
     serde_json::from_value(json!({"authorization": auth, "public_key_pem": String::from_utf8(key.public_key_to_pem().unwrap()).unwrap()})).unwrap()
@@ -150,13 +150,13 @@ proptest! {
         let (_directory, state, projections) = fixture(&case);
         if mtls {
             let claims = projections.mtls_issuance;
-            let envelope = sign_mtls_authorization(claims.clone(), &KEYS.control).unwrap();
+            let envelope = sign_mtls_authorization(claims.clone(), authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
             let valid = || mtls_request(&envelope, &KEYS.mtls[key]);
             for time in [case.now - 1, case.now + ttl] {
                 let result = issue_mtls_certificate_with_clock(&state, &valid(), || Ok(time));
                 prop_assert_eq!(result.expect_err("reject inactive").code, "authorization_expired");
             }
-            let wrong = sign_mtls_authorization(projections.mtls_node_install, &KEYS.control).unwrap();
+            let wrong = sign_mtls_authorization(projections.mtls_node_install, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
             let result = issue_mtls_certificate_with_clock(&state, &mtls_request(&wrong, &KEYS.mtls[key]), || Ok(case.now));
             prop_assert_eq!(result.expect_err("reject node audience").code, "invalid_audience");
             let result = issue_mtls_certificate_with_clock(&state, &mtls_request(&envelope, &KEYS.mtls[1-key]), || Ok(case.now));
@@ -204,17 +204,17 @@ proptest! {
             let result = issue_mtls_certificate_with_clock(&state, &valid(), || Ok(case.now));
             prop_assert_eq!(result.expect_err("reject replay").code, "authorization_replayed");
             let mut last = claims; last.nonce.push_str("_last");
-            let last = mtls_request(&sign_mtls_authorization(last, &KEYS.control).unwrap(), &KEYS.mtls[key]);
+            let last = mtls_request(&sign_mtls_authorization(last, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap(), &KEYS.mtls[key]);
             prop_assert!(issue_mtls_certificate_with_clock(&state, &last, || Ok(case.now + ttl - 1)).is_ok());
         } else {
             let claims = projections.ssh_issuance;
-            let envelope = sign_authorization(claims.clone(), &KEYS.control).unwrap();
+            let envelope = sign_authorization(claims.clone(), authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
             let valid = || ssh_request(&envelope, &KEYS.ssh[key]);
             for time in [case.now - 1, case.now + ttl] {
                 let result = issue_ssh_certificate_with_clock(&state, &valid(), || Ok(time));
                 prop_assert_eq!(result.expect_err("reject inactive").code, "authorization_expired");
             }
-            let wrong = sign_authorization(projections.ssh_node_install, &KEYS.control).unwrap();
+            let wrong = sign_authorization(projections.ssh_node_install, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
             let result = issue_ssh_certificate_with_clock(&state, &ssh_request(&wrong, &KEYS.ssh[key]), || Ok(case.now));
             prop_assert_eq!(result.expect_err("reject node audience").code, "invalid_audience");
             let result = issue_ssh_certificate_with_clock(&state, &ssh_request(&envelope, &KEYS.ssh[1-key]), || Ok(case.now));
@@ -234,12 +234,12 @@ proptest! {
             prop_assert_eq!(certificate.valid_principals(), case.principals);
             prop_assert_eq!(certificate.valid_after(), u64::try_from(case.now).unwrap());
             prop_assert_eq!(certificate.valid_before(), u64::try_from(case.now + ttl).unwrap());
-            prop_assert_eq!(certificate.key_id(), format!("{}:{}", claims.subject_user_id, claims.device_id));
+            prop_assert_eq!(certificate.key_id(), authority_issuer_core::fence::ssh_key_id(&envelope).unwrap());
             prop_assert_eq!(response.expires_at, case.now + ttl);
             let result = issue_ssh_certificate_with_clock(&state, &valid(), || Ok(case.now));
             prop_assert_eq!(result.expect_err("reject replay").code, "authorization_replayed");
             let mut last = claims; last.nonce.push_str("_last");
-            let last = ssh_request(&sign_authorization(last, &KEYS.control).unwrap(), &KEYS.ssh[key]);
+            let last = ssh_request(&sign_authorization(last, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap(), &KEYS.ssh[key]);
             prop_assert!(issue_ssh_certificate_with_clock(&state, &last, || Ok(case.now + ttl - 1)).is_ok());
         }
     }

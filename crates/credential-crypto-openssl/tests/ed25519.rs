@@ -1,4 +1,4 @@
-use authority_contracts_model::IssuanceAuthorizationV1;
+use authority_contracts_model::IssuanceAuthorizationV2;
 use authority_credential_crypto_openssl::{
     OpenSslEd25519Signer, OpenSslEd25519Verifier, verify_device_signature,
 };
@@ -15,7 +15,15 @@ fn openssl_signs_verifies_and_rejects_tampering() {
         .expect("load private key");
     let verifier = OpenSslEd25519Verifier::from_pem("control-plane-key-1", &public_key)
         .expect("load public key");
-    let mut envelope = sign_authorization(fixture(), &signer).expect("sign authorization");
+    let mut envelope = sign_authorization(
+        fixture(),
+        authority_contracts_model::fence::IdentityGenerations {
+            subject: 1,
+            device: 1,
+        },
+        &signer,
+    )
+    .expect("sign authorization");
     verify_authorization(&envelope, &verifier).expect("verify authorization");
 
     envelope.authorization.device_id = "device_attacker".to_owned();
@@ -51,9 +59,9 @@ fn raw_device_key_verifies_and_rejects_tampering() {
     assert!(!verify_device_signature(&public_key, b"tampered", &signature).expect("reject"));
 }
 
-fn fixture() -> IssuanceAuthorizationV1 {
-    IssuanceAuthorizationV1 {
-        version: "1".to_owned(),
+fn fixture() -> IssuanceAuthorizationV2 {
+    IssuanceAuthorizationV2 {
+        version: "2".to_owned(),
         issuer: "domain-authority:example".to_owned(),
         domain_id: "domain_example".to_owned(),
         subject_user_id: "user_01".to_owned(),
@@ -62,6 +70,7 @@ fn fixture() -> IssuanceAuthorizationV1 {
         ssh_public_key_fingerprint: "SHA256:AbCdEf0123456789_-".to_owned(),
         principals: vec!["deploy".to_owned()],
         policy_id: "policy_01".to_owned(),
+        decision_id: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
         nonce: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
         issued_at: 1_794_326_400,
         not_before: 1_794_326_400,
@@ -72,7 +81,7 @@ fn fixture() -> IssuanceAuthorizationV1 {
 
 #[test]
 fn tcp_signature_binds_ports_addresses_identity_audience_and_deadline() {
-    use authority_contracts_model::TcpAccessGrantV1;
+    use authority_contracts_model::TcpAccessGrantV2;
     use authority_issuer_core::{sign_tcp_grant, verify_tcp_grant_for_node};
     let key = PKey::generate_ed25519().unwrap();
     let signer =
@@ -80,19 +89,27 @@ fn tcp_signature_binds_ports_addresses_identity_audience_and_deadline() {
             .unwrap();
     let verifier =
         OpenSslEd25519Verifier::from_pem("tcp-key", &key.public_key_to_pem().unwrap()).unwrap();
-    let grant: TcpAccessGrantV1 = serde_json::from_str(include_str!(
-        "../../../contracts/test-vectors/tcp-access-grant-v1/valid/basic.json"
+    let grant: TcpAccessGrantV2 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/tcp-access-grant-v2/valid/basic.json"
     ))
     .unwrap();
-    let envelope = sign_tcp_grant(grant, &signer).unwrap();
+    let envelope = sign_tcp_grant(
+        grant,
+        authority_contracts_model::fence::IdentityGenerations {
+            subject: 1,
+            device: 1,
+        },
+        &signer,
+    )
+    .unwrap();
     verify_tcp_grant_for_node(&envelope, &verifier, "node_01", 1_700_000_001).unwrap();
     assert!(verify_tcp_grant_for_node(&envelope, &verifier, "other-node", 1_700_000_001).is_err());
     for now in [1_699_999_999, 1_700_000_060] {
         assert!(verify_tcp_grant_for_node(&envelope, &verifier, "node_01", now).is_err());
     }
     for field in [
-        "source_address",
-        "destination_address",
+        "source_addresses",
+        "destination_addresses",
         "device_id",
         "target_node_id",
         "audience",
@@ -100,12 +117,18 @@ fn tcp_signature_binds_ports_addresses_identity_audience_and_deadline() {
         "destination_ports",
     ] {
         let mut value = serde_json::to_value(&envelope).unwrap();
-        value["grant"][field] = match field {
-            "source_address" | "destination_address" => serde_json::json!("10.77.0.99"),
-            "expires_at" => serde_json::json!(1_700_000_059),
-            "destination_ports" => serde_json::json!([8081]),
-            _ => serde_json::json!("other-value"),
-        };
+        match field {
+            "source_addresses" | "destination_addresses" => {
+                value["grant"]["resources"][field] =
+                    serde_json::json!([{"start": 172_818_531, "end": 172_818_532}]);
+            }
+            "destination_ports" => {
+                value["grant"]["resources"][field] =
+                    serde_json::json!([{"start": 8081, "end": 8082}]);
+            }
+            "expires_at" => value["grant"][field] = serde_json::json!(1_700_000_059),
+            _ => value["grant"][field] = serde_json::json!("other-value"),
+        }
         let tampered = serde_json::from_value(value).unwrap();
         assert!(
             verify_tcp_grant_for_node(&tampered, &verifier, "node_01", 1_700_000_001).is_err(),

@@ -111,9 +111,23 @@ impl AuthorityDb {
         &self,
         ca_id: &str,
         authorization: &MtlsIssuanceAuthorizationV1,
+        generation: &authority_contracts_model::fence::GenerationBinding,
         operation: impl FnOnce(u64) -> Result<X509, String>,
     ) -> Result<X509, AccessError> {
         let mut tx = begin(&self.pool).await.map_err(|e| storage(&e))?;
+        generation
+            .check_identity(
+                &authorization.domain_id,
+                &authorization.subject_user_id,
+                &authorization.device_id,
+            )
+            .map_err(|_| AccessError::Revoked)?;
+        if !crate::issuance::lock_generations(&mut tx, generation)
+            .await
+            .map_err(|e| storage(&e))?
+        {
+            return Err(AccessError::Revoked);
+        }
         sqlx::query("INSERT INTO issuer.decision_state(domain_id,target_node_id,decision_id,expires_at) VALUES($1,$2,$3,$4) ON CONFLICT(domain_id,target_node_id,decision_id) DO UPDATE SET expires_at=GREATEST(issuer.decision_state.expires_at,excluded.expires_at)")
             .bind(&authorization.domain_id).bind(&authorization.target_node_id).bind(&authorization.decision_id).bind(authorization.expires_at).execute(&mut *tx).await.map_err(|e| storage(&e))?;
         let row = sqlx::query("SELECT revoked_at, FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AS now FROM issuer.decision_state WHERE domain_id=$1 AND target_node_id=$2 AND decision_id=$3 FOR UPDATE")
@@ -147,9 +161,10 @@ impl AuthorityDb {
         let certificate =
             operation(u64::try_from(serial).map_err(|e| AccessError::Operation(e.to_string()))?)
                 .map_err(AccessError::Operation)?;
-        sqlx::query("INSERT INTO issuer.certificates(ca_id,serial,domain_id,target_node_id,decision_id,authorization_nonce,certificate_der,not_before,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+        sqlx::query("INSERT INTO issuer.certificates(ca_id,serial,domain_id,target_node_id,decision_id,authorization_nonce,certificate_der,not_before,expires_at,subject_user_id,device_id,subject_generation,device_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
             .bind(ca_id).bind(serial).bind(&authorization.domain_id).bind(&authorization.target_node_id).bind(&authorization.decision_id).bind(&authorization.nonce)
-            .bind(certificate.to_der().map_err(|e|AccessError::Operation(e.to_string()))?).bind(authorization.not_before).bind(authorization.expires_at).execute(&mut *tx).await.map_err(|e| storage(&e))?;
+            .bind(certificate.to_der().map_err(|e|AccessError::Operation(e.to_string()))?).bind(authorization.not_before).bind(authorization.expires_at)
+            .bind(&generation.subject_user_id).bind(&generation.device_id).bind(generation.subject_generation).bind(generation.device_generation).execute(&mut *tx).await.map_err(|e| storage(&e))?;
         tx.commit().await.map_err(|e| storage(&e))?;
         Ok(certificate)
     }
@@ -180,7 +195,7 @@ impl AuthorityDb {
     /// # Errors
     /// An unavailable DB, unknown, revoked or expired certificate is never admitted.
     pub async fn certificate_active(&self, ca_id: &str, serial: i64) -> Result<bool, String> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issuer.certificates c JOIN issuer.decision_state d USING(domain_id,target_node_id,decision_id) WHERE c.ca_id=$1 AND c.serial=$2 AND c.revoked_at IS NULL AND d.revoked_at IS NULL AND c.not_before<=FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AND c.expires_at>FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM issuer.certificates c JOIN issuer.decision_state d USING(domain_id,target_node_id,decision_id) JOIN identity.users u ON u.id=c.subject_user_id::uuid AND u.domain_id=c.domain_id::uuid AND u.generation=c.subject_generation AND u.status='active' JOIN device.devices v ON v.id=c.device_id::uuid AND v.domain_id=u.domain_id AND v.owner_user_id=u.id AND v.generation=c.device_generation AND v.status='active' WHERE c.ca_id=$1 AND c.serial=$2 AND c.revoked_at IS NULL AND d.revoked_at IS NULL AND c.not_before<=FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint AND c.expires_at>FLOOR(EXTRACT(EPOCH FROM clock_timestamp()))::bigint)")
             .bind(ca_id).bind(serial).fetch_one(&self.pool).await.map_err(|e|e.to_string())
     }
 }
@@ -199,7 +214,7 @@ pub async fn begin(pool: &PgPool) -> Result<Transaction<'_, Postgres>, sqlx::Err
     Ok(tx)
 }
 
-async fn consume_in(
+pub(crate) async fn consume_in(
     tx: &mut Transaction<'_, Postgres>,
     issuer_id: &str,
     nonce: &str,

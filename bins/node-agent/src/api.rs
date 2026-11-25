@@ -7,7 +7,7 @@ use std::{
 };
 
 use ::ssh_key::{Certificate, HashAlg};
-use authority_contracts_model::SignedIssuanceAuthorizationV1;
+use authority_contracts_model::SignedIssuanceAuthorizationV2;
 use authority_issuer_core::verify_authorization;
 use axum::{
     Json, Router,
@@ -259,7 +259,7 @@ async fn get_mtls_key(State(state): State<AppState>) -> Result<Json<MtlsKeyRespo
 #[derive(Deserialize)]
 struct InstallCertificateRequest {
     certificate: String,
-    authorization: Option<SignedIssuanceAuthorizationV1>,
+    authorization: Option<SignedIssuanceAuthorizationV2>,
 }
 
 #[derive(Serialize)]
@@ -324,10 +324,8 @@ fn install_ssh_certificate_with_clock(
         .map_err(|_| ApiError::forbidden("certificate_authorization_mismatch"))?;
     if certificate.cert_type() != ::ssh_key::certificate::CertType::User
         || certificate.key_id()
-            != format!(
-                "{}:{}",
-                authorization.subject_user_id, authorization.device_id
-            )
+            != authority_issuer_core::fence::ssh_key_id(signed_authorization)
+                .map_err(ApiError::internal)?
         || certificate.valid_principals() != authorization.principals
         || certificate.valid_after() != authorized_after
         || certificate.valid_before() != authorized_before

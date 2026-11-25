@@ -7,9 +7,9 @@ use authority_device_auth_core::{decode_base64url, encode_base64url};
 use authority_contracts_model::protocol::{NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
     AdapterGrantKindV1, ContractError, DecisionRevocationNoticeV1, DecisionRevocationNoticeV2,
-    IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
+    IssuanceAuthorizationV2, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
     SignedDecisionRevocationNoticeV1, SignedDecisionRevocationNoticeV2,
-    SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    SignedIssuanceAuthorizationV2, SignedMtlsIssuanceAuthorizationV2, SignedNetworkAccessGrantV2,
 };
 use thiserror::Error;
 
@@ -73,12 +73,19 @@ pub enum AuthorizationEnvelopeError {
 ///
 /// Returns an error when contract validation or signing fails.
 pub fn sign_authorization(
-    authorization: IssuanceAuthorizationV1,
+    authorization: IssuanceAuthorizationV2,
+    generations: authority_contracts_model::fence::IdentityGenerations,
     signer: &impl AuthorizationSigner,
-) -> Result<SignedIssuanceAuthorizationV1, AuthorizationEnvelopeError> {
-    let preimage = authorization.signing_preimage()?;
+) -> Result<SignedIssuanceAuthorizationV2, AuthorizationEnvelopeError> {
+    let generation = generations.bind(
+        &authorization.domain_id,
+        &authorization.subject_user_id,
+        &authorization.device_id,
+    );
+    let preimage = generation.envelope_preimage(&authorization.signing_preimage()?)?;
     let signature = signer.sign(&preimage)?;
-    let envelope = SignedIssuanceAuthorizationV1 {
+    let envelope = SignedIssuanceAuthorizationV2 {
+        generation,
         authorization,
         algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
@@ -95,13 +102,13 @@ pub fn sign_authorization(
 /// Returns an error for malformed contracts, invalid encodings, adapter
 /// failures, and signatures that do not verify.
 pub fn verify_authorization(
-    envelope: &SignedIssuanceAuthorizationV1,
+    envelope: &SignedIssuanceAuthorizationV2,
     verifier: &impl AuthorizationVerifier,
 ) -> Result<(), AuthorizationEnvelopeError> {
     envelope.validate()?;
     let signature = decode_base64url(&envelope.signature)
         .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
-    let preimage = envelope.authorization.signing_preimage()?;
+    let preimage = envelope.signing_preimage()?;
     if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
@@ -115,11 +122,14 @@ pub fn verify_authorization(
 /// Returns an error when contract validation or signing fails.
 pub fn sign_network_grant(
     grant: NetworkAccessGrantV1,
+    generations: authority_contracts_model::fence::IdentityGenerations,
     signer: &impl AuthorizationSigner,
-) -> Result<SignedNetworkAccessGrantV1, AuthorizationEnvelopeError> {
-    let preimage = grant.signing_preimage()?;
+) -> Result<SignedNetworkAccessGrantV2, AuthorizationEnvelopeError> {
+    let generation = generations.bind(&grant.domain_id, &grant.subject_user_id, &grant.device_id);
+    let preimage = generation.envelope_preimage(&grant.signing_preimage()?)?;
     let signature = signer.sign(&preimage)?;
-    let envelope = SignedNetworkAccessGrantV1 {
+    let envelope = SignedNetworkAccessGrantV2 {
+        generation,
         grant,
         algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
@@ -135,13 +145,13 @@ pub fn sign_network_grant(
 ///
 /// Returns an error for malformed, tampered, or unverifiable grants.
 pub fn verify_network_grant(
-    envelope: &SignedNetworkAccessGrantV1,
+    envelope: &SignedNetworkAccessGrantV2,
     verifier: &impl AuthorizationVerifier,
 ) -> Result<(), AuthorizationEnvelopeError> {
     envelope.validate()?;
     let signature = decode_base64url(&envelope.signature)
         .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
-    let preimage = envelope.grant.signing_preimage()?;
+    let preimage = envelope.signing_preimage()?;
     if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
@@ -155,7 +165,7 @@ pub fn verify_network_grant(
 /// Returns an error when cryptographic verification fails, the grant is for a
 /// different consumer or node, or its validity window is not active.
 pub fn verify_network_grant_for_node(
-    envelope: &SignedNetworkAccessGrantV1,
+    envelope: &SignedNetworkAccessGrantV2,
     verifier: &impl AuthorizationVerifier,
     expected_target_node_id: &str,
     now: i64,
@@ -290,11 +300,18 @@ pub fn verify_revocation_notice_v2_for_adapter(
 /// Returns an error for invalid fields or signing adapter failures.
 pub fn sign_mtls_authorization(
     authorization: MtlsIssuanceAuthorizationV1,
+    generations: authority_contracts_model::fence::IdentityGenerations,
     signer: &impl AuthorizationSigner,
-) -> Result<SignedMtlsIssuanceAuthorizationV1, AuthorizationEnvelopeError> {
-    let preimage = authorization.signing_preimage()?;
+) -> Result<SignedMtlsIssuanceAuthorizationV2, AuthorizationEnvelopeError> {
+    let generation = generations.bind(
+        &authorization.domain_id,
+        &authorization.subject_user_id,
+        &authorization.device_id,
+    );
+    let preimage = generation.envelope_preimage(&authorization.signing_preimage()?)?;
     let signature = signer.sign(&preimage)?;
-    let envelope = SignedMtlsIssuanceAuthorizationV1 {
+    let envelope = SignedMtlsIssuanceAuthorizationV2 {
+        generation,
         authorization,
         algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
@@ -310,13 +327,13 @@ pub fn sign_mtls_authorization(
 ///
 /// Returns an error for malformed, tampered, or unverifiable envelopes.
 pub fn verify_mtls_authorization(
-    envelope: &SignedMtlsIssuanceAuthorizationV1,
+    envelope: &SignedMtlsIssuanceAuthorizationV2,
     verifier: &impl AuthorizationVerifier,
 ) -> Result<(), AuthorizationEnvelopeError> {
     envelope.validate()?;
     let signature = decode_base64url(&envelope.signature)
         .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
-    let preimage = envelope.authorization.signing_preimage()?;
+    let preimage = envelope.signing_preimage()?;
     if !verifier.verify(&envelope.key_id, &preimage, &signature)? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
@@ -328,11 +345,14 @@ pub fn verify_mtls_authorization(
 /// # Errors
 /// Returns an error for invalid claims or signer failure.
 pub fn sign_tcp_grant(
-    grant: authority_contracts_model::TcpAccessGrantV1,
+    grant: authority_contracts_model::TcpAccessGrantV2,
+    generations: authority_contracts_model::fence::IdentityGenerations,
     signer: &impl AuthorizationSigner,
-) -> Result<authority_contracts_model::SignedTcpAccessGrantV1, AuthorizationEnvelopeError> {
-    let signature = signer.sign(&grant.signing_preimage()?)?;
-    let envelope = authority_contracts_model::SignedTcpAccessGrantV1 {
+) -> Result<authority_contracts_model::SignedTcpAccessGrantV2, AuthorizationEnvelopeError> {
+    let generation = generations.bind(&grant.domain_id, &grant.subject_user_id, &grant.device_id);
+    let signature = signer.sign(&generation.envelope_preimage(&grant.signing_preimage()?)?)?;
+    let envelope = authority_contracts_model::SignedTcpAccessGrantV2 {
+        generation,
         grant,
         algorithm: authority_contracts_model::protocol::SIGNATURE_ALGORITHM_ED25519.to_owned(),
         key_id: signer.key_id().to_owned(),
@@ -347,7 +367,7 @@ pub fn sign_tcp_grant(
 /// # Errors
 /// Returns an error for invalid, tampered, misdirected, or inactive grants.
 pub fn verify_tcp_grant_for_node(
-    envelope: &authority_contracts_model::SignedTcpAccessGrantV1,
+    envelope: &authority_contracts_model::SignedTcpAccessGrantV2,
     verifier: &impl AuthorizationVerifier,
     target_node_id: &str,
     now: i64,
@@ -355,11 +375,7 @@ pub fn verify_tcp_grant_for_node(
     envelope.validate()?;
     let signature = decode_base64url(&envelope.signature)
         .ok_or(AuthorizationEnvelopeError::InvalidSignatureEncoding)?;
-    if !verifier.verify(
-        &envelope.key_id,
-        &envelope.grant.signing_preimage()?,
-        &signature,
-    )? {
+    if !verifier.verify(&envelope.key_id, &envelope.signing_preimage()?, &signature)? {
         return Err(AuthorizationEnvelopeError::VerificationFailed);
     }
     if envelope.grant.audience != NETWORK_AGENT_AUDIENCE {
@@ -454,7 +470,15 @@ mod tests {
     #[test]
     fn signed_envelope_round_trips_and_rejects_tampering() {
         let crypto = FakeCrypto::default();
-        let mut envelope = sign_authorization(fixture(), &crypto).expect("sign fixture");
+        let mut envelope = sign_authorization(
+            fixture(),
+            authority_contracts_model::fence::IdentityGenerations {
+                subject: 1,
+                device: 1,
+            },
+            &crypto,
+        )
+        .expect("sign fixture");
         verify_authorization(&envelope, &crypto).expect("verify fixture");
         envelope.authorization.target_node_id = "node_02".to_owned();
         assert!(matches!(
@@ -466,7 +490,15 @@ mod tests {
     #[test]
     fn noncanonical_signature_alias_is_rejected_before_crypto() {
         let crypto = FakeCrypto::default();
-        let mut envelope = sign_authorization(fixture(), &crypto).unwrap();
+        let mut envelope = sign_authorization(
+            fixture(),
+            authority_contracts_model::fence::IdentityGenerations {
+                subject: 1,
+                device: 1,
+            },
+            &crypto,
+        )
+        .unwrap();
         let alias = match envelope.signature.pop().unwrap() {
             'A' => 'B',
             'Q' => 'R',
@@ -484,7 +516,15 @@ mod tests {
     #[test]
     fn network_grant_is_bound_to_target_and_time() {
         let crypto = FakeCrypto::default();
-        let envelope = sign_network_grant(network_fixture(), &crypto).expect("sign grant");
+        let envelope = sign_network_grant(
+            network_fixture(),
+            authority_contracts_model::fence::IdentityGenerations {
+                subject: 1,
+                device: 1,
+            },
+            &crypto,
+        )
+        .expect("sign grant");
         verify_network_grant_for_node(&envelope, &crypto, "node_01", 1_794_326_500)
             .expect("verify active grant");
         assert!(matches!(
@@ -592,9 +632,9 @@ mod tests {
         }
     }
 
-    fn fixture() -> IssuanceAuthorizationV1 {
-        IssuanceAuthorizationV1 {
-            version: "1".to_owned(),
+    fn fixture() -> IssuanceAuthorizationV2 {
+        IssuanceAuthorizationV2 {
+            version: "2".to_owned(),
             issuer: "domain-authority:example".to_owned(),
             domain_id: "domain_example".to_owned(),
             subject_user_id: "user_01".to_owned(),
@@ -603,6 +643,7 @@ mod tests {
             ssh_public_key_fingerprint: "SHA256:AbCdEf0123456789_-".to_owned(),
             principals: vec!["deploy".to_owned()],
             policy_id: "policy_01".to_owned(),
+            decision_id: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
             nonce: "dGVzdC1ub25jZS0wMTIzNDU2Nzg5YWJjZGVm".to_owned(),
             issued_at: 1_794_326_400,
             not_before: 1_794_326_400,

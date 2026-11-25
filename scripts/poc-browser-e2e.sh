@@ -233,6 +233,13 @@ ssh-keygen -L -f "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" | grep -q
     die 'issued certificate does not contain the deploy principal'
 printf '%s\n%s\n' "${registered}" "${issued}"
 
+# Focused reruns retain real enrollment, passkeys, replicas and kernel enforcement.
+if [[ "${AUTHORITY_E2E_IDENTITY_ONLY:-0}" == 1 ]]; then
+    python3 "${SCRIPT_DIR}/identity-revocation-e2e.py" "${session}" "${control_origin}" "${issuer_origin}" "${node_origin}" "${network_agent_origin}" "${AUTHORITY_SSH_TARGET:?}"
+    mise run mesh:configure
+    exit 0
+fi
+
 certificate_only_body="$(jq -nc --rawfile certificate "${PROJECT_DIR}/.secrets/poc-ssh/id_ed25519-cert.pub" '{certificate:$certificate}')"
 certificate_only_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
     --request POST --header 'content-type: application/json' --data "${certificate_only_body}" \
@@ -476,6 +483,7 @@ if [[ -n "${wireguard_public_key}" ]]; then
     python3 "${SCRIPT_DIR}/mtls-layer-e2e.py" "${session}" "${control_origin}" "${issuer_origin}" "${node_origin}" "${network_agent_origin}"
     client_underlay="${AUTHORITY_SSH_TARGET:?}"
     python3 "${SCRIPT_DIR}/tcp-layer-e2e.py" "${session}" "${control_origin}" "${network_agent_origin}" "${client_underlay}"
+    python3 "${SCRIPT_DIR}/identity-revocation-e2e.py" "${session}" "${control_origin}" "${issuer_origin}" "${node_origin}" "${network_agent_origin}" "${client_underlay}"
     mise run mesh:configure
 fi
 

@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observation",
+    "signature"
+  ],
+  "properties": {
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "challenge",
+        "boot_id",
+        "observed_at",
+        "expires_at",
+        "configuration_sha256",
+        "probe_sha256",
+        "facts",
+        "tcp_ports"
+      ],
+      "properties": {
+        "challenge": {
+          "$ref": "endpoint-challenge-v1.schema.json#/$defs/challenge"
+        },
+        "boot_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "observed_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "configuration_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "probe_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "facts": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ssh_ca_trusted",
+              "mtls_ca_trusted",
+              "tcp_enforcement",
+              "mesh_route_configured",
+              "existing_route_configured"
+            ]
+          }
+        },
+        "tcp_ports": {
+          "$ref": "tcp-resources-v1.schema.json#/$defs/port_set"
+        }
+      }
+    },
+    "signature": {
+      "$ref": "#/$defs/signature"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/endpoint-observation-v2.schema.json",
+  "title": "SignedEndpointObservationV2",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    }
+  }
+}

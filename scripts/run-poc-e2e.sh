@@ -48,6 +48,7 @@ export AUTHORITY_POC_CONTROL_ORIGIN AUTHORITY_POC_ISSUER_ORIGIN AUTHORITY_POC_NO
 cleanup() {
     (( cleaned_up == 0 )) || return 0
     cleaned_up=1
+    "${SCRIPT_DIR}/authority-agent.sh" run _mesh:test-tcp-normal >/dev/null 2>&1 || true
     "${SCRIPT_DIR}/authority-agent.sh" run _mesh:mtls-restore >/dev/null 2>&1 || true
     rm -rf -- "${bootstrap_directory}"
     if ! mise run mesh:test:nft-restore >/dev/null 2>&1; then

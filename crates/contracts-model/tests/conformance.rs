@@ -1,23 +1,23 @@
 use std::{fs, path::Path};
 
 use authority_contracts_model::{
-    AccessAuthorizationBundleV1, IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1,
+    AccessAuthorizationBundleV1, IssuanceAuthorizationV2, MtlsIssuanceAuthorizationV1,
     NetworkAccessGrantV1, PolicyDecisionEvaluatedV1, PolicyDecisionEvaluatedV2,
     SignedDecisionRevocationNoticeV1, SignedDecisionRevocationNoticeV2,
-    SignedIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
+    SignedIssuanceAuthorizationV2, SignedNetworkAccessGrantV2,
 };
 
 #[test]
 fn protocol_bounds_match_the_versioned_wire_schemas() {
     use authority_contracts_model::protocol::{
-        MAX_PLAN_CANDIDATES_V1, MAX_PLAN_MECHANISMS_V1, MAX_TCP_PORTS, PLANNING_EVIDENCE_VERSION_V2,
+        MAX_PLAN_CANDIDATES_V1, MAX_PLAN_MECHANISMS_V1, PLANNING_EVIDENCE_VERSION_V2,
     };
     let plan: serde_json::Value = serde_json::from_str(include_str!(
         "../../../contracts/artifacts/policy-plan-evaluated-v2.schema.json"
     ))
     .unwrap();
-    let tcp: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../contracts/artifacts/tcp-access-grant-v1.schema.json"
+    let resources: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/artifacts/tcp-resources-v1.schema.json"
     ))
     .unwrap();
     assert_eq!(
@@ -37,8 +37,8 @@ fn protocol_bounds_match_the_versioned_wire_schemas() {
         u64::try_from(MAX_PLAN_CANDIDATES_V1).ok()
     );
     assert_eq!(
-        tcp["properties"]["destination_ports"]["maxItems"].as_u64(),
-        u64::try_from(MAX_TCP_PORTS).ok()
+        resources["$defs"]["port_set"]["maxItems"].as_u64(),
+        u64::try_from(authority_contracts_model::resources::MAX_INTERVALS).ok()
     );
 }
 
@@ -46,7 +46,7 @@ fn protocol_bounds_match_the_versioned_wire_schemas() {
 fn valid_vectors_conform_and_have_stable_preimages() {
     for path in vectors("valid") {
         let bytes = fs::read(&path).expect("read valid vector");
-        let contract: IssuanceAuthorizationV1 =
+        let contract: IssuanceAuthorizationV2 =
             serde_json::from_slice(&bytes).expect("deserialize valid vector");
         contract.validate().expect("validate valid vector");
         let first = contract.signing_preimage().expect("build preimage");
@@ -143,7 +143,7 @@ fn encode_hex(bytes: &[u8]) -> String {
 fn invalid_vectors_are_rejected() {
     for path in vectors("invalid") {
         let bytes = fs::read(&path).expect("read invalid vector");
-        let rejected = serde_json::from_slice::<IssuanceAuthorizationV1>(&bytes)
+        let rejected = serde_json::from_slice::<IssuanceAuthorizationV2>(&bytes)
             .map_or(true, |contract| contract.validate().is_err());
         assert!(rejected, "invalid vector was accepted: {}", path.display());
     }
@@ -153,14 +153,14 @@ fn invalid_vectors_are_rejected() {
 fn signed_envelope_vectors_conform() {
     for path in envelope_vectors("valid") {
         let bytes = fs::read(&path).expect("read valid envelope vector");
-        let contract: SignedIssuanceAuthorizationV1 =
+        let contract: SignedIssuanceAuthorizationV2 =
             serde_json::from_slice(&bytes).expect("deserialize valid envelope vector");
         contract.validate().expect("validate envelope vector");
     }
 
     for path in envelope_vectors("invalid") {
         let bytes = fs::read(&path).expect("read invalid envelope vector");
-        let rejected = serde_json::from_slice::<SignedIssuanceAuthorizationV1>(&bytes)
+        let rejected = serde_json::from_slice::<SignedIssuanceAuthorizationV2>(&bytes)
             .map_or(true, |contract| contract.validate().is_err());
         assert!(
             rejected,
@@ -196,15 +196,15 @@ fn network_grant_vectors_conform() {
 
 #[test]
 fn signed_network_grant_vectors_conform() {
-    for path in contract_vectors("signed-network-access-grant-v1", "valid") {
+    for path in contract_vectors("signed-network-access-grant-v2", "valid") {
         let bytes = fs::read(&path).expect("read signed network grant");
-        let grant: SignedNetworkAccessGrantV1 =
+        let grant: SignedNetworkAccessGrantV2 =
             serde_json::from_slice(&bytes).expect("deserialize signed network grant");
         grant.validate().expect("validate signed network grant");
     }
-    for path in contract_vectors("signed-network-access-grant-v1", "invalid") {
+    for path in contract_vectors("signed-network-access-grant-v2", "invalid") {
         let bytes = fs::read(&path).expect("read invalid signed network grant");
-        let rejected = serde_json::from_slice::<SignedNetworkAccessGrantV1>(&bytes)
+        let rejected = serde_json::from_slice::<SignedNetworkAccessGrantV2>(&bytes)
             .map_or(true, |grant| grant.validate().is_err());
         assert!(
             rejected,
@@ -310,7 +310,7 @@ fn contract_vectors(contract: &str, kind: &str) -> Vec<std::path::PathBuf> {
 
 fn vectors(kind: &str) -> Vec<std::path::PathBuf> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/test-vectors/issuance-authorization-v1")
+        .join("../../contracts/test-vectors/issuance-authorization-v2")
         .join(kind);
     let mut paths: Vec<_> = fs::read_dir(directory)
         .expect("read vector directory")
@@ -327,7 +327,7 @@ fn vectors(kind: &str) -> Vec<std::path::PathBuf> {
 
 fn envelope_vectors(kind: &str) -> Vec<std::path::PathBuf> {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../contracts/test-vectors/signed-issuance-authorization-v1")
+        .join("../../contracts/test-vectors/signed-issuance-authorization-v2")
         .join(kind);
     let mut paths: Vec<_> = fs::read_dir(directory)
         .expect("read envelope vector directory")
@@ -344,9 +344,9 @@ fn envelope_vectors(kind: &str) -> Vec<std::path::PathBuf> {
 
 #[test]
 fn tcp_grant_vectors_conform_and_preserve_preimages() {
-    use authority_contracts_model::{SignedTcpAccessGrantV1, TcpAccessGrantV1};
-    for path in contract_vectors("tcp-access-grant-v1", "valid") {
-        let grant: TcpAccessGrantV1 = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    use authority_contracts_model::{SignedTcpAccessGrantV2, TcpAccessGrantV2};
+    for path in contract_vectors("tcp-access-grant-v2", "valid") {
+        let grant: TcpAccessGrantV2 = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let preimage = grant.signing_preimage().unwrap();
         assert_eq!(
             encode_hex(&preimage),
@@ -355,22 +355,22 @@ fn tcp_grant_vectors_conform_and_preserve_preimages() {
                 .trim()
         );
     }
-    for path in contract_vectors("signed-tcp-access-grant-v1", "valid") {
-        let grant: SignedTcpAccessGrantV1 =
+    for path in contract_vectors("signed-tcp-access-grant-v2", "valid") {
+        let grant: SignedTcpAccessGrantV2 =
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         grant.validate().unwrap();
     }
-    for path in contract_vectors("tcp-access-grant-v1", "invalid") {
+    for path in contract_vectors("tcp-access-grant-v2", "invalid") {
         assert!(
-            serde_json::from_slice::<TcpAccessGrantV1>(&fs::read(&path).unwrap())
+            serde_json::from_slice::<TcpAccessGrantV2>(&fs::read(&path).unwrap())
                 .map_or(true, |grant| grant.validate().is_err()),
             "{}",
             path.display()
         );
     }
-    for path in contract_vectors("signed-tcp-access-grant-v1", "invalid") {
+    for path in contract_vectors("signed-tcp-access-grant-v2", "invalid") {
         assert!(
-            serde_json::from_slice::<SignedTcpAccessGrantV1>(&fs::read(&path).unwrap())
+            serde_json::from_slice::<SignedTcpAccessGrantV2>(&fs::read(&path).unwrap())
                 .map_or(true, |grant| grant.validate().is_err()),
             "{}",
             path.display()
@@ -382,8 +382,8 @@ fn tcp_grant_vectors_conform_and_preserve_preimages() {
 fn oversized_fingerprints_are_rejected_before_signing() {
     for length in [44, 100_000] {
         let fingerprint = format!("SHA256:{}", "A".repeat(length));
-        let mut ssh: IssuanceAuthorizationV1 = serde_json::from_str(include_str!(
-            "../../../contracts/test-vectors/issuance-authorization-v1/valid/basic.json"
+        let mut ssh: IssuanceAuthorizationV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/issuance-authorization-v2/valid/basic.json"
         ))
         .unwrap();
         ssh.ssh_public_key_fingerprint = fingerprint.clone();
@@ -405,9 +405,9 @@ fn oversized_fingerprints_are_rejected_before_signing() {
 #[test]
 fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
     use authority_contracts_model::observation::{
-        SignedEndpointChallengeV1, SignedEndpointObservationV1,
+        SignedEndpointChallengeV1, SignedEndpointObservationV2,
     };
-    for name in ["endpoint-challenge-v1", "endpoint-observation-v1"] {
+    for name in ["endpoint-challenge-v1", "endpoint-observation-v2"] {
         for kind in ["valid", "invalid"] {
             for path in contract_vectors(name, kind) {
                 let bytes = fs::read(&path).unwrap();
@@ -415,7 +415,7 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
                     serde_json::from_slice::<SignedEndpointChallengeV1>(&bytes)
                         .is_ok_and(|c| c.validate().is_ok())
                 } else {
-                    serde_json::from_slice::<SignedEndpointObservationV1>(&bytes)
+                    serde_json::from_slice::<SignedEndpointObservationV2>(&bytes)
                         .is_ok_and(|c| c.validate().is_ok())
                 };
                 assert_eq!(accepted, kind == "valid", "{}", path.display());
@@ -433,14 +433,14 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
         )
         .trim()
     );
-    let report: SignedEndpointObservationV1 = serde_json::from_str(include_str!(
-        "../../../contracts/test-vectors/endpoint-observation-v1/valid/basic.json"
+    let report: SignedEndpointObservationV2 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/endpoint-observation-v2/valid/basic.json"
     ))
     .unwrap();
     assert_eq!(
         encode_hex(&report.observation.signing_preimage().unwrap()),
         include_str!(
-            "../../../contracts/test-vectors/endpoint-observation-v1/valid/basic.preimage.hex"
+            "../../../contracts/test-vectors/endpoint-observation-v2/valid/basic.preimage.hex"
         )
         .trim()
     );
@@ -453,5 +453,50 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
     }
     let mut json = serde_json::to_value(report).unwrap();
     json["observation"]["facts"] = serde_json::json!(["tcp_enforcement", "tcp_enforcement"]);
-    assert!(serde_json::from_value::<SignedEndpointObservationV1>(json).is_err());
+    assert!(serde_json::from_value::<SignedEndpointObservationV2>(json).is_err());
+}
+
+#[test]
+fn identity_management_and_resource_vectors_conform() {
+    macro_rules! check {
+        ($name:literal, $ty:ty) => {
+            for (directory, expected) in [("valid", true), ("invalid", false)] {
+                for path in contract_vectors($name, directory) {
+                    let decoded = serde_json::from_slice::<$ty>(&fs::read(&path).unwrap());
+                    assert_eq!(
+                        decoded.is_ok_and(|value| value.validate().is_ok()),
+                        expected,
+                        "{}",
+                        path.display()
+                    );
+                }
+            }
+        };
+    }
+    check!(
+        "generation-binding-v1",
+        authority_contracts_model::fence::GenerationBinding
+    );
+    check!(
+        "tcp-resources-v1",
+        authority_contracts_model::resources::TcpResourcesV1
+    );
+    check!(
+        "signed-mtls-issuance-authorization-v2",
+        authority_contracts_model::SignedMtlsIssuanceAuthorizationV2
+    );
+    check!(
+        "signed-identity-revocation-command-v1",
+        authority_contracts_model::administration::SignedIdentityRevocationCommandV1
+    );
+    for path in contract_vectors("signed-identity-revocation-command-v1", "valid") {
+        let value: authority_contracts_model::administration::SignedIdentityRevocationCommandV1 =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            encode_hex(&value.command.signing_preimage().unwrap()),
+            fs::read_to_string(path.with_extension("preimage.hex"))
+                .unwrap()
+                .trim()
+        );
+    }
 }

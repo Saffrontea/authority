@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/tcp-resources-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "source_addresses",
+    "destination_addresses",
+    "destination_ports"
+  ],
+  "properties": {
+    "source_addresses": {
+      "$ref": "#/$defs/ipv4_set",
+      "minItems": 1
+    },
+    "destination_addresses": {
+      "$ref": "#/$defs/ipv4_set",
+      "minItems": 1
+    },
+    "destination_ports": {
+      "$ref": "#/$defs/port_set",
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "ipv4_set": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967296
+          }
+        }
+      }
+    },
+    "port_set": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 65536
+          }
+        }
+      }
+    }
+  }
+}

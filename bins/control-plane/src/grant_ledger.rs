@@ -101,7 +101,12 @@ mod tests {
             request,
             &RequestedAccess {
                 tcp: Some(RequestedTcp {
-                    ports: BTreeSet::from([8080]),
+                    source_addresses: None,
+                    destination_addresses: None,
+                    ports: authority_contracts_model::resources::PortSet::from_ports(
+                        &BTreeSet::from([8080]),
+                    )
+                    .unwrap(),
                     ttl_seconds: 10,
                 }),
                 ..RequestedAccess::default()

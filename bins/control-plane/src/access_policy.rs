@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub struct AuthorizedAccess {
     pub decision: AbilityDecision,
     pub plan: AuthorizedPlan,
+    pub generations: authority_contracts_model::fence::IdentityGenerations,
 }
 
 pub enum AuthorizationOutcome {
@@ -128,6 +129,10 @@ pub async fn authorize(
         Ok((decision, plan)) => Ok(AuthorizationOutcome::Allowed(Box::new(AuthorizedAccess {
             decision,
             plan,
+            generations: authority_contracts_model::fence::IdentityGenerations {
+                subject: first.try_get("subject_generation")?,
+                device: first.try_get("device_generation")?,
+            },
         }))),
         Err(reason) => Ok(AuthorizationOutcome::Denied(Box::new(reason))),
     }
@@ -176,6 +181,18 @@ async fn snapshot_rows(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AccessRequest,
 ) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    // Every issuance/redemption path takes subject -> device before policy/node
+    // guards. Revocation takes the corresponding exclusive identity guard.
+    sqlx::query("SELECT id FROM identity.users WHERE id=$1 AND domain_id=$2 FOR SHARE")
+        .bind(request.subject_user_id)
+        .bind(request.domain_id)
+        .execute(&mut **transaction)
+        .await?;
+    sqlx::query("SELECT id FROM device.devices WHERE id=$1 AND domain_id=$2 FOR SHARE")
+        .bind(request.device_id)
+        .bind(request.domain_id)
+        .execute(&mut **transaction)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock_shared(policy.ability_policy_lock_key($1, $2, $3))")
         .bind(request.domain_id)
         .bind(request.subject_user_id)
@@ -197,13 +214,14 @@ async fn snapshot_rows(
                 FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
                 host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
-                client.status = 'active' AS device_active, \
+                client.status = 'active' AND subject.status = 'active' AS device_active, subject.generation AS subject_generation, client.generation AS device_generation, \
                 target.status = 'active' AND target_device.status = 'active' \
                     AND target_device.domain_id = policy.domain_id AS target_active, \
                 target_device.device_public_key AS target_public_key, obs.envelope AS observation, obs.pending_challenge, obs.consumed, obs.revision AS observation_revision, client.wireguard_public_key, \
                 host(client.mesh_address) AS device_mesh_address \
          FROM policy.ability_policies AS policy \
          JOIN device.devices AS client ON client.id = $3 \
+         JOIN identity.users AS subject ON subject.id = $2 AND subject.domain_id = $1 \
          JOIN device.nodes AS target ON target.id = $4 \
          JOIN device.devices AS target_device ON target_device.id = target.device_id \
          LEFT JOIN device.endpoint_observations obs ON obs.node_id = target.id AND obs.domain_id = policy.domain_id \
@@ -437,7 +455,12 @@ pub(crate) mod tests {
                 request,
                 &RequestedAccess {
                     tcp: Some(RequestedTcp {
-                        ports: BTreeSet::from([8080]),
+                        source_addresses: None,
+                        destination_addresses: None,
+                        ports: authority_contracts_model::resources::PortSet::from_ports(
+                            &BTreeSet::from([8080]),
+                        )
+                        .unwrap(),
                         ttl_seconds: 10,
                     }),
                     ..RequestedAccess::default()
@@ -500,7 +523,12 @@ pub(crate) mod tests {
         let (request, target_device_id) = live_tcp_request(&pool).await;
         let inputs = RequestedAccess {
             tcp: Some(RequestedTcp {
-                ports: BTreeSet::from([8080]),
+                source_addresses: None,
+                destination_addresses: None,
+                ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from(
+                    [8080],
+                ))
+                .unwrap(),
                 ttl_seconds: 10,
             }),
             ..RequestedAccess::default()
@@ -613,7 +641,10 @@ pub(crate) mod tests {
                 request.clone(),
                 &RequestedAccess {
                     tcp: Some(RequestedTcp {
-                        ports,
+                        source_addresses: None,
+                        destination_addresses: None,
+                        ports: authority_contracts_model::resources::PortSet::from_ports(&ports)
+                            .unwrap(),
                         ttl_seconds: 10,
                     }),
                     ..RequestedAccess::default()
@@ -641,7 +672,12 @@ pub(crate) mod tests {
             request,
             &RequestedAccess {
                 tcp: Some(RequestedTcp {
-                    ports: BTreeSet::from([8080]),
+                    source_addresses: None,
+                    destination_addresses: None,
+                    ports: authority_contracts_model::resources::PortSet::from_ports(
+                        &BTreeSet::from([8080]),
+                    )
+                    .unwrap(),
                     ttl_seconds: 10,
                 }),
                 ..RequestedAccess::default()
@@ -668,7 +704,12 @@ pub(crate) mod tests {
         let (request, _) = live_tcp_request(&pool).await;
         let inputs = RequestedAccess {
             tcp: Some(RequestedTcp {
-                ports: BTreeSet::from([8080]),
+                source_addresses: None,
+                destination_addresses: None,
+                ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from(
+                    [8080],
+                ))
+                .unwrap(),
                 ttl_seconds: 10,
             }),
             ..RequestedAccess::default()

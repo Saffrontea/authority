@@ -1,5 +1,5 @@
 use authority_contracts_model::{
-    IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV1,
+    IssuanceAuthorizationV2, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV2,
     protocol::lifetime_seconds,
 };
 use proptest::prelude::*;
@@ -20,8 +20,8 @@ proptest! {
             prop_assert_eq!(i128::from(seconds), delta);
         }
         let expected = issued <= start && lifetime_ok;
-        let mut ssh: IssuanceAuthorizationV1 = serde_json::from_str(include_str!(
-            "../../../contracts/test-vectors/issuance-authorization-v1/valid/basic.json")).unwrap();
+        let mut ssh: IssuanceAuthorizationV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/issuance-authorization-v2/valid/basic.json")).unwrap();
         ssh.issued_at = issued; ssh.not_before = start; ssh.expires_at = end;
         prop_assert_eq!(ssh.validate().is_ok(), expected);
         let mut network: NetworkAccessGrantV1 = serde_json::from_str(include_str!(
@@ -32,8 +32,8 @@ proptest! {
             "../../../contracts/test-vectors/mtls-issuance-authorization-v1/valid/basic.json")).unwrap();
         mtls.issued_at = issued; mtls.not_before = start; mtls.expires_at = end;
         prop_assert_eq!(mtls.validate().is_ok(), expected);
-        let mut tcp: TcpAccessGrantV1 = serde_json::from_str(include_str!(
-            "../../../contracts/test-vectors/tcp-access-grant-v1/valid/basic.json")).unwrap();
+        let mut tcp: TcpAccessGrantV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/tcp-access-grant-v2/valid/basic.json")).unwrap();
         tcp.issued_at = issued; tcp.not_before = start; tcp.expires_at = end;
         prop_assert_eq!(tcp.validate().is_ok(), expected);
     }

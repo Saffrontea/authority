@@ -97,7 +97,8 @@ deadline.
 
 TCP admission is a separate projection of the same policy decision, identified
 as `tcp.port`. `POST /v1/tcp-authorizations` accepts the authenticated device and
-target, sorted unique `destination_ports`, `ttl_seconds`, and `include_network`.
+target, canonical `destination_ports` intervals, optional source/destination
+address intervals, `ttl_seconds`, and `include_network`.
 With `include_network: false`, it emits only `tcp_grant`: no peer, SSH, or mTLS
 material is required or issued. With `true`, TCP and WireGuard grants share a
 decision id but keep independent deadlines. All selection fields are bound into
@@ -181,10 +182,12 @@ See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 TCP policies support symbolic port intervals and IPv4 ranges; exact resource/time
 subtraction also drives TCP permission evaluation and authority comparison.
-[Symbolic resources and fence primitives](docs/symbolic-resources.md) documents
+[Symbolic resources and identity revocation](docs/symbolic-resources.md) documents
 their wire syntax, tested guarantees and current adapter limits.
-Subject/device revocation enforcement, fully symbolic request/grant scopes and scoped
-administration remain unimplemented. The demo bootstrap token and trusted target
+Subject/device revocation uses signed identity generations, shared PostgreSQL issuance
+fences, durable receiver fences and established-session teardown. TCP requests, grants
+and nftables projections preserve symbolic intervals. Scoped administration remains
+unimplemented: the demo bootstrap token, operator signing root and trusted target
 probe remain trust assumptions. [Endpoint observations](docs/endpoint-observations.md)
 authenticate software reports; they are not hardware-backed attestation. [The next authority-model iteration](docs/authority-model-next.md)
 specifies these remaining contracts, trust assumptions and acceptance checks.

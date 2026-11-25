@@ -1,15 +1,13 @@
 # Authority model: selection, observation, revocation and genesis
 
-Status: partial implementation. Authority-order selection is implemented in this
-iteration. Signed endpoint observations now drive the managed LXC access path;
-see [implemented protocol and its limits](endpoint-observations.md). Selector
-revocation and modeled enrollment remain **not yet live**. Exact interval/product
-algebra now drives TCP evaluation and authority comparison; range/CIDR policy
-selectors are live, while request/grant scopes remain concrete. V3 selector
-contracts and durable generation-fence primitives are implemented but not wired
-into issuance or enforcement. See [current boundaries](symbolic-resources.md).
-The bootstrap token is still an external trust root. The target probe is trusted
-software, not hardware-backed attestation or fully self-describing authority.
+Status: authority-order selection, signed endpoint observations, live subject/device
+generation revocation and symbolic TCP resource scopes are integrated. See the
+[observation protocol](endpoint-observations.md) and [resource/revocation protocol](symbolic-resources.md)
+for the running implementation, receiver limits and administrative commands.
+The requirements below describe the model and its acceptance boundaries. Modeled
+enrollment/genesis and scoped administration remain future work: the bootstrap
+token, operator signing root and trusted software probe are explicit assumptions.
+Software signatures do not provide hardware-backed attestation.
 
 ## Authority order and its limits
 

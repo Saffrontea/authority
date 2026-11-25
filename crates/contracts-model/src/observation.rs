@@ -100,7 +100,7 @@ pub struct SignedEndpointChallengeV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EndpointObservationV1 {
+pub struct EndpointObservationV2 {
     pub challenge: EndpointChallengeV1,
     pub boot_id: String,
     pub observed_at: i64,
@@ -109,15 +109,17 @@ pub struct EndpointObservationV1 {
     pub probe_sha256: String,
     #[serde(deserialize_with = "unique_set")]
     pub facts: BTreeSet<EndpointFact>,
+    pub tcp_ports: crate::resources::PortSet,
 }
-impl EndpointObservationV1 {
+impl EndpointObservationV2 {
     /// Checks the bounded wire representation. Cryptographic verification is separate.
     ///
     /// # Errors
     /// Rejects unknown versions, invalid bindings, bounds or timestamps.
     pub fn validate(&self) -> Result<(), String> {
         self.challenge.validate()?;
-        if self.observed_at < 0
+        if self.facts.contains(&EndpointFact::TcpEnforcement) == self.tcp_ports.is_empty()
+            || self.observed_at < 0
             || !hex_digest(&self.probe_sha256)
             || !super::valid_identifier(&self.boot_id)
             || !hex_digest(&self.configuration_sha256)
@@ -141,13 +143,13 @@ impl EndpointObservationV1 {
     /// Rejects invalid contracts or serialization failures.
     pub fn signing_preimage(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
-        preimage(b"AUTHORITY-ENDPOINT-OBSERVATION-V1\0", self)
+        preimage(b"AUTHORITY-ENDPOINT-OBSERVATION-V2\0", self)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedEndpointObservationV1 {
-    pub observation: EndpointObservationV1,
+pub struct SignedEndpointObservationV2 {
+    pub observation: EndpointObservationV2,
     pub signature: String,
 }
 fn hex_digest(s: &str) -> bool {
@@ -187,7 +189,7 @@ impl SignedEndpointChallengeV1 {
         Ok(())
     }
 }
-impl SignedEndpointObservationV1 {
+impl SignedEndpointObservationV2 {
     /// Checks the bounded wire representation. Cryptographic verification is separate.
     ///
     /// # Errors

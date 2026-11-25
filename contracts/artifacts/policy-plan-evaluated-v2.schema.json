@@ -117,12 +117,12 @@
                   "const": "network_reachability"
                 },
                 "source": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "destination": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 }
               }
             },
@@ -206,23 +206,16 @@
                   "const": "tcp_connection"
                 },
                 "source": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "destination": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "ports": {
-                  "type": "array",
-                  "minItems": 1,
-                  "maxItems": 64,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 65535
-                  }
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/port_set",
+                  "minItems": 1
                 }
               }
             },
@@ -239,12 +232,12 @@
                   "const": "network_route_authorization"
                 },
                 "source": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "destination": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 }
               }
             },
@@ -328,23 +321,16 @@
                   "const": "tcp_admission"
                 },
                 "source": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "destination": {
-                  "type": "string",
-                  "format": "ipv4"
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+                  "minItems": 1
                 },
                 "ports": {
-                  "type": "array",
-                  "minItems": 1,
-                  "maxItems": 64,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 65535
-                  }
+                  "$ref": "tcp-resources-v1.schema.json#/$defs/port_set",
+                  "minItems": 1
                 }
               }
             }
@@ -739,7 +725,7 @@
           }
         },
         "observation": {
-          "$ref": "endpoint-observation-v1.schema.json"
+          "$ref": "endpoint-observation-v2.schema.json"
         }
       }
     },
@@ -753,12 +739,12 @@
       ],
       "properties": {
         "source": {
-          "type": "string",
-          "format": "ipv4"
+          "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+          "minItems": 1
         },
         "destination": {
-          "type": "string",
-          "format": "ipv4"
+          "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set",
+          "minItems": 1
         },
         "registered_wireguard_key": {
           "type": "string",

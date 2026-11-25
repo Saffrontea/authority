@@ -88,16 +88,16 @@ proptest! {
         };
         let ports = ports.into_iter().collect::<Vec<_>>();
         let tcp = project_tcp(&common, &TcpProjectionRequest {
-            source_address: "10.77.0.1".into(), destination_address: "10.77.0.2".into(), destination_ports: ports.clone(),
+            resources: authority_contracts_model::resources::TcpResourcesV1 { source_addresses: [10,77,0,1].into(), destination_addresses: [10,77,0,2].into(), destination_ports: authority_contracts_model::resources::PortSet::from_ports(&ports.iter().copied().collect()).unwrap() },
         }, ttl).unwrap();
-        prop_assert_eq!(&tcp.destination_ports, &ports);
+        prop_assert_eq!(&tcp.resources.destination_ports, &authority_contracts_model::resources::PortSet::from_ports(&ports.iter().copied().collect()).unwrap());
         prop_assert_eq!(tcp.expires_at - tcp.issued_at, ttl);
         prop_assert_eq!(&tcp.decision_id, &common.decision_id);
         let network = project_network(&common, &NetworkProjectionRequest {
             mesh_address: "10.77.0.1".into(), wireguard_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
         }, 600).unwrap();
         prop_assert_eq!(tcp.decision_id, network.nonce);
-        prop_assert_eq!(tcp.source_address, network.mesh_address);
+        prop_assert_eq!(tcp.resources.source_addresses.as_host().unwrap().to_string(), network.mesh_address);
         prop_assert_eq!(network.expires_at - network.issued_at, 600);
     }
 }

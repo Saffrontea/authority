@@ -1,0 +1,30 @@
+{
+  "authorization": {
+    "version": "1",
+    "issuer": "domain-authority:example",
+    "domain_id": "domain_example",
+    "subject_user_id": "user_01",
+    "device_id": "device_01",
+    "target_node_id": "node_01",
+    "client_spki_sha256": "SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    "identity_uri": "spiffe://authority.example/user/user_01/device/device_01",
+    "service_audience": "demo-api",
+    "policy_id": "policy_01@1",
+    "decision_id": "0123456789abcdef0123456789abcdef",
+    "nonce": "0123456789abcdef0123456789abcdef_mtls_issuer",
+    "issued_at": 1700000000,
+    "not_before": 1700000000,
+    "expires_at": 1700000300,
+    "audience": "credential-issuer"
+  },
+  "generation": {
+    "domain_id": "domain_example",
+    "subject_user_id": "user_01",
+    "device_id": "device_01",
+    "subject_generation": 1,
+    "device_generation": 1
+  },
+  "algorithm": "Ed25519",
+  "key_id": "test",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

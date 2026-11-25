@@ -1,0 +1,17 @@
+{
+  "command": {
+    "version": 1,
+    "domain_id": "domain",
+    "selector": {
+      "kind": "subject",
+      "subject_user_id": "alice"
+    },
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "reason": "compromised",
+    "issued_at": 100,
+    "expires_at": 131
+  },
+  "algorithm": "Ed25519",
+  "key_id": "test",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

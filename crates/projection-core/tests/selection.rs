@@ -30,9 +30,17 @@ fn tcp_only_needs_no_peer_or_certificate_material() {
         ProjectionInputs {
             tcp: Some((
                 &TcpProjectionRequest {
-                    source_address: "10.77.0.1".into(),
-                    destination_address: "10.77.0.2".into(),
-                    destination_ports: vec![8080],
+                    resources: authority_contracts_model::resources::TcpResourcesV1 {
+                        source_addresses: ("10.77.0.1").parse().unwrap(),
+                        destination_addresses: ("10.77.0.2").parse().unwrap(),
+                        destination_ports: {
+                            let points: Vec<u16> = vec![8080];
+                            authority_contracts_model::resources::PortSet::from_ports(
+                                &points.into_iter().collect(),
+                            )
+                            .unwrap()
+                        },
+                    },
                 },
                 20,
             )),
@@ -40,7 +48,10 @@ fn tcp_only_needs_no_peer_or_certificate_material() {
         },
     )
     .unwrap();
-    assert_eq!(result.tcp_grant.unwrap().destination_ports, vec![8080]);
+    assert_eq!(
+        result.tcp_grant.unwrap().resources.destination_ports,
+        "8080".parse().unwrap()
+    );
     assert!(result.network_grant.is_none());
     assert!(result.ssh_issuance.is_none());
     assert!(result.ssh_node_install.is_none());
@@ -165,7 +176,7 @@ proptest! {
         let network = NetworkProjectionRequest { wireguard_public_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(), mesh_address: "10.77.0.1".into() };
         let mtls = MtlsProjectionRequest { client_spki_sha256: "SHA256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC".into(),
             identity_uri: "spiffe://authority.example/user/user_01/device/device_01".into(), service_audience: "demo-api".into() };
-        let tcp = TcpProjectionRequest { source_address: "10.77.0.1".into(), destination_address: "10.77.0.2".into(), destination_ports: ports.into_iter().collect() };
+        let tcp = TcpProjectionRequest { resources: authority_contracts_model::resources::TcpResourcesV1 { source_addresses:[10,77,0,1].into(), destination_addresses:[10,77,0,2].into(), destination_ports: authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap() } };
         let plan = AccessPlan { mechanisms, abilities: BTreeSet::new() };
         let projected = project_plan(&claims, &plan, ProjectionInputs {
             ssh: (available & 1 != 0).then_some((&ssh, ttls[0])),
@@ -188,7 +199,6 @@ proptest! {
             macro_rules! common_fields {
                 ($grant:expr, $ttl:expr) => {{
                     let c = $grant;
-                    prop_assert_eq!(&c.version, "1");
                     prop_assert_eq!(&c.issuer, &claims.issuer);
                     prop_assert_eq!(&c.domain_id, &claims.domain_id);
                     prop_assert_eq!(&c.subject_user_id, &claims.subject_user_id);
@@ -202,6 +212,7 @@ proptest! {
             }
             if let Some(c) = result.ssh_issuance {
                 common_fields!(&c, ttls[0]);
+                prop_assert_eq!(&c.version, "2");
                 prop_assert_eq!(c.ssh_public_key_fingerprint, ssh.public_key_fingerprint.clone());
                 prop_assert_eq!(c.principals, ssh.principals.clone());
                 prop_assert_eq!(c.nonce, claims.decision_id.clone());
@@ -209,6 +220,7 @@ proptest! {
             }
             if let Some(c) = result.ssh_node_install {
                 common_fields!(&c, ttls[0]);
+                prop_assert_eq!(&c.version, "2");
                 prop_assert_eq!(c.ssh_public_key_fingerprint, ssh.public_key_fingerprint);
                 prop_assert_eq!(c.principals, ssh.principals);
                 prop_assert_eq!(c.nonce, ssh.terminal_token_hash);
@@ -216,6 +228,7 @@ proptest! {
             }
             if let Some(c) = result.network_grant {
                 common_fields!(&c, ttls[1]);
+                prop_assert_eq!(&c.version, "1");
                 prop_assert_eq!(c.wireguard_public_key, network.wireguard_public_key);
                 prop_assert_eq!(c.mesh_address, network.mesh_address);
                 prop_assert_eq!(c.nonce, claims.decision_id.clone());
@@ -224,6 +237,7 @@ proptest! {
             for (output, audience) in [(result.mtls_issuance, "credential-issuer"), (result.mtls_node_install, "node-agent")] {
                 if let Some(c) = output {
                     common_fields!(&c, ttls[2]);
+                prop_assert_eq!(&c.version, "1");
                     prop_assert_eq!(&c.client_spki_sha256, &mtls.client_spki_sha256);
                     prop_assert_eq!(&c.identity_uri, &mtls.identity_uri);
                     prop_assert_eq!(&c.service_audience, &mtls.service_audience);
@@ -234,9 +248,10 @@ proptest! {
             }
             if let Some(c) = result.tcp_grant {
                 common_fields!(&c, ttls[3]);
-                prop_assert_eq!(c.source_address, tcp.source_address);
-                prop_assert_eq!(c.destination_address, tcp.destination_address);
-                prop_assert_eq!(c.destination_ports, tcp.destination_ports);
+                prop_assert_eq!(&c.version, "2");
+                prop_assert_eq!(c.resources.source_addresses, tcp.resources.source_addresses);
+                prop_assert_eq!(c.resources.destination_addresses, tcp.resources.destination_addresses);
+                prop_assert_eq!(c.resources.destination_ports, tcp.resources.destination_ports);
                 prop_assert_eq!(c.decision_id, claims.decision_id);
                 prop_assert_eq!(c.audience, "network-agent");
             }

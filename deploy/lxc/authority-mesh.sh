@@ -460,6 +460,8 @@ CONTAINER_SCRIPT
   as_root install -d -m 0755 "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority"
   attach "${TARGET_NAME}" install -m 0755 /usr/sbin/nft /usr/local/lib/authority/nft-observe
   as_root install -m 0755 "${SCRIPT_DIR}/endpoint-probe.py" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority/endpoint-probe.py"
+  as_root install -m 0755 "${SCRIPT_DIR}/ssh-guard.py" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority/ssh-guard.py"
+  as_root install -m 0755 "${SCRIPT_DIR}/actuator-stop.py" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority/actuator-stop.py"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
     "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent"
@@ -476,7 +478,10 @@ if ! command -v sshd >/dev/null 2>&1; then
   apt-get update
   apt-get install -y --no-install-recommends openssh-server
 fi
+install -m 0500 /usr/bin/wg /usr/local/lib/authority/wg-enforce
 id deploy >/dev/null 2>&1 || useradd --create-home --shell /bin/sh deploy
+# A non-password account that OpenSSH can authenticate without PAM.
+usermod -p '*' deploy
 install -d -m 0755 /etc/ssh/auth_principals /etc/ssh/sshd_config.d
 install -m 0644 /etc/authority-ssh-ca.pub /etc/ssh/authority-user-ca.pub
 printf 'deploy\n' > /etc/ssh/auth_principals/deploy
@@ -487,7 +492,12 @@ PasswordAuthentication no
 KbdInteractiveAuthentication no
 PermitRootLogin no
 TrustedUserCAKeys /etc/ssh/authority-user-ca.pub
-AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+AuthorizedKeysFile none
+AuthorizedKeysCommand none
+AuthorizedPrincipalsFile none
+AuthorizedPrincipalsCommand /usr/local/lib/authority/ssh-guard.py authorize %u %i
+AuthorizedPrincipalsCommandUser root
+UsePAM no
 EOF
 sshd -t
 install -d -m 0755 /etc/systemd/system/ssh.service.d
@@ -507,7 +517,11 @@ After=network-online.target wg-quick@wg0.service
 Requires=wg-quick@wg0.service
 
 [Service]
+Type=notify
+WatchdogSec=5s
+TimeoutStopSec=5s
 ExecStart=/usr/local/bin/authority-network-agent
+ExecStopPost=/usr/bin/python3 /usr/local/lib/authority/actuator-stop.py
 Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
 Environment=AUTHORITY_WIREGUARD_INTERFACE=wg0
 Environment=AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE=/var/lib/authority/network-agent-replay-ledger
@@ -695,10 +709,51 @@ main() {
     mtls-start) attach "${TARGET_NAME}" systemctl start authority-mtls-service.service authority-mtls-service-2.service ;;
     mtls-restart) attach "${TARGET_NAME}" systemctl restart authority-mtls-service.service authority-mtls-service-2.service ;;
     observation-break) attach "${TARGET_NAME}" /usr/sbin/nft flush chain inet authority_tcp inbound ;;
+    ssh-guard-status)
+      attach "${TARGET_NAME}" journalctl --since '-3min' -u ssh.service --no-pager -n 30
+      attach "${TARGET_NAME}" journalctl --since '-3min' --grep 'SSH guard failed' --no-pager -n 20
+      ;;
     agent-status) network_agent_status ;;
     agent-restart)
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service
       reconnect_client
+      ;;
+    test-tcp-cidr)
+      attach "${TARGET_NAME}" /usr/bin/python3 - <<'KERNEL'
+import subprocess
+nft = '/usr/sbin/nft'
+table = 'authority_interval_test'
+script = f"""add table inet {table}
+add set inet {table} allowed {{ type ipv4_addr . ipv4_addr . inet_service; flags interval,timeout; }}
+add element inet {table} allowed {{ 10.0.0.0-10.255.255.255 . 192.168.0.0-192.168.255.255 . 1024-65535 timeout 30s }}
+"""
+try:
+    subprocess.run([nft,'-f','-'], input=script, text=True, check=True, capture_output=True)
+    for source,target,port,expected in [
+        ('10.0.0.0','192.168.0.0',1024,True),
+        ('10.255.255.255','192.168.255.255',65535,True),
+        ('10.77.0.1','192.168.2.3',8080,True),
+        ('11.0.0.0','192.168.2.3',8080,False),
+        ('10.77.0.1','192.169.2.3',8080,False),
+        ('10.77.0.1','192.168.2.3',1023,False),
+    ]:
+        result = subprocess.run([nft,'get','element','inet',table,'allowed',f'{{ {source} . {target} . {port} }}'],capture_output=True)
+        assert (result.returncode == 0) == expected, (source,target,port,result.stderr.decode())
+    print('Kernel CIDR x CIDR x port range: boundary/interior membership and every outside axis verified')
+finally:
+    subprocess.run([nft,'delete','table','inet',table],check=True,capture_output=True)
+KERNEL
+      ;;
+    test-tcp-wide)
+      attach "${TARGET_NAME}" sh -eu -c 'mkdir -p /etc/systemd/system/authority-network-agent.service.d; printf "[Service]\nEnvironment=AUTHORITY_TCP_MANAGED_PORTS=8080-8180\n" > /etc/systemd/system/authority-network-agent.service.d/e2e-range.conf; systemctl daemon-reload; systemctl restart authority-network-agent.service'
+      reconnect_client
+      ;;
+    test-tcp-normal)
+      attach "${TARGET_NAME}" sh -eu -c 'rm -f /etc/systemd/system/authority-network-agent.service.d/e2e-range.conf; systemctl daemon-reload; systemctl restart authority-network-agent.service'
+      reconnect_client
+      ;;
+    test-tcp-range-present)
+      attach "${TARGET_NAME}" /usr/sbin/nft list set inet authority_tcp allowed | python3 -c 'import sys; s=sys.stdin.read(); assert "8080-8180" in s, "native nft interval is absent"; assert len(s) < 2048, "range expanded into points"'
       ;;
     tcp-demo-install) install_tcp_demo ;;
     client-reconnect) reconnect_client ;;

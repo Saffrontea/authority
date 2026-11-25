@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/signed-issuance-authorization-v2.schema.json",
+  "title": "SignedIssuanceAuthorizationV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authorization",
+    "algorithm",
+    "key_id",
+    "signature",
+    "generation"
+  ],
+  "properties": {
+    "authorization": {
+      "$ref": "issuance-authorization-v2.schema.json"
+    },
+    "algorithm": {
+      "const": "Ed25519"
+    },
+    "key_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 80,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "generation": {
+      "$ref": "generation-binding-v1.schema.json"
+    }
+  }
+}

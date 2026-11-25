@@ -38,10 +38,23 @@
                   },
                   "scope": {
                     "kind": "tcp_connection",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      }
                     ]
                   }
                 },
@@ -58,11 +71,27 @@
                   },
                   "scope": {
                     "kind": "tcp_connection",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080,
-                      8081
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      },
+                      {
+                        "start": 8081,
+                        "end": 8082
+                      }
                     ]
                   }
                 },
@@ -87,10 +116,23 @@
                   },
                   "scope": {
                     "kind": "tcp_admission",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      }
                     ]
                   }
                 },
@@ -107,11 +149,27 @@
                   },
                   "scope": {
                     "kind": "tcp_admission",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080,
-                      8081
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      },
+                      {
+                        "start": 8081,
+                        "end": 8082
+                      }
                     ]
                   }
                 },
@@ -170,10 +228,23 @@
                   },
                   "scope": {
                     "kind": "tcp_connection",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      }
                     ]
                   }
                 },
@@ -190,11 +261,27 @@
                   },
                   "scope": {
                     "kind": "tcp_connection",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080,
-                      8081
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      },
+                      {
+                        "start": 8081,
+                        "end": 8082
+                      }
                     ]
                   }
                 },
@@ -219,10 +306,23 @@
                   },
                   "scope": {
                     "kind": "tcp_admission",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      }
                     ]
                   }
                 },
@@ -239,11 +339,27 @@
                   },
                   "scope": {
                     "kind": "tcp_admission",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2",
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ],
                     "ports": [
-                      8080,
-                      8081
+                      {
+                        "start": 8080,
+                        "end": 8081
+                      },
+                      {
+                        "start": 8081,
+                        "end": 8082
+                      }
                     ]
                   }
                 },
@@ -310,8 +426,18 @@
                   },
                   "scope": {
                     "kind": "network_reachability",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2"
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ]
                   }
                 },
                 "permitted": {
@@ -327,8 +453,18 @@
                   },
                   "scope": {
                     "kind": "network_reachability",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2"
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ]
                   }
                 },
                 "policies": [
@@ -352,8 +488,18 @@
                   },
                   "scope": {
                     "kind": "network_route_authorization",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2"
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ]
                   }
                 },
                 "permitted": {
@@ -369,8 +515,18 @@
                   },
                   "scope": {
                     "kind": "network_route_authorization",
-                    "source": "10.77.0.1",
-                    "destination": "10.77.0.2"
+                    "source": [
+                      {
+                        "start": 172818433,
+                        "end": 172818434
+                      }
+                    ],
+                    "destination": [
+                      {
+                        "start": 172818434,
+                        "end": 172818435
+                      }
+                    ]
                   }
                 },
                 "policies": [
@@ -444,10 +600,23 @@
             },
             "scope": {
               "kind": "tcp_connection",
-              "source": "10.77.0.1",
-              "destination": "10.77.0.2",
+              "source": [
+                {
+                  "start": 172818433,
+                  "end": 172818434
+                }
+              ],
+              "destination": [
+                {
+                  "start": 172818434,
+                  "end": 172818435
+                }
+              ],
               "ports": [
-                8080
+                {
+                  "start": 8080,
+                  "end": 8081
+                }
               ]
             }
           },
@@ -464,11 +633,27 @@
             },
             "scope": {
               "kind": "tcp_connection",
-              "source": "10.77.0.1",
-              "destination": "10.77.0.2",
+              "source": [
+                {
+                  "start": 172818433,
+                  "end": 172818434
+                }
+              ],
+              "destination": [
+                {
+                  "start": 172818434,
+                  "end": 172818435
+                }
+              ],
               "ports": [
-                8080,
-                8081
+                {
+                  "start": 8080,
+                  "end": 8081
+                },
+                {
+                  "start": 8081,
+                  "end": 8082
+                }
               ]
             }
           },
@@ -493,10 +678,23 @@
             },
             "scope": {
               "kind": "tcp_admission",
-              "source": "10.77.0.1",
-              "destination": "10.77.0.2",
+              "source": [
+                {
+                  "start": 172818433,
+                  "end": 172818434
+                }
+              ],
+              "destination": [
+                {
+                  "start": 172818434,
+                  "end": 172818435
+                }
+              ],
               "ports": [
-                8080
+                {
+                  "start": 8080,
+                  "end": 8081
+                }
               ]
             }
           },
@@ -513,11 +711,27 @@
             },
             "scope": {
               "kind": "tcp_admission",
-              "source": "10.77.0.1",
-              "destination": "10.77.0.2",
+              "source": [
+                {
+                  "start": 172818433,
+                  "end": 172818434
+                }
+              ],
+              "destination": [
+                {
+                  "start": 172818434,
+                  "end": 172818435
+                }
+              ],
               "ports": [
-                8080,
-                8081
+                {
+                  "start": 8080,
+                  "end": 8081
+                },
+                {
+                  "start": 8081,
+                  "end": 8082
+                }
               ]
             }
           },

@@ -38,14 +38,14 @@ class ProbeTests(unittest.TestCase):
         import hashlib
         ca = '/etc/ssh/authority-user-ca.pub'
         principals = '/etc/ssh/auth_principals/deploy'
-        files = {ca: 'ca-digest', principals: 'principal-digest'}
+        files = {ca: 'ca-digest', principals: 'principal-digest', '/usr/local/lib/authority/ssh-guard.py': 'guard-digest'}
         process = [123, '456', 'boot-id']
         receipt = {'files': files, 'process': process}
         key = b'fixture-ssh-ca'
         encoded = base64.b64encode(key).decode()
         fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(key).digest()).decode().rstrip('=')
         resources = {'source': '10.77.0.1', 'principal': 'deploy', 'ssh_ca_fingerprints': [fingerprint]}
-        config = f'pubkeyauthentication yes\nauthorizedprincipalscommand none\ntrustedusercakeys {ca}\nauthorizedprincipalsfile /etc/ssh/auth_principals/%u\n'
+        config = f'pubkeyauthentication yes\nauthorizedprincipalscommand /usr/local/lib/authority/ssh-guard.py authorize %u %i\nauthorizedprincipalscommanduser root\ntrustedusercakeys {ca}\nauthorizedprincipalsfile none\nauthorizedkeysfile none\nusepam no\n'
         def contents(path, *args, **kwargs):
             return {str(probe.RECEIPT): json.dumps(receipt), ca: f'ssh-ed25519 {encoded} fixture', principals: 'deploy\n'}[str(path)]
         with (patch.object(probe, 'ssh_files', return_value=files),
@@ -53,12 +53,32 @@ class ProbeTests(unittest.TestCase):
               patch.object(probe, 'run', return_value=config),
               patch.object(Path, 'read_text', contents)):
             self.assertEqual(probe.ssh_probe(resources), receipt)
+            for before, after in [('authorizedprincipalsfile none', 'authorizedprincipalsfile /etc/ssh/auth_principals/%u'), ('usepam no', 'usepam yes'), ('authorizedkeysfile none', 'authorizedkeysfile .ssh/authorized_keys'), ('authorizedprincipalscommanduser root', 'authorizedprincipalscommanduser nobody')]:
+                with patch.object(probe, 'run', return_value=config.replace(before, after)):
+                    with self.assertRaises(ValueError): probe.ssh_probe(resources)
+
             with patch.object(probe, 'process', return_value=[124, '789', 'boot-id']):
                 with self.assertRaises(ValueError): probe.ssh_probe(resources)
             with patch.object(probe, 'ssh_files', return_value={ca: 'changed'}):
                 with self.assertRaises(ValueError): probe.ssh_probe(resources)
             with self.assertRaises(ValueError):
                 probe.ssh_probe({**resources, 'ssh_ca_fingerprints': ['SHA256:wrong-ca']})
+
+    def test_managed_ports_are_symbolic_and_every_kernel_predicate_must_agree(self):
+        layout = {'nftables': [
+            {'rule': {'family': 'inet', 'table': 'authority_tcp', 'expr': [
+                {'match': {'op': '==', 'left': {'payload': {'protocol': 'tcp', 'field': field}},
+                           'right': {'range': [1024, 65535]}}}
+            ]}} for field in ('dport', 'dport', 'sport', 'sport')
+        ]}
+        self.assertEqual(probe.managed_tcp_ports(layout), [{'start': 1024, 'end': 65536}])
+        changed = copy.deepcopy(layout)
+        changed['nftables'][0]['rule']['expr'][0]['match']['right'] = {'set': [8080, 8082]}
+        with self.assertRaises(ValueError): probe.managed_tcp_ports(changed)
+        changed = copy.deepcopy(layout)
+        changed['nftables'][0]['rule']['expr'][0]['match']['op'] = '!='
+        with self.assertRaises(ValueError): probe.managed_tcp_ports(changed)
+        with self.assertRaises(ValueError): probe.managed_tcp_ports({'nftables': layout['nftables'][:3]})
 
     def test_missing_and_changed_kernel_tables_withdraw_tcp_fact(self):
         request = {'signed': {'challenge': {'resources': {}}}, 'interface': 'wg0', 'nft_layout': {'expected': True}}

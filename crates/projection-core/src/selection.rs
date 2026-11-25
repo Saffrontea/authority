@@ -1,6 +1,6 @@
 use authority_contracts_model::protocol::{CREDENTIAL_ISSUER_AUDIENCE, NODE_AGENT_AUDIENCE};
 use authority_contracts_model::{
-    IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV1,
+    IssuanceAuthorizationV2, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1, TcpAccessGrantV2,
 };
 use authority_policy_core::realization::{AccessMechanism, AccessPlan};
 
@@ -20,12 +20,12 @@ pub struct ProjectionInputs<'a> {
 
 #[derive(Debug, Default)]
 pub struct SelectedProjections {
-    pub ssh_issuance: Option<IssuanceAuthorizationV1>,
-    pub ssh_node_install: Option<IssuanceAuthorizationV1>,
+    pub ssh_issuance: Option<IssuanceAuthorizationV2>,
+    pub ssh_node_install: Option<IssuanceAuthorizationV2>,
     pub network_grant: Option<NetworkAccessGrantV1>,
     pub mtls_issuance: Option<MtlsIssuanceAuthorizationV1>,
     pub mtls_node_install: Option<MtlsIssuanceAuthorizationV1>,
-    pub tcp_grant: Option<TcpAccessGrantV1>,
+    pub tcp_grant: Option<TcpAccessGrantV2>,
 }
 
 /// Materializes exactly the mechanisms selected by the policy planner.

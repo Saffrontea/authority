@@ -1,4 +1,6 @@
+mod fence;
 mod observation;
+mod ssh;
 mod tcp;
 
 use std::{
@@ -15,7 +17,7 @@ use std::{
 };
 
 use authority_contracts_model::{
-    AdapterGrantKindV1, SignedDecisionRevocationNoticeV2, SignedNetworkAccessGrantV1,
+    AdapterGrantKindV1, SignedDecisionRevocationNoticeV2, SignedNetworkAccessGrantV2,
 };
 use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
 use authority_device_auth_core::{encode_base64url, node_enrollment_preimage};
@@ -56,6 +58,10 @@ struct PolicyState {
     active_peers: HashMap<String, ActivePeer>,
     revoked_decisions: HashMap<String, i64>,
     tcp: Option<tcp::TcpAdmission>,
+    fences: HashMap<(String, AdapterGrantKindV1), authority_replay_ledger::fence::FenceStore>,
+    ssh_sessions: HashMap<(u32, u64), ssh::Session>,
+    bindings:
+        HashMap<(AdapterGrantKindV1, String), authority_contracts_model::fence::GenerationBinding>,
 }
 
 struct ActivePeer {
@@ -320,14 +326,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         now,
     )?;
     let tcp_ports = value("AUTHORITY_TCP_MANAGED_PORTS", "8080,8081")?
-        .split(',')
-        .map(|port| port.parse::<u16>().map_err(|e| e.to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
-    if tcp_ports.is_empty() || tcp_ports.contains(&0) {
-        return Err("invalid managed TCP ports".into());
-    }
+        .parse::<authority_contracts_model::resources::PortSet>()?;
     let tcp = tcp::TcpAdmission::initialize(&interface, tcp_ports)?;
     clear_all_peers(&interface)?;
+    let link = Command::new("/usr/sbin/ip")
+        .args(["link", "set", "dev", &interface, "up"])
+        .status()?;
+    if !link.success() {
+        return Err("cannot restore managed interface".into());
+    }
     let observer = Arc::new(observation::Observer::new(
         identity_signer,
         identity_path.with_file_name("endpoint-observation-fence"),
@@ -346,6 +353,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity: NodeIdentity { public_key, proof },
     }));
     observation::start_monitor(state.clone());
+    fence::start_monitor(state.clone());
+    ssh::start(state.clone()).await?;
     let router = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/v1/identity", get(identity))
@@ -353,6 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/network-grants", post(apply_grant))
         .route("/v1/tcp-grants", post(apply_tcp_grant))
         .route("/v1/revocations", post(apply_revocation))
+        .route("/v1/identity-revocations", post(fence::apply))
         .with_state(state)
         .layer(
             CorsLayer::new()
@@ -361,6 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .allow_headers([CONTENT_TYPE]),
         );
     let listener = tokio::net::TcpListener::bind(bind).await?;
+    fence::notify_systemd("READY=1\nWATCHDOG=1")?;
     info!(%bind, "network agent listening");
     axum::serve(listener, router).await?;
     Ok(())
@@ -411,9 +422,10 @@ fn load_or_generate_identity(path: &PathBuf) -> Result<OpenSslEd25519Signer, Str
     }
 }
 
+#[allow(clippy::too_many_lines)] // Verification, kernel update and replay commit share a locked boundary.
 async fn apply_grant(
     State(state): State<AppState>,
-    Json(envelope): Json<SignedNetworkAccessGrantV1>,
+    Json(envelope): Json<SignedNetworkAccessGrantV2>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let now = unix_timestamp().map_err(ApiError::internal)?;
     verify_network_grant_for_node(&envelope, &state.0.verifier, &state.0.node_id, now)
@@ -429,6 +441,12 @@ async fn apply_grant(
     // both observe a free slot and exceed the configured bound.
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
     let now = unix_timestamp().map_err(ApiError::internal)?;
+    fence::require(
+        &state,
+        &mut policy,
+        &envelope.generation,
+        AdapterGrantKindV1::WireGuardPeer,
+    )?;
     if now < envelope.grant.not_before || now >= envelope.grant.expires_at {
         return Err(ApiError::unauthorized(
             "invalid_network_grant",
@@ -474,6 +492,10 @@ async fn apply_grant(
                     expires_at,
                 },
             );
+            policy.bindings.insert(
+                (AdapterGrantKindV1::WireGuardPeer, peer.clone()),
+                envelope.generation.clone(),
+            );
             Ok(())
         })
         .map_err(ApiError::internal)?;
@@ -513,6 +535,7 @@ async fn apply_grant(
     }))
 }
 
+#[allow(clippy::too_many_lines)] // Persist tombstones and withdraw all selected adapters before acknowledgment.
 async fn apply_revocation(
     State(state): State<AppState>,
     Json(envelope): Json<SignedDecisionRevocationNoticeV2>,
@@ -526,7 +549,15 @@ async fn apply_revocation(
         .notice
         .adapter_kinds
         .contains(&AdapterGrantKindV1::TcpPort);
-    if !affects_wg && !affects_tcp {
+    let affects_ssh = envelope
+        .notice
+        .adapter_kinds
+        .contains(&AdapterGrantKindV1::SshCertificate)
+        || envelope
+            .notice
+            .adapter_kinds
+            .contains(&AdapterGrantKindV1::SshSession);
+    if !affects_wg && !affects_tcp && !affects_ssh {
         return Err(ApiError::conflict("unsupported_revocation_adapter"));
     }
     for (affected, kind) in [
@@ -561,7 +592,34 @@ async fn apply_revocation(
                 .map_err(ApiError::internal)?;
         }
     }
+    if affects_ssh {
+        let kind = if envelope
+            .notice
+            .adapter_kinds
+            .contains(&AdapterGrantKindV1::SshCertificate)
+        {
+            AdapterGrantKindV1::SshCertificate
+        } else {
+            AdapterGrantKindV1::SshSession
+        };
+        verify_revocation_notice_v2_for_adapter(
+            &envelope,
+            &state.0.verifier,
+            &state.0.node_id,
+            kind,
+            now,
+        )
+        .map_err(|e| ApiError::unauthorized("invalid_revocation_notice", e))?;
+        ledger
+            .consume(
+                &ssh::tombstone(&envelope.notice.domain_id, &decision_id),
+                envelope.notice.expires_at,
+                now,
+            )
+            .map_err(ApiError::internal)?;
+    }
     drop(ledger);
+    ssh::reconcile(&state, &mut policy).map_err(ApiError::internal)?;
     let tcp_removed = if affects_tcp {
         policy
             .tcp
@@ -710,7 +768,7 @@ impl IntoResponse for ApiError {
 
 async fn apply_tcp_grant(
     State(state): State<AppState>,
-    Json(envelope): Json<authority_contracts_model::SignedTcpAccessGrantV1>,
+    Json(envelope): Json<authority_contracts_model::SignedTcpAccessGrantV2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let now = unix_timestamp().map_err(ApiError::internal)?;
     authority_issuer_core::verify_tcp_grant_for_node(
@@ -722,6 +780,12 @@ async fn apply_tcp_grant(
     .map_err(|cause| ApiError::unauthorized("invalid_tcp_grant", cause))?;
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
     let now = unix_timestamp().map_err(ApiError::internal)?;
+    fence::require(
+        &state,
+        &mut policy,
+        &envelope.generation,
+        AdapterGrantKindV1::TcpPort,
+    )?;
     if now < envelope.grant.not_before || now >= envelope.grant.expires_at {
         return Err(ApiError::unauthorized(
             "invalid_tcp_grant",
@@ -739,7 +803,7 @@ async fn apply_tcp_grant(
         return Err(ApiError::conflict("tcp_grant_revoked"));
     }
     let response = json!({ "decision_id": envelope.grant.decision_id, "expires_at": envelope.grant.expires_at,
-        "destination_ports": envelope.grant.destination_ports });
+        "resources": envelope.grant.resources });
     let decision_nonce = format!("tcp_{}", envelope.grant.decision_id);
     observation::require_tcp(&state, &envelope.grant, &decision_nonce, now)?;
     let tcp = policy
@@ -758,5 +822,15 @@ async fn apply_tcp_grant(
     if applied.is_none() {
         return Err(ApiError::conflict("tcp_grant_replayed"));
     }
+    policy.bindings.insert(
+        (
+            AdapterGrantKindV1::TcpPort,
+            response["decision_id"]
+                .as_str()
+                .ok_or_else(|| ApiError::internal("missing TCP decision"))?
+                .into(),
+        ),
+        envelope.generation,
+    );
     Ok(Json(response))
 }

@@ -1,20 +1,28 @@
 {
   "artifacts": {
+    "artifacts/access-authorization-bundle-v1.schema.json": {
+      "version": 1,
+      "sha256": "52943e39fbf38cacd9e0e4ea2637e33985eb5150bba64420b331089476ae5394"
+    },
+    "artifacts/endpoint-challenge-v1.schema.json": {
+      "version": 1,
+      "sha256": "09a116610d571586206eb58ab43c8ab0613ed03f3c9f544d53ff853d1a21d897"
+    },
+    "artifacts/endpoint-observation-v2.schema.json": {
+      "version": 2,
+      "sha256": "0ca157b31e3567701817559fb1d44e9f15792d5e026150d7566ae086c0771123"
+    },
+    "artifacts/generation-binding-v1.schema.json": {
+      "version": 1,
+      "sha256": "1984538062de71725442ff95da337d49393f9c8f239a7e8f00dae4b9bb1a74f1"
+    },
+    "artifacts/issuance-authorization-v2.schema.json": {
+      "version": 2,
+      "sha256": "9f032af64247ce0a2068fe3b4ba7278401c031689ee72f59e7ebed5fc5bfc7b5"
+    },
     "artifacts/mtls-issuance-authorization-v1.schema.json": {
       "version": 1,
       "sha256": "b813264496596c3343cf9461ed73095a9bf7e3099d808342122d27ad4a6dfdc9"
-    },
-    "artifacts/signed-decision-revocation-notice-v2.schema.json": {
-      "version": 2,
-      "sha256": "3ae0a095a6e8057d9a14290365b445a277c0b2a159bea9728a6793f1f101232c"
-    },
-    "artifacts/signed-decision-revocation-notice-v1.schema.json": {
-      "version": 1,
-      "sha256": "f39744e2a95e57b4a378b88dd31fe043d36a97b8ac78acc7f7e6229df8f00ada"
-    },
-    "artifacts/access-authorization-bundle-v1.schema.json": {
-      "version": 1,
-      "sha256": "383b7e026536d12fea290e4eaa7aeb18cd93f963c090910f105eb7a5a0938566"
     },
     "artifacts/network-access-grant-v1.schema.json": {
       "version": 1,
@@ -24,45 +32,53 @@
       "version": 1,
       "sha256": "ce7142dd82223f544a1cac4a28f464cd920675142bb7fa7809f106482043329e"
     },
-    "artifacts/issuance-authorization-v1.schema.json": {
-      "version": 1,
-      "sha256": "dd8a79449e0d1eb2e2b78387720bbcd21ab7d36e7a266b944f15ff6d2ae30b19"
-    },
-    "artifacts/signed-issuance-authorization-v1.schema.json": {
-      "version": 1,
-      "sha256": "c6bd0132ff78b3139514dc1f528068d4e670763c99b14bd0fb6ba614c1e7766f"
-    },
-    "artifacts/signed-network-access-grant-v1.schema.json": {
-      "version": 1,
-      "sha256": "1ab47a205e8336e85ec495f89b51b193354a61519bab309d34f0b09011df7927"
-    },
-    "artifacts/signed-tcp-access-grant-v1.schema.json": {
-      "version": 1,
-      "sha256": "2f3dc75d38c1772a76721f1b5ed2b405ffd55fde777120ad4e3f7391e4fef120"
-    },
-    "artifacts/tcp-access-grant-v1.schema.json": {
-      "version": 1,
-      "sha256": "0c59b6d644abc2ac4405207f734bec736a514a07a643ae7ab9c3a71892397435"
-    },
-    "artifacts/policy-plan-evaluated-v2.schema.json": {
-      "version": 2,
-      "sha256": "1b3d70a123cfc800e16c6d73496ba4f65f62fa9069b120101d8aeedd11d97db3"
-    },
     "artifacts/policy-decision-evaluated-v2.schema.json": {
       "version": 2,
       "sha256": "c6b4490f1ccf0884248e6f02ba4a421b0b23f60b6a730cbd1eec4518ff4ce905"
     },
-    "artifacts/endpoint-challenge-v1.schema.json": {
-      "version": 1,
-      "sha256": "09a116610d571586206eb58ab43c8ab0613ed03f3c9f544d53ff853d1a21d897"
+    "artifacts/policy-plan-evaluated-v2.schema.json": {
+      "version": 2,
+      "sha256": "4cdfa229b96fb5ab49ee981584062f59d97b15707b78b86c4ef24e6e991d6ead"
     },
-    "artifacts/endpoint-observation-v1.schema.json": {
+    "artifacts/signed-decision-revocation-notice-v1.schema.json": {
       "version": 1,
-      "sha256": "edf91ea39455b050b0d3543f3ec3c4452b51160054e790bd79184a766ce4459e"
+      "sha256": "f39744e2a95e57b4a378b88dd31fe043d36a97b8ac78acc7f7e6229df8f00ada"
+    },
+    "artifacts/signed-decision-revocation-notice-v2.schema.json": {
+      "version": 2,
+      "sha256": "3ae0a095a6e8057d9a14290365b445a277c0b2a159bea9728a6793f1f101232c"
+    },
+    "artifacts/signed-identity-revocation-command-v1.schema.json": {
+      "version": 1,
+      "sha256": "e9fefe3fa7f11feaea8ad02affe9972e1a7cf92027a0e7ae546a734fbf337cd0"
+    },
+    "artifacts/signed-issuance-authorization-v2.schema.json": {
+      "version": 2,
+      "sha256": "e1824b2776eb80c0f65e833f69d30fe4ef3c7210e1d14ea1f61e4671b505cbd9"
+    },
+    "artifacts/signed-mtls-issuance-authorization-v2.schema.json": {
+      "version": 2,
+      "sha256": "f629fbd8823169307216ec0f8b6c8cb7fe52c4d2b75da86cfb0d9d32ce8126d9"
+    },
+    "artifacts/signed-network-access-grant-v2.schema.json": {
+      "version": 2,
+      "sha256": "f7b0aed7e963fe1aadc4956042923298ab0b600c896bfb7e0506c04431892240"
     },
     "artifacts/signed-scoped-revocation-notice-v3.schema.json": {
       "version": 3,
       "sha256": "90730623f220a6e10447e780b8543ca026e1b99fa249daed7db1ee0a0397f809"
+    },
+    "artifacts/signed-tcp-access-grant-v2.schema.json": {
+      "version": 2,
+      "sha256": "238781f9f4898e4ade9683b3e399902f3377371050152ff2320ec751de3fb3f6"
+    },
+    "artifacts/tcp-access-grant-v2.schema.json": {
+      "version": 2,
+      "sha256": "01de3300c34a74302af502eff3515c20741f95f26732f125c03ec8499b44275e"
+    },
+    "artifacts/tcp-resources-v1.schema.json": {
+      "version": 1,
+      "sha256": "d85e8c5274f5dae9889d423af59a543b2348a1fa14d1258b06b69f3a3687eea2"
     }
   }
 }

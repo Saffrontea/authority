@@ -5,6 +5,25 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AdapterGrantKindV1, ContractError, push_string, valid_identifier};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityGenerations {
+    pub subject: i64,
+    pub device: i64,
+}
+
+impl IdentityGenerations {
+    #[must_use]
+    pub fn bind(self, domain: &str, subject: &str, device: &str) -> GenerationBinding {
+        GenerationBinding {
+            domain_id: domain.into(),
+            subject_user_id: subject.into(),
+            device_id: device.into(),
+            subject_generation: self.subject,
+            device_generation: self.device,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenerationBinding {
@@ -15,7 +34,74 @@ pub struct GenerationBinding {
     pub device_generation: i64,
 }
 
+/// CA-signed SSH key-ID metadata. The authenticated principal command verifies
+/// it at the actual sshd boundary; the epoch lease also covers established SSH.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshCertificateIdentityV2 {
+    pub version: u8,
+    pub generation: GenerationBinding,
+    pub target_node_id: String,
+    pub decision_id: String,
+    pub issued_at: i64,
+    pub not_before: i64,
+    pub expires_at: i64,
+}
+impl SshCertificateIdentityV2 {
+    /// # Errors
+    /// Rejects malformed identities, decision IDs and expired/overflowing lifetimes.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.generation.validate()?;
+        if self.version != 2 {
+            return Err(ContractError::UnsupportedVersion);
+        }
+        for (name, value) in [
+            ("target_node_id", &self.target_node_id),
+            ("decision_id", &self.decision_id),
+        ] {
+            if !valid_identifier(value) {
+                return Err(ContractError::InvalidIdentifier(name));
+            }
+        }
+        super::validate_nonce_and_time(
+            &self.decision_id,
+            self.issued_at,
+            self.not_before,
+            self.expires_at,
+        )
+    }
+}
+
 impl GenerationBinding {
+    /// # Errors
+    /// Rejects a binding transplanted onto another grant's identity.
+    pub fn check_identity(
+        &self,
+        domain: &str,
+        subject: &str,
+        device: &str,
+    ) -> Result<(), ContractError> {
+        self.validate()?;
+        if self.domain_id != domain || self.subject_user_id != subject || self.device_id != device {
+            return Err(ContractError::InvalidIdentifier("generation_binding"));
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    /// Validates generations and constructs a domain-separated V2 envelope.
+    pub fn envelope_preimage(&self, claims: &[u8]) -> Result<Vec<u8>, ContractError> {
+        self.validate()?;
+        let mut result = b"AUTHORITY-GENERATION-BOUND-ENVELOPE-V2\0".to_vec();
+        super::push_u32(&mut result, claims.len());
+        result.extend_from_slice(claims);
+        for field in [&self.domain_id, &self.subject_user_id, &self.device_id] {
+            push_string(&mut result, field);
+        }
+        result.extend_from_slice(&self.subject_generation.to_be_bytes());
+        result.extend_from_slice(&self.device_generation.to_be_bytes());
+        Ok(result)
+    }
     /// # Errors
     /// Rejects missing identity bindings and nonpositive generations.
     pub fn validate(&self) -> Result<(), ContractError> {

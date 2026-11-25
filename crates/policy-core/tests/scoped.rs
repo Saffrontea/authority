@@ -106,12 +106,20 @@ impl Fixture {
                 source,
                 PolicyScope {
                     ssh_principals: BTreeSet::from(["deploy".into()]),
-                    tcp_ports: BTreeSet::from([8080, 8081]),
+                    tcp_ports: authority_contracts_model::resources::PortSet::from_ports(
+                        &BTreeSet::from([8080, 8081]),
+                    )
+                    .unwrap(),
                 },
             )]),
             requested: RequestedAccess {
                 tcp: Some(RequestedTcp {
-                    ports: BTreeSet::from([8080]),
+                    source_addresses: None,
+                    destination_addresses: None,
+                    ports: authority_contracts_model::resources::PortSet::from_ports(
+                        &BTreeSet::from([8080]),
+                    )
+                    .unwrap(),
                     ttl_seconds: 20,
                 }),
                 ..RequestedAccess::default()
@@ -263,7 +271,7 @@ fn audit_replay_rejects_scope_expansion_forward_dependencies_and_wrong_selection
     if let AbilityScope::TcpConnection { ports, .. } =
         &mut expanded.plan.as_mut().unwrap().abilities[0].ability.scope
     {
-        ports.insert(8082);
+        *ports = ports.union(&"8082".parse().unwrap()).unwrap();
     }
     assert!(!expanded.is_consistent());
     let mut forward = plan.evidence().clone();
@@ -304,9 +312,12 @@ fn tcp_plan_binds_only_requested_ports_resource_identity_and_interval() {
     assert_eq!(
         ability.scope,
         AbilityScope::TcpConnection {
-            source: fixture.resources.source_address,
-            destination: fixture.resources.target_address,
-            ports: BTreeSet::from([8080]),
+            source: fixture.resources.source_address.into(),
+            destination: fixture.resources.target_address.into(),
+            ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from([
+                8080
+            ]))
+            .unwrap(),
         }
     );
 }
@@ -323,7 +334,10 @@ fn losing_policy_ports_cannot_expand_the_winning_policy_scope() {
             revision: winner.revision,
         },
         PolicyScope {
-            tcp_ports: BTreeSet::from([8081]),
+            tcp_ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from(
+                [8081],
+            ))
+            .unwrap(),
             ..PolicyScope::default()
         },
     );
@@ -332,7 +346,7 @@ fn losing_policy_ports_cannot_expand_the_winning_policy_scope() {
         fixture.authorize().unwrap_err(),
         ScopeError::ScopeDenied(Ability::TcpConnection)
     );
-    fixture.requested.tcp.as_mut().unwrap().ports = BTreeSet::from([8081]);
+    fixture.requested.tcp.as_mut().unwrap().ports = "8081".parse().unwrap();
     let (decision, _) = fixture.authorize().unwrap();
     assert_eq!(
         decision.sources[&Capability::TcpConnect].policy_id,
@@ -392,9 +406,10 @@ fn policy_and_configured_expiry_are_enforced_at_the_exact_boundary() {
 
 #[test]
 fn invalid_ports_lifetimes_and_extra_adapter_material_fail_closed() {
-    for ports in [BTreeSet::new(), BTreeSet::from([0]), BTreeSet::from([8082])] {
+    for ports in [BTreeSet::new(), BTreeSet::from([8082])] {
         let mut fixture = Fixture::tcp();
-        fixture.requested.tcp.as_mut().unwrap().ports = ports;
+        fixture.requested.tcp.as_mut().unwrap().ports =
+            authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap();
         assert_eq!(fixture.authorize().unwrap_err().code(), "tcp_port_denied");
     }
     for ttl in [i64::MIN, -1, 0, 601, i64::MAX] {
@@ -479,8 +494,8 @@ proptest! {
         if extra { selected.insert(65535); }
         let binding = AccessBinding { domain_id: Uuid::from_u128(1), subject_user_id: Uuid::from_u128(2),
             device_id: Uuid::from_u128(3), target_node_id: Uuid::from_u128(4) };
-        let scope = |ports| AbilityScope::TcpConnection { source: "10.0.0.1".parse().unwrap(),
-            destination: "10.0.0.2".parse().unwrap(), ports };
+        let scope = |ports: BTreeSet<u16>| AbilityScope::TcpConnection { source: "10.0.0.1".parse().unwrap(),
+            destination: "10.0.0.2".parse().unwrap(), ports: authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap() };
         let grant = ScopedAbility { binding, validity: Validity { not_before: 100, expires_at: 1000 }, scope: scope(allowed.clone()) };
         let request = ScopedAbility { binding, validity: Validity { not_before: start, expires_at: end }, scope: scope(selected.clone()) };
         prop_assert_eq!(grant.contains(&request), !selected.is_empty() && selected.is_subset(&allowed)
@@ -538,10 +553,10 @@ proptest! {
             device_id: Uuid::from_u128(3), target_node_id: Uuid::from_u128(4) };
         let narrow = ports.iter().enumerate().filter(|(index, _)| selection & (1_u64 << index) != 0)
             .map(|(_, port)| *port).chain(ports.iter().next().copied()).collect::<BTreeSet<_>>();
-        let make = |expires_at, ports| ScopedAbility {
+        let make = |expires_at, ports: BTreeSet<u16>| ScopedAbility {
             binding, validity: Validity { not_before: start, expires_at },
             scope: AbilityScope::TcpConnection { source: "10.0.0.1".parse().unwrap(),
-                destination: "10.0.0.2".parse().unwrap(), ports },
+                destination: "10.0.0.2".parse().unwrap(), ports: authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap() },
         };
         let a = make(start + widths.iter().sum::<i64>(), ports.clone());
         let b = make(start + widths[0] + widths[1], narrow.clone());
@@ -578,7 +593,7 @@ fn endpoint_facts_and_every_grounded_derivation_are_required() {
     let mut substituted = plan.evidence().clone();
     for entry in &mut substituted.plan.as_mut().unwrap().abilities {
         if let AbilityScope::TcpAdmission { ports, .. } = &mut entry.ability.scope {
-            *ports = BTreeSet::from([8081]);
+            *ports = "8081".parse().unwrap();
         }
     }
     assert!(!substituted.is_consistent());

@@ -1,0 +1,20 @@
+{
+  "source_addresses": [
+    {
+      "start": 172818433,
+      "end": 172818434
+    }
+  ],
+  "destination_addresses": [
+    {
+      "start": 172818434,
+      "end": 172818435
+    }
+  ],
+  "destination_ports": [
+    {
+      "start": 1024,
+      "end": 65536
+    }
+  ]
+}

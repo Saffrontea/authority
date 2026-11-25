@@ -1,8 +1,8 @@
-# Symbolic resources and identity fence primitives
+# Symbolic resources and identity revocation
 
 ## Resource algebra in the running authorization path
 
-`policy-core::resources` represents a resource set as normalized disjoint
+`contracts-model::resources` (re-exported by `policy-core`) represents a resource set as normalized disjoint
 half-open integer intervals. Adjacent intervals merge. Empty sets are explicit;
 empty intervals, overlapping/adjacent/out-of-order wire intervals and unknown
 fields are rejected. IPv4 bounds use 64-bit integers so `/0` has the exact
@@ -18,7 +18,7 @@ orders rules by priority, deny, then policy ID and subtracts winning regions.
 Policy revisions are provenance only.
 
 Production TCP policy evaluation and authority-union comparison use this algebra
-for port/time regions. Symbolic stored selectors use `tcp_admission_range` and
+for source/destination/port/time products. Symbolic stored selectors use `tcp_admission_range` and
 `tcp_connection_range` with `source`, `destination`, and `ports` interval sets:
 
 ```json
@@ -30,23 +30,35 @@ for port/time regions. Symbolic stored selectors use `tcp_admission_range` and
 }
 ```
 
-Both address sets above represent 10.0.0.0/8. Resolution intersects this selector
-with the concrete requested addresses and ports. Deny selectors retain their
-intersection, including a hole affecting only part of the request. Resolution
-never grants the entire broad policy range. Bootstrap's TCP policies use range
-selectors too, so the ordinary LXC flow exercises their production decoding,
-evaluation, evidence and projection.
+Both address sets above represent 10.0.0.0/8. Policies retain their complete
+symbolic region; evaluation subtracts precedence regions from the exact request.
+A deny hole on any resource/time axis denies an incompletely covered request.
+Bootstrap TCP policies use the same range selectors.
 
-Current request/grant contracts still accept a single source/destination and at
-most 64 explicit ports. Their adapter restrictions remain explicit: range
-policies do not expand the wire grant or enumerate a CIDR. A fully symbolic
-requested `AbilityScope` and native interval projection are still future work;
-the generic region API already accepts large symbolic requests. SSH principal
-sets continue to use their finite resource representation. New algebra is tested
-against independent bounded pointwise oracles, not covered by the existing Verus
-proofs.
+`Ipv4Set` and `PortSet` enforce resource-domain bounds and canonical wire encoding.
+TCP requests accept interval arrays (`source_addresses` and `destination_addresses`
+are optional and default to the attested hosts). `TcpAccessGrantV2.resources`
+contains all three axes; signing, replay evidence and projection preserve them
+exactly. Signed envelopes are V2 and require identity generations; old envelopes
+are rejected. Raw SSH authorization is V2 and binds the common decision ID
+independently of the terminal nonce.
 
-## Selector revocation primitives, not yet a live bulk-revocation API
+The target's signed observation V2 includes the actual nft managed-port intervals.
+A request outside that coverage is denied. The current managed target describes
+one source/target host pair, so broad CIDRs require additional endpoint support
+and are rejected by that adapter today. The resource algebra, wire format and
+native nft compiler support CIDR intervals without enumerating addresses. nft
+uses interval concatenations with timeouts; overlapping grants are partitioned
+into disjoint products with the longest valid deadline. Fragment/operation and
+kernel-element budgets fail the whole operation before nonce consumption. SSH
+principals remain finite sets.
+
+Executable property tests compare interval operations with independent bounded
+pointwise oracles. Verus uses an explicitly trusted semantic set view for the
+interval representation: it proves containment and exact projection field wiring,
+not the interval implementation or Linux nft semantics.
+
+## Live identity revocation
 
 `contracts-model::fence` defines identity generation bindings and V3 signed
 notices with tagged decision, subject or device selectors. Subject/device notices
@@ -67,10 +79,44 @@ retry; persistence success alone never acknowledges kernel cleanup.
 Cleanup must test installations against the store's current fences, including
 when an older notice is redelivered; the incoming minimum alone is insufficient.
 
-These primitives are **not connected to production issuance or adapters yet**.
-Existing grants have no signed identity generation and production revocation
-remains decision-scoped. A complete integration must add generations to grants,
-shared/exclusive DB issuance fences, a scoped API and transactional outbox, durable
-receiver enforcement, credential-redemption checks and established-session
-withdrawal. In particular, these definitions alone do not prevent redemption of
-an old SSH authorization. See [the remaining acceptance requirements](authority-model-next.md).
+`POST /v1/identity-revocations` accepts a root-signed V1 management command
+(subject or device selector). The existing control-plane signing root is an
+explicit administrator trust assumption, not a user capability. `authority-admin`
+signs a short-lived command using `AUTHORITY_SIGNING_KEY_FILE`:
+
+```sh
+authority-admin http://localhost:3000 DOMAIN_UUID subject USER_UUID compromised
+authority-admin http://localhost:3000 DOMAIN_UUID device DEVICE_UUID compromised
+```
+
+One READ COMMITTED transaction disables the identity, increments its generation,
+marks matching grants/credentials revoked, and publishes signed V3 selector notices,
+PKI events, audit and outbox. Authorization and SSH/mTLS redemption hold subject
+then device shared row guards through commit; revocation takes the relevant
+exclusive guard. The command nonce makes retries idempotent. Set
+`AUTHORITY_OPERATION_NONCE` to retry/query a committed operation with the same
+selector and reason. `completed` requires node-signed cleanup receipts bound to the complete notice,
+verified against the enrolled node key, and current
+mTLS instance acknowledgments (or expired enforcement leases), not publication alone.
+
+Signed SSH, mTLS, WG and TCP envelopes carry the exact subject/device generations.
+WG/TCP/SSH target fences persist before withdrawal and acknowledgment. SSH
+certificates encode generation/decision/expiry metadata in their CA-signed key ID.
+A root-only sshd principal command starts a systemd watchdog cgroup per connection;
+the enforcer checks fresh observation, identity fences and decision tombstones on
+admission and renewal. Revocation, expiry, agent stop or watchdog failure kills
+that cgroup including descendants. Managed sshd disables PAM migration and static
+principal/key bypasses. This needs Linux cgroup v2 and systemd; removing the guard
+invalidates endpoint support.
+
+The network agent has an independent systemd watchdog/stop helper to remove WG
+peers and flush TCP allowances even on process failure. mTLS generation checks
+share the issuer DB, while durable PKI events tear down each established replica
+session and feed CRL/OCSP. The selector is the issuance fence; per-decision PKI
+fanout supplies certificate/session cleanup rather than authorizing old grants.
+
+Restart discards installed WG/TCP authority and keeps durable replay/fence state;
+valid old consumed grants therefore require reauthorization. An explicit trusted
+administrative reactivation advances generations again. Old sessions and unredeemed
+grants remain invalid and a fresh passkey session is required. Scoped enrollment
+and administration through the general ability policy remain future work.

@@ -4,6 +4,7 @@ mod auth_limits;
 mod config;
 mod endpoint_observation;
 mod grant_ledger;
+mod identity_revocation;
 mod planning_audit;
 mod revocation_delivery;
 mod state;

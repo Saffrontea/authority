@@ -157,6 +157,39 @@ pub fn minimal_indices<T>(items: &[T], leq: impl Fn(&T, &T) -> bool) -> Vec<usiz
         .collect()
 }
 
+/// # Errors
+/// Discards all partial minima when the authority comparison cannot be completed.
+pub fn minimal_indices_checked<T>(
+    items: &[T],
+    leq: impl Fn(&T, &T) -> Result<bool, PlanningError>,
+) -> Result<Vec<usize>, PlanningError> {
+    let mut indices = Vec::new();
+    for i in 0..items.len() {
+        let mut dominated = false;
+        for j in 0..items.len() {
+            if i != j && leq(&items[j], &items[i])? && !leq(&items[i], &items[j])? {
+                dominated = true;
+                break;
+            }
+        }
+        if !dominated {
+            indices.push(i);
+        }
+    }
+    Ok(indices)
+}
+
+/// # Errors
+/// Returns catalog, search and authority-comparison errors without a partial plan.
+pub fn solve_frontier<A: Ord + Clone, M: Ord + Clone>(
+    model: &Model<A, M>,
+    request: &Request<A, M>,
+    satisfies: impl Fn(&Plan<A, M>) -> bool,
+    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> bool,
+) -> Result<Vec<Plan<A, M>>, PlanningError> {
+    solve_frontier_checked(model, request, satisfies, |a, b| Ok(authority_leq(a, b)))
+}
+
 /// Enumerates the complete authorized Pareto frontier within the search bounds.
 /// `authority_leq(a,b)` means every authority/effect of `a` is covered by `b`.
 /// It must be a pure preorder. Initial abilities and mandatory closure are included.
@@ -165,11 +198,11 @@ pub fn minimal_indices<T>(items: &[T], leq: impl Fn(&T, &T) -> bool) -> Vec<usiz
 ///
 /// # Errors
 /// Returns invalid-catalog, no-solution or search-budget errors, just like `solve`.
-pub fn solve_frontier<A: Ord + Clone, M: Ord + Clone>(
+pub fn solve_frontier_checked<A: Ord + Clone, M: Ord + Clone>(
     model: &Model<A, M>,
     request: &Request<A, M>,
     satisfies: impl Fn(&Plan<A, M>) -> bool,
-    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> bool,
+    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> Result<bool, PlanningError>,
 ) -> Result<Vec<Plan<A, M>>, PlanningError> {
     let catalog: BTreeMap<_, _> = model.mechanisms.iter().map(|m| (m.id.clone(), m)).collect();
     if catalog.len() != model.mechanisms.len() {
@@ -223,7 +256,8 @@ pub fn solve_frontier<A: Ord + Clone, M: Ord + Clone>(
             queue.push_back(next);
         }
     }
-    let indices = minimal_indices(&feasible, |a, b| authority_leq(&a.abilities, &b.abilities));
+    let indices =
+        minimal_indices_checked(&feasible, |a, b| authority_leq(&a.abilities, &b.abilities))?;
     if indices.is_empty() {
         return Err(PlanningError::NoSolution);
     }
@@ -245,6 +279,20 @@ pub fn solve_minimal_authority<A: Ord + Clone, M: Ord + Clone>(
     authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> bool,
 ) -> Result<Plan<A, M>, PlanningError> {
     solve_frontier(model, request, satisfies, authority_leq)?
+        .into_iter()
+        .next()
+        .ok_or(PlanningError::NoSolution)
+}
+
+/// # Errors
+/// Requires a complete search and complete resource-order comparisons.
+pub fn solve_minimal_authority_checked<A: Ord + Clone, M: Ord + Clone>(
+    model: &Model<A, M>,
+    request: &Request<A, M>,
+    satisfies: impl Fn(&Plan<A, M>) -> bool,
+    authority_leq: impl Fn(&BTreeSet<A>, &BTreeSet<A>) -> Result<bool, PlanningError>,
+) -> Result<Plan<A, M>, PlanningError> {
+    solve_frontier_checked(model, request, satisfies, authority_leq)?
         .into_iter()
         .next()
         .ok_or(PlanningError::NoSolution)

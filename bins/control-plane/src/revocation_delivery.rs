@@ -19,11 +19,103 @@ pub fn client() -> Result<reqwest::Client, reqwest::Error> {
 pub async fn run(state: AppState, client: reqwest::Client) {
     let worker = uuid::Uuid::new_v4();
     loop {
+        if let Err(cause) = reconcile_scoped(&state, &client, worker).await {
+            warn!(%cause, "identity revocation delivery failed; will retry");
+        }
         if let Err(cause) = reconcile(&state, &client, worker).await {
             warn!(%cause, "revocation delivery reconciliation failed; will retry");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn reconcile_scoped(
+    state: &AppState,
+    client: &reqwest::Client,
+    worker: uuid::Uuid,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use sqlx::Row;
+    let mut tx = authority_mtls_core::database::begin(state.pool()).await?;
+    let row=sqlx::query("SELECT r.sequence,r.envelope,n.enforcement_origin AS origin,d.device_public_key AS node_key FROM policy.scoped_revocation_notices r JOIN device.nodes n ON n.id=r.target_node_id JOIN device.devices d ON d.id=n.device_id AND d.domain_id=r.domain_id WHERE r.completed_at IS NULL AND r.expires_at>clock_timestamp() AND n.enforcement_origin IS NOT NULL AND (r.lease_until IS NULL OR r.lease_until<=clock_timestamp()) ORDER BY r.sequence FOR UPDATE OF r SKIP LOCKED LIMIT 1")
+        .fetch_optional(&mut *tx).await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let sequence: i64 = row.try_get("sequence")?;
+    let origin: String = row.try_get("origin")?;
+    let envelope: authority_contracts_model::fence::SignedScopedRevocationNoticeV3 =
+        serde_json::from_value(row.try_get("envelope")?)?;
+    let node_key: Vec<u8> = row.try_get("node_key")?;
+    sqlx::query("UPDATE policy.scoped_revocation_notices SET lease_owner=$2,lease_until=clock_timestamp()+interval '15 seconds' WHERE sequence=$1")
+        .bind(sequence).bind(worker).execute(&mut *tx).await?;
+    tx.commit().await?;
+    let result = async {
+        let mut response = client
+            .post(format!(
+                "{}/v1/identity-revocations",
+                origin.trim_end_matches('/')
+            ))
+            .json(&envelope)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err("identity receiver did not acknowledge".to_string());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if bytes.len() + chunk.len() > 16384 {
+                return Err("oversized identity receipt".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        verify_scoped_receipt(&envelope.notice, &bytes, &node_key)?;
+        Ok::<(), String>(())
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            sqlx::query("UPDATE policy.scoped_revocation_notices SET completed_at=clock_timestamp() WHERE sequence=$1 AND lease_owner=$2").bind(sequence).bind(worker).execute(state.pool()).await?;
+        }
+        Err(error) => {
+            sqlx::query("UPDATE policy.scoped_revocation_notices SET lease_until=clock_timestamp()+interval '1 second' WHERE sequence=$1 AND lease_owner=$2").bind(sequence).bind(worker).execute(state.pool()).await?;
+            return Err(error.into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_scoped_receipt(
+    notice: &authority_contracts_model::fence::ScopedRevocationNoticeV3,
+    bytes: &[u8],
+    node_key: &[u8],
+) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Receipt {
+        sequence: i64,
+        fence_persisted: bool,
+        signature: String,
+    }
+    let receipt: Receipt = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    if receipt.sequence != notice.sequence || !receipt.fence_persisted {
+        return Err("invalid identity receipt".into());
+    }
+    let key: &[u8; 32] = node_key
+        .try_into()
+        .map_err(|_| "invalid registered node key")?;
+    let signature = authority_device_auth_core::decode_signature(&receipt.signature)
+        .map_err(|error| error.to_string())?;
+    let message = authority_issuer_core::fence::receipt_preimage(notice)
+        .map_err(|error| error.to_string())?;
+    if !authority_credential_crypto_openssl::verify_device_signature(key, &message, &signature)
+        .map_err(|error| error.to_string())?
+    {
+        return Err("unauthenticated identity receipt".into());
+    }
+    Ok(())
 }
 
 async fn reconcile(
@@ -281,5 +373,50 @@ mod postgres_tests {
             .execute(&left)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_completion_requires_the_registered_node_signature_for_the_exact_notice() {
+    use authority_credential_crypto_openssl::OpenSslEd25519Signer;
+    use authority_device_auth_core::encode_base64url;
+    use authority_issuer_core::AuthorizationSigner;
+    let envelope: authority_contracts_model::fence::SignedScopedRevocationNoticeV3 =
+        serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/signed-scoped-revocation-notice-v3/valid/subject.json"
+        ))
+        .unwrap();
+    let node = OpenSslEd25519Signer::generate("node").unwrap();
+    let key = node.public_key_raw().unwrap();
+    let message = authority_issuer_core::fence::receipt_preimage(&envelope.notice).unwrap();
+    let bytes = serde_json::to_vec(&serde_json::json!({"sequence":envelope.notice.sequence,"fence_persisted":true,"signature":encode_base64url(&node.sign(&message).unwrap())})).unwrap();
+    verify_scoped_receipt(&envelope.notice, &bytes, &key).unwrap();
+    let other = OpenSslEd25519Signer::generate("other-node").unwrap();
+    assert!(
+        verify_scoped_receipt(&envelope.notice, &bytes, &other.public_key_raw().unwrap()).is_err()
+    );
+    for change in 0..4 {
+        let mut changed = envelope.notice.clone();
+        match change {
+            0 => changed.sequence += 1,
+            1 => changed.target_node_id = "other-node".into(),
+            2 => changed.domain_id = "other-domain".into(),
+            _ => changed.reason = "other-operation".into(),
+        }
+        assert!(verify_scoped_receipt(&changed, &bytes, &key).is_err());
+    }
+    for changed in [
+        serde_json::json!({"sequence":envelope.notice.sequence,"fence_persisted":true}),
+        serde_json::json!({"sequence":envelope.notice.sequence,"fence_persisted":true,"signature":"A".repeat(86)}),
+    ] {
+        assert!(
+            verify_scoped_receipt(
+                &envelope.notice,
+                &serde_json::to_vec(&changed).unwrap(),
+                &key
+            )
+            .is_err()
+        );
     }
 }

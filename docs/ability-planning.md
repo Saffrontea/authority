@@ -426,7 +426,7 @@ warnings denied.
 ## Outstanding trust-model changes
 
 Signed live environment observations are implemented for the managed LXC
-profile. Subject/device issuance fences, symbolic resource ranges, and scoped
+profile. Subject/device issuance fences and symbolic resource ranges are integrated; scoped
 administration/genesis are not yet implemented.
 [Authority model next iteration](authority-model-next.md) specifies their trust
 assumptions, wire/transaction changes and acceptance checks. In particular,

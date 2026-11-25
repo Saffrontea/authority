@@ -10,7 +10,7 @@ mod scoped;
 pub use scoped::project_authorized;
 
 use authority_contracts_model::{
-    ContractError, IssuanceAuthorizationV1, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
+    ContractError, IssuanceAuthorizationV2, MtlsIssuanceAuthorizationV1, NetworkAccessGrantV1,
 };
 use thiserror::Error;
 
@@ -55,8 +55,8 @@ pub struct ProjectionLifetimes {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionSet {
-    pub ssh_issuance: IssuanceAuthorizationV1,
-    pub ssh_node_install: IssuanceAuthorizationV1,
+    pub ssh_issuance: IssuanceAuthorizationV2,
+    pub ssh_node_install: IssuanceAuthorizationV2,
     pub network_grant: NetworkAccessGrantV1,
     pub mtls_issuance: MtlsIssuanceAuthorizationV1,
     pub mtls_node_install: MtlsIssuanceAuthorizationV1,
@@ -138,9 +138,9 @@ fn ssh_contract(
     nonce: &str,
     audience: &str,
     ttl: i64,
-) -> Result<IssuanceAuthorizationV1, ProjectionError> {
-    Ok(IssuanceAuthorizationV1 {
-        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
+) -> Result<IssuanceAuthorizationV2, ProjectionError> {
+    Ok(IssuanceAuthorizationV2 {
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V2.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -149,6 +149,7 @@ fn ssh_contract(
         ssh_public_key_fingerprint: ssh.public_key_fingerprint.clone(),
         principals: ssh.principals.clone(),
         policy_id: common.policy_id.clone(),
+        decision_id: common.decision_id.clone(),
         nonce: nonce.to_owned(),
         issued_at: common.issued_at,
         not_before: common.issued_at,
@@ -189,9 +190,7 @@ fn mtls_contract(
 /// material is needed to derive a TCP grant from an authorized decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpProjectionRequest {
-    pub source_address: String,
-    pub destination_address: String,
-    pub destination_ports: Vec<u16>,
+    pub resources: authority_contracts_model::resources::TcpResourcesV1,
 }
 
 /// Projects just TCP admission from the shared decision claims.
@@ -202,9 +201,9 @@ pub fn project_tcp(
     common: &CommonDecisionClaims,
     tcp: &TcpProjectionRequest,
     ttl_seconds: i64,
-) -> Result<authority_contracts_model::TcpAccessGrantV1, ProjectionError> {
-    let grant = authority_contracts_model::TcpAccessGrantV1 {
-        version: authority_contracts_model::protocol::CONTRACT_VERSION_V1.to_owned(),
+) -> Result<authority_contracts_model::TcpAccessGrantV2, ProjectionError> {
+    let grant = authority_contracts_model::TcpAccessGrantV2 {
+        version: authority_contracts_model::protocol::CONTRACT_VERSION_V2.to_owned(),
         issuer: common.issuer.clone(),
         domain_id: common.domain_id.clone(),
         subject_user_id: common.subject_user_id.clone(),
@@ -212,9 +211,7 @@ pub fn project_tcp(
         target_node_id: common.target_node_id.clone(),
         policy_id: common.policy_id.clone(),
         decision_id: common.decision_id.clone(),
-        source_address: tcp.source_address.clone(),
-        destination_address: tcp.destination_address.clone(),
-        destination_ports: tcp.destination_ports.clone(),
+        resources: tcp.resources.clone(),
         issued_at: common.issued_at,
         not_before: common.issued_at,
         expires_at: projection_expiry(common.issued_at, ttl_seconds)

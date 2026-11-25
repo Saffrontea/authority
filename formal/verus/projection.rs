@@ -43,9 +43,8 @@ pub open spec fn material_agrees(scope: AbilityScope, material: ScopeProjection)
             request.client_spki_sha256 == client_spki_sha256 && request.identity_uri == identity_uri
                 && request.service_audience == service_audience,
         (AbilityScope::TcpAdmission { source, destination, ports }, ScopeProjection::Tcp(request)) =>
-            request.source_address == ip_text(source) && request.destination_address == ip_text(destination)
-                && request.destination_ports.to_set() == ports && request.destination_ports.len() == ports.len()
-                && request.destination_ports.no_duplicates(),
+            request.resources.source_addresses == source && request.resources.destination_addresses == destination
+                && request.resources.destination_ports == ports,
         _ => false,
     }
 }
@@ -58,11 +57,6 @@ pub proof fn scope_materialization_refines_authorized_scope(scope: AbilityScope)
             principals.lemma_to_seq_to_set_id();
             principals.lemma_to_seq_no_duplicates();
             principals.lemma_to_seq_len();
-        },
-        AbilityScope::TcpAdmission { ports, .. } => {
-            ports.lemma_to_seq_to_set_id();
-            ports.lemma_to_seq_no_duplicates();
-            ports.lemma_to_seq_len();
         },
         _ => {},
     }

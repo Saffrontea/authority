@@ -1,3 +1,4 @@
+from tcp_resources import ports as port_intervals
 """Generated, reproducible traces against real HTTP/DB and kernel adapters.
 
 The live-binding oracle uses Revocation.tla's publish/consume/install/persist/
@@ -196,7 +197,7 @@ def run(issue, revoke, http, wait, allowed, agent, control, probe, pull):
             publish('transport')
             deliver('transport')
             tampered = copy.deepcopy(grants['other']['tcp_grant'])
-            tampered['grant']['destination_ports'] = [ports[0]]
+            tampered['grant']['resources']['destination_ports'] = port_intervals([ports[0]])
             assert http(f'{agent}/v1/tcp-grants', tampered, 401)['error'] == 'invalid_tcp_grant'
             record('tamper', 'other')
             observe()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from tcp_resources import ports as port_intervals, host as host_interval
 """Exercise signed TCP derivation and real kernel enforcement over the mesh."""
 import copy
 import importlib.util
@@ -90,8 +91,8 @@ combined = issue([8080], ttl=40, network=True)
 assert combined['decision_id'] == combined['tcp_grant']['grant']['decision_id']
 assert combined['decision_id'] == combined['network_grant']['grant']['nonce']
 assert 'ssh_authorization' not in combined and 'mtls_authorization' not in combined
-assert combined['tcp_grant']['grant']['source_address'] == '10.77.0.1'
-assert combined['tcp_grant']['grant']['destination_address'] == '10.77.0.2'
+assert combined['tcp_grant']['grant']['resources']['source_addresses'] == host_interval('10.77.0.1')
+assert combined['tcp_grant']['grant']['resources']['destination_addresses'] == host_interval('10.77.0.2')
 http(f'{agent}/v1/network-grants', combined['network_grant'])
 http(f'{agent}/v1/tcp-grants', combined['tcp_grant'])
 # Live observation withdrawal can discard the server's previous WG session.
@@ -108,7 +109,7 @@ wait(lambda: allowed(2224))
 replay = http(f'{agent}/v1/tcp-grants', combined['tcp_grant'], 409)
 assert replay['error'] == 'tcp_grant_replayed'
 tampered = copy.deepcopy(combined['tcp_grant'])
-tampered['grant']['destination_ports'] = [8081]
+tampered['grant']['resources']['destination_ports'] = port_intervals([8081])
 assert http(f'{agent}/v1/tcp-grants', tampered, 401)['error'] == 'invalid_tcp_grant'
 
 # The selection is part of the authenticated request, not an unsigned hint.
@@ -217,10 +218,11 @@ assert 'invalid_device_proof' in mode_tamper.get('denial', ''), mode_tamper
 
 # The same browser API selects either the declared existing route or a mesh grant.
 automatic = issue([8080], ttl=10, automatic=True)
-expect_network = (os.environ.get('AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS')
-                  != automatic['tcp_grant']['grant']['source_address'])
+existing_source = os.environ.get('AUTHORITY_EXISTING_ROUTE_SOURCE_ADDRESS')
+expect_network = (existing_source is None or host_interval(existing_source)
+                  != automatic['tcp_grant']['grant']['resources']['source_addresses'])
 assert ('network_grant' in automatic) == expect_network, automatic
-assert automatic['tcp_grant']['grant']['destination_ports'] == [8080]
+assert automatic['tcp_grant']['grant']['resources']['destination_ports'] == port_intervals([8080])
 if expect_network:
     http(f'{agent}/v1/network-grants', automatic['network_grant'])
 http(f'{agent}/v1/tcp-grants', automatic['tcp_grant'])

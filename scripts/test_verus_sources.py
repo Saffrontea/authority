@@ -50,7 +50,7 @@ class SourceExtraction(unittest.TestCase):
 
     def test_full_pipeline_contains_constructor_collection_and_selection_code(self):
         pipeline = authorized_source()
-        for text in ["nonce: nonce", "destination_ports: tcp.destination_ports", "result.ssh_node_install = Some(install)",
+        for text in ["nonce: nonce", "resources: tcp.resources", "result.ssh_node_install = Some(install)",
                      "ScopeProjection::Tcp(request) => tcp = Some((request, ttl))", "plan.realization().mechanisms"]:
             self.assertIn(text, pipeline)
         self.assertNotIn("/* PRODUCTION_", pipeline)
@@ -101,7 +101,7 @@ class SourceExtraction(unittest.TestCase):
         self.assertIn('selected.subset_of(ports)', scope)
         self.assertIn('self.binding == requested.binding', scope)
         self.assertIn('common.domain_id != uuid_text(binding.domain_id)', projection)
-        self.assertIn('source_address: ip_text(source)', projection)
+        self.assertIn('source_addresses: source', projection)
         self.assertNotIn('/* PRODUCTION_', projection)
 
 

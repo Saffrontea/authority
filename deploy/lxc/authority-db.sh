@@ -440,9 +440,9 @@ BEGIN
     WHERE issued.event_type = 'access.tcp_authorization.issued'
       AND p.payload #>> '{planning,binding,subject_user_id}' = actor
       AND (scoped.ability IS NULL
-        OR scoped.ability #> '{scope,ports}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,destination_ports}'
-        OR scoped.ability #> '{scope,source}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,source_address}'
-        OR scoped.ability #> '{scope,destination}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,destination_address}'
+        OR scoped.ability #> '{scope,ports}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,resources,destination_ports}'
+        OR scoped.ability #> '{scope,source}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,resources,source_addresses}'
+        OR scoped.ability #> '{scope,destination}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,resources,destination_addresses}'
         OR scoped.ability #> '{validity,expires_at}' IS DISTINCT FROM issued.payload #> '{tcp_grant,grant,expires_at}')
   ) THEN RAISE EXCEPTION 'issued TCP grant differs from scoped plan'; END IF;
   IF EXISTS (
@@ -475,7 +475,8 @@ BEGIN
   IF EXISTS (
     SELECT 1 FROM policy.issued_ability_grants g WHERE g.subject_user_id::text = actor
       AND g.revoked_at IS DISTINCT FROM (
-        SELECT min(EXTRACT(EPOCH FROM n.revoked_at)::bigint)
+        SELECT min(at) FROM (
+        SELECT EXTRACT(EPOCH FROM n.revoked_at)::bigint AS at
         FROM policy.revocation_notices n
         WHERE n.domain_id = g.domain_id AND n.target_node_id = g.target_node_id
           AND n.decision_id = g.decision_id
@@ -484,6 +485,17 @@ BEGIN
             WHEN 'ssh_credential' THEN ARRAY['ssh.certificate','ssh.session']
             WHEN 'mtls_credential' THEN ARRAY['mtls.client_certificate']
             WHEN 'tcp_admission' THEN ARRAY['tcp.port'] END
+        UNION ALL
+        SELECT (c.response ->> 'revoked_at')::bigint AS at
+        FROM policy.identity_revocation_commands c
+        WHERE c.domain_id = g.domain_id AND (
+          (c.response #>> '{selector,kind}' = 'subject'
+           AND c.response #>> '{selector,subject_user_id}' = g.subject_user_id::text
+           AND g.subject_generation < (c.response #>> '{selector,minimum_generation}')::bigint)
+          OR (c.response #>> '{selector,kind}' = 'device'
+           AND c.response #>> '{selector,device_id}' = g.device_id::text
+           AND g.device_generation < (c.response #>> '{selector,minimum_generation}')::bigint))
+        ) publications
       )
   ) THEN RAISE EXCEPTION 'issued ability ledger revocation state differs from committed notices'; END IF;
   IF EXISTS (
@@ -491,13 +503,24 @@ BEGIN
     JOIN outbox.events p ON p.aggregate_id = n.decision_id
       AND p.event_type = 'policy.plan.evaluated'
       AND p.payload #>> '{planning,binding,subject_user_id}' = actor
-    WHERE (SELECT count(*) FROM audit.events a WHERE a.actor_id = actor
+    WHERE ((SELECT count(*) FROM audit.events a WHERE a.actor_id = actor
       AND a.action = 'access.revoke' AND a.target_id = n.decision_id
       AND a.payload = n.envelope) <> 1
       OR (SELECT count(*) FROM outbox.events e WHERE e.aggregate_id = n.decision_id
       AND e.event_type = 'access.authorization.revoked' AND e.contract_version = 1
-      AND e.payload = n.envelope) <> 1
+      AND e.payload = n.envelope) <> 1)
+      AND NOT EXISTS (SELECT 1 FROM policy.identity_revocation_children c
+        WHERE c.sequence = n.sequence AND c.domain_id = n.domain_id)
   ) THEN RAISE EXCEPTION 'revocation notice/audit/outbox mismatch or duplicate'; END IF;
+  IF EXISTS (
+    SELECT 1 FROM policy.identity_revocation_commands c
+    WHERE (SELECT count(*) FROM audit.events a WHERE a.domain_id=c.domain_id
+      AND a.action='identity.revoke' AND a.target_id=c.nonce
+      AND a.payload -> 'command' = c.command AND a.payload -> 'result' = c.response) <> 1
+    OR (SELECT count(*) FROM outbox.events e WHERE e.aggregate_id=c.nonce
+      AND e.event_type='identity.revoked.v1' AND e.contract_version=1 AND e.payload=c.response) <> 1
+  ) THEN RAISE EXCEPTION 'identity command/audit/outbox mismatch or duplicate'; END IF;
+
 END
 $checks$;
 WITH latest AS (
@@ -589,6 +612,47 @@ destroy_container() {
   log "deleted ${CONTAINER_NAME}"
 }
 
+test_resource_range() {
+  local -a fixture
+  local domain subject device target value
+  mapfile -t fixture < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); [print(v[k]) for k in ("domain_id","subject_user_id","device_id","target_node_id")]' "${REPO_ROOT}/.secrets/e2e-identity-fixture.json")
+  domain="${fixture[0]:-}"; subject="${fixture[1]:-}"; device="${fixture[2]:-}"; target="${fixture[3]:-}"
+  for value in "$domain" "$subject" "$device" "$target"; do
+    [[ "$value" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 'E2E fixture requires UUIDs'
+  done
+  as_root lxc-attach -P "${LXC_PATH}" -n "${CONTAINER_NAME}" -- \
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d authority \
+    -v domain="$domain" -v subject="$subject" -v device="$device" -v target="$target" <<'SQL'
+BEGIN;
+INSERT INTO policy.ability_policies(id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority)
+SELECT gen_random_uuid(), :'domain'::uuid, :'subject'::uuid, :'device'::uuid, :'target'::uuid,
+ jsonb_build_object('kind',kind,'source',jsonb_build_array(jsonb_build_object('start',172818433,'end',172818434)),
+ 'destination',jsonb_build_array(jsonb_build_object('start',172818434,'end',172818435)),
+ 'ports',jsonb_build_array(jsonb_build_object('start',8080,'end',8181))), 'allow', 0
+FROM unnest(ARRAY['tcp_admission_range','tcp_connection_range']) AS kinds(kind);
+COMMIT;
+SQL
+}
+
+# Explicit E2E administrator fixtures; never part of the service API.
+test_identity_reenable() {
+  local domain user device
+  local -a fixture
+  mapfile -t fixture < <(python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); print(v["domain_id"]); print(v["subject_user_id"]); print(v["device_id"])' "${SCRIPT_DIR}/../../.secrets/e2e-identity-fixture.json")
+  domain="${fixture[0]:-}"; user="${fixture[1]:-}"; device="${fixture[2]:-}"
+  for value in "$domain" "$user" "$device"; do
+    [[ "$value" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || die 'E2E fixture requires UUIDs'
+  done
+  as_root lxc-attach -P "${LXC_PATH}" -n "${CONTAINER_NAME}" -- \
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -d authority \
+    -v domain="$domain" -v subject="$user" -v device="$device" <<'SQL'
+BEGIN;
+UPDATE identity.users SET status='active' WHERE id=:'subject'::uuid AND domain_id=:'domain'::uuid;
+UPDATE device.devices SET status='active' WHERE id=:'device'::uuid AND domain_id=:'domain'::uuid AND owner_user_id=:'subject'::uuid;
+COMMIT;
+SQL
+}
+
 main() {
   local command="${1:-}"
   case "${command}" in
@@ -606,6 +670,8 @@ main() {
     verify) verify_postgres ;;
     verify-schema) verify_schema ;;
     verify-planning) verify_planning ;;
+    test-resource-range) test_resource_range ;;
+    test-identity-reenable) shift; test_identity_reenable "$@" ;;
     diagnose) diagnose_container ;;
     shell) open_shell ;;
     reset-password) reset_password ;;

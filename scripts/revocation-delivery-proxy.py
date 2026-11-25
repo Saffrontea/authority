@@ -42,7 +42,7 @@ def main():
                     state['blocked'] = value['blocked']
                     self.reply(200, json.dumps(state).encode(), [('content-type', 'application/json')])
                     return
-                if self.command == 'POST' and self.path == '/v1/revocations' and state['blocked']:
+                if self.command == 'POST' and self.path in ('/v1/revocations', '/v1/identity-revocations') and state['blocked']:
                     state['rejected'] += 1
                     sequence = json.loads(body)['notice']['sequence']
                     if sequence not in state['rejected_sequences']:
@@ -56,7 +56,7 @@ def main():
                     connection.request(self.command, self.path, body, headers)
                     response = connection.getresponse()
                     data = response.read()
-                    if self.command == 'POST' and self.path == '/v1/revocations' and 200 <= response.status < 300:
+                    if self.command == 'POST' and self.path in ('/v1/revocations', '/v1/identity-revocations') and 200 <= response.status < 300:
                         state['forwarded'] += 1
                     self.reply(response.status, data, response.getheaders())
                 except OSError:

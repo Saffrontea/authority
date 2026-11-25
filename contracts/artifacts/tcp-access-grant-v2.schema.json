@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/tcp-access-grant-v2.schema.json",
+  "title": "TcpAccessGrantV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issuer",
+    "domain_id",
+    "subject_user_id",
+    "device_id",
+    "target_node_id",
+    "policy_id",
+    "audience",
+    "version",
+    "decision_id",
+    "issued_at",
+    "not_before",
+    "expires_at",
+    "resources"
+  ],
+  "properties": {
+    "issuer": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "domain_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "subject_user_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "target_node_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "policy_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "audience": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "version": {
+      "const": "2"
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 32,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    },
+    "issued_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "not_before": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resources": {
+      "$ref": "tcp-resources-v1.schema.json"
+    }
+  }
+}

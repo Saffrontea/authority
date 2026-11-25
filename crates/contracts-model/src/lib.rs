@@ -2,11 +2,13 @@
 //!
 //! This crate contains no database, HTTP, CA, or policy-engine adapters.
 
+pub mod administration;
 pub mod fence;
 pub mod observation;
 pub mod protocol;
+pub mod resources;
 mod tcp;
-pub use tcp::{SignedTcpAccessGrantV1, TcpAccessGrantV1};
+pub use tcp::{SignedTcpAccessGrantV2, TcpAccessGrantV2};
 
 use std::{collections::HashSet, net::IpAddr};
 
@@ -17,7 +19,7 @@ use protocol::{
     CONTRACT_VERSION_V1 as VERSION, MAX_TTL_SECONDS,
     SIGNATURE_ALGORITHM_ED25519 as SIGNATURE_ALGORITHM,
 };
-const DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-ISSUANCE-AUTHORIZATION-V1\0";
+const DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-ISSUANCE-AUTHORIZATION-V2\0";
 const NETWORK_GRANT_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-NETWORK-ACCESS-GRANT-V1\0";
 const REVOCATION_NOTICE_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V1\0";
 const REVOCATION_NOTICE_V2_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-DECISION-REVOCATION-NOTICE-V2\0";
@@ -26,7 +28,7 @@ const MTLS_AUTHORIZATION_DOMAIN_SEPARATOR: &[u8] = b"AUTHORITY-MTLS-ISSUANCE-AUT
 /// Control-plane authorization consumed by the isolated credential issuer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct IssuanceAuthorizationV1 {
+pub struct IssuanceAuthorizationV2 {
     pub version: String,
     pub issuer: String,
     pub domain_id: String,
@@ -36,6 +38,7 @@ pub struct IssuanceAuthorizationV1 {
     pub ssh_public_key_fingerprint: String,
     pub principals: Vec<String>,
     pub policy_id: String,
+    pub decision_id: String,
     pub nonce: String,
     pub issued_at: i64,
     pub not_before: i64,
@@ -46,8 +49,9 @@ pub struct IssuanceAuthorizationV1 {
 /// Signed transport envelope passed from the control plane to an issuer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedIssuanceAuthorizationV1 {
-    pub authorization: IssuanceAuthorizationV1,
+pub struct SignedIssuanceAuthorizationV2 {
+    pub generation: crate::fence::GenerationBinding,
+    pub authorization: IssuanceAuthorizationV2,
     pub algorithm: String,
     pub key_id: String,
     pub signature: String,
@@ -75,7 +79,8 @@ pub struct NetworkAccessGrantV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedNetworkAccessGrantV1 {
+pub struct SignedNetworkAccessGrantV2 {
+    pub generation: crate::fence::GenerationBinding,
     pub grant: NetworkAccessGrantV1,
     pub algorithm: String,
     pub key_id: String,
@@ -156,7 +161,8 @@ pub struct MtlsIssuanceAuthorizationV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedMtlsIssuanceAuthorizationV1 {
+pub struct SignedMtlsIssuanceAuthorizationV2 {
+    pub generation: crate::fence::GenerationBinding,
     pub authorization: MtlsIssuanceAuthorizationV1,
     pub algorithm: String,
     pub key_id: String,
@@ -169,8 +175,8 @@ pub struct SignedMtlsIssuanceAuthorizationV1 {
 pub struct AccessAuthorizationBundleV1 {
     pub version: String,
     pub decision_id: String,
-    pub ssh_authorization: SignedIssuanceAuthorizationV1,
-    pub network_grant: SignedNetworkAccessGrantV1,
+    pub ssh_authorization: SignedIssuanceAuthorizationV2,
+    pub network_grant: SignedNetworkAccessGrantV2,
 }
 
 /// Auditable explanation of one policy decision and its adapter projections.
@@ -389,7 +395,7 @@ pub enum ContractError {
     InvalidIdentityUri,
 }
 
-impl IssuanceAuthorizationV1 {
+impl IssuanceAuthorizationV2 {
     /// Enforces semantics that cannot be expressed by shape validation alone.
     ///
     /// # Errors
@@ -397,7 +403,7 @@ impl IssuanceAuthorizationV1 {
     /// Returns [`ContractError`] when a field violates the v1 identity,
     /// audience, nonce, fingerprint, principal, or lifetime rules.
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.version != VERSION {
+        if self.version != protocol::CONTRACT_VERSION_V2 {
             return Err(ContractError::UnsupportedVersion);
         }
 
@@ -408,6 +414,7 @@ impl IssuanceAuthorizationV1 {
             ("device_id", self.device_id.as_str()),
             ("target_node_id", self.target_node_id.as_str()),
             ("policy_id", self.policy_id.as_str()),
+            ("decision_id", self.decision_id.as_str()),
             ("audience", self.audience.as_str()),
         ] {
             if !valid_identifier(value) {
@@ -466,6 +473,7 @@ impl IssuanceAuthorizationV1 {
             push_string(&mut output, principal);
         }
         push_string(&mut output, &self.policy_id);
+        push_string(&mut output, &self.decision_id);
         push_string(&mut output, &self.nonce);
         output.extend_from_slice(&self.issued_at.to_be_bytes());
         output.extend_from_slice(&self.not_before.to_be_bytes());
@@ -475,7 +483,7 @@ impl IssuanceAuthorizationV1 {
     }
 }
 
-impl SignedIssuanceAuthorizationV1 {
+impl SignedIssuanceAuthorizationV2 {
     /// Validates envelope shape and the embedded authorization semantics.
     ///
     /// This does not cryptographically verify the signature.
@@ -486,6 +494,11 @@ impl SignedIssuanceAuthorizationV1 {
     /// key identifier, or base64url signature representation.
     pub fn validate(&self) -> Result<(), ContractError> {
         self.authorization.validate()?;
+        self.generation.check_identity(
+            &self.authorization.domain_id,
+            &self.authorization.subject_user_id,
+            &self.authorization.device_id,
+        )?;
         if self.algorithm != SIGNATURE_ALGORITHM {
             return Err(ContractError::InvalidSignatureAlgorithm);
         }
@@ -498,6 +511,13 @@ impl SignedIssuanceAuthorizationV1 {
             return Err(ContractError::InvalidSignature);
         }
         Ok(())
+    }
+    /// # Errors
+    /// Rejects invalid claims or identity generation bindings.
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, crate::ContractError> {
+        self.validate()?;
+        self.generation
+            .envelope_preimage(&self.authorization.signing_preimage()?)
     }
 }
 
@@ -572,7 +592,7 @@ impl NetworkAccessGrantV1 {
     }
 }
 
-impl SignedNetworkAccessGrantV1 {
+impl SignedNetworkAccessGrantV2 {
     /// Validates the embedded grant and signature envelope shape.
     ///
     /// # Errors
@@ -580,7 +600,19 @@ impl SignedNetworkAccessGrantV1 {
     /// Returns [`ContractError`] when the grant or envelope is invalid.
     pub fn validate(&self) -> Result<(), ContractError> {
         self.grant.validate()?;
+        self.generation.check_identity(
+            &self.grant.domain_id,
+            &self.grant.subject_user_id,
+            &self.grant.device_id,
+        )?;
         validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+    /// # Errors
+    /// Rejects invalid claims or identity generation bindings.
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, crate::ContractError> {
+        self.validate()?;
+        self.generation
+            .envelope_preimage(&self.grant.signing_preimage()?)
     }
 }
 
@@ -803,7 +835,7 @@ impl MtlsIssuanceAuthorizationV1 {
     }
 }
 
-impl SignedMtlsIssuanceAuthorizationV1 {
+impl SignedMtlsIssuanceAuthorizationV2 {
     /// Validates the embedded authorization and signature envelope.
     ///
     /// # Errors
@@ -811,7 +843,19 @@ impl SignedMtlsIssuanceAuthorizationV1 {
     /// Returns [`ContractError`] for invalid authorization or envelope fields.
     pub fn validate(&self) -> Result<(), ContractError> {
         self.authorization.validate()?;
+        self.generation.check_identity(
+            &self.authorization.domain_id,
+            &self.authorization.subject_user_id,
+            &self.authorization.device_id,
+        )?;
         validate_envelope(&self.algorithm, &self.key_id, &self.signature)
+    }
+    /// # Errors
+    /// Rejects invalid claims or identity generation bindings.
+    pub fn signing_preimage(&self) -> Result<Vec<u8>, crate::ContractError> {
+        self.validate()?;
+        self.generation
+            .envelope_preimage(&self.authorization.signing_preimage()?)
     }
 }
 

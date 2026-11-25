@@ -1,0 +1,7 @@
+{
+  "domain_id": "domain",
+  "subject_user_id": "alice",
+  "device_id": "laptop",
+  "subject_generation": 1,
+  "device_generation": 1
+}

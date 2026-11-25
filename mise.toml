@@ -427,3 +427,31 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-restore"
 [tasks."_mesh:test-observation-break"]
 description = "Internal E2E only: change the actual admission structure"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh observation-break"
+
+[tasks."_db:test-identity-reenable"]
+description = "E2E only: explicitly reactivate an identity at a new generation"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh test-identity-reenable"
+
+[tasks."_db:test-resource-range"]
+description = "E2E only: provision an explicit symbolic TCP range policy"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-db.sh test-resource-range"
+
+[tasks."_mesh:test-tcp-wide"]
+description = "E2E only: native symbolic TCP range fixture"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh test-tcp-wide"
+
+[tasks."_mesh:test-tcp-normal"]
+description = "E2E only: native symbolic TCP range fixture"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh test-tcp-normal"
+
+[tasks."_mesh:test-tcp-range-present"]
+description = "E2E only: native symbolic TCP range fixture"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh test-tcp-range-present"
+
+[tasks."_mesh:ssh-guard-status"]
+description = "Read recent sshd and watchdog rejection diagnostics"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh ssh-guard-status"
+
+[tasks."_mesh:test-tcp-cidr"]
+description = "E2E only: verify native multidimensional interval membership in an unhooked nft set"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh test-tcp-cidr"

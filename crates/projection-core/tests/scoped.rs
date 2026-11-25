@@ -80,7 +80,10 @@ fn try_authorize_selected(
         policy,
         PolicyScope {
             ssh_principals: BTreeSet::from(["deploy".into()]),
-            tcp_ports: BTreeSet::from([8080, 8081]),
+            tcp_ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from(
+                [8080, 8081],
+            ))
+            .unwrap(),
         },
     )]);
     let resources = NetworkResources {
@@ -120,19 +123,24 @@ fn try_authorize_selected(
 fn changing_request_after_authorization_cannot_change_projected_tcp_scope() {
     let mut requested = RequestedAccess {
         tcp: Some(RequestedTcp {
-            ports: BTreeSet::from([8080]),
+            source_addresses: None,
+            destination_addresses: None,
+            ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from([
+                8080,
+            ]))
+            .unwrap(),
             ttl_seconds: 20,
         }),
         ..RequestedAccess::default()
     };
     let (plan, common) = authorize(AccessIntent::tcp(Route::Direct), &requested);
-    requested.tcp.as_mut().unwrap().ports.insert(8081);
+    requested.tcp.as_mut().unwrap().ports = "8080-8081".parse().unwrap();
     requested.tcp.as_mut().unwrap().ttl_seconds = 300;
     let result = project_authorized(&common, &plan).unwrap();
     let grant = result.tcp_grant.unwrap();
-    assert_eq!(grant.destination_ports, vec![8080]);
-    assert_eq!(grant.source_address, "10.77.0.1");
-    assert_eq!(grant.destination_address, "10.77.0.2");
+    assert_eq!(grant.resources.destination_ports, "8080".parse().unwrap());
+    assert_eq!(grant.resources.source_addresses, [10, 77, 0, 1].into());
+    assert_eq!(grant.resources.destination_addresses, [10, 77, 0, 2].into());
     assert_eq!(grant.expires_at, common.issued_at + 20);
     assert!(result.network_grant.is_none());
     assert!(result.ssh_issuance.is_none());
@@ -204,7 +212,12 @@ fn infrastructure_projection_preserves_authorized_material_and_independent_deadl
 fn projection_cannot_rebind_identity_policy_or_issuance_time() {
     let requested = RequestedAccess {
         tcp: Some(RequestedTcp {
-            ports: BTreeSet::from([8080]),
+            source_addresses: None,
+            destination_addresses: None,
+            ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from([
+                8080,
+            ]))
+            .unwrap(),
             ttl_seconds: 20,
         }),
         ..RequestedAccess::default()
@@ -232,7 +245,12 @@ fn projection_cannot_rebind_identity_policy_or_issuance_time() {
 fn automatic_projection_emits_only_the_selected_route_material() {
     let requested = RequestedAccess {
         tcp: Some(RequestedTcp {
-            ports: BTreeSet::from([8080]),
+            source_addresses: None,
+            destination_addresses: None,
+            ports: authority_contracts_model::resources::PortSet::from_ports(&BTreeSet::from([
+                8080,
+            ]))
+            .unwrap(),
             ttl_seconds: 20,
         }),
         network: Some(RequestedNetwork {
@@ -256,7 +274,10 @@ fn automatic_projection_emits_only_the_selected_route_material() {
         authorize_selected(AccessIntent::tcp(Route::Direct), &requested, Some(&options));
     let result = project_authorized(&common, &plan).unwrap();
     assert!(result.network_grant.is_none());
-    assert_eq!(result.tcp_grant.unwrap().destination_ports, vec![8080]);
+    assert_eq!(
+        result.tcp_grant.unwrap().resources.destination_ports,
+        "8080".parse().unwrap()
+    );
     options.availability.existing_route = None;
     let (plan, common) =
         authorize_selected(AccessIntent::tcp(Route::Direct), &requested, Some(&options));
@@ -280,13 +301,14 @@ proptest::proptest! {
         use proptest::prelude::*;
         let ports = if select_both { BTreeSet::from([8080, 8081]) } else { BTreeSet::from([8080]) };
         let requested = RequestedAccess {
-            tcp: Some(RequestedTcp { ports: ports.clone(), ttl_seconds: ttl }),
+            tcp: Some(RequestedTcp {
+ source_addresses:None, destination_addresses:None, ports: authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap(), ttl_seconds: ttl }),
             ..RequestedAccess::default()
         };
         let (plan, common) = authorize(AccessIntent::tcp(Route::Direct), &requested);
         let result = project_authorized(&common, &plan).unwrap();
         let grant = result.tcp_grant.unwrap();
-        prop_assert_eq!(grant.destination_ports, ports.into_iter().collect::<Vec<_>>());
+        prop_assert_eq!(grant.resources.destination_ports, authority_contracts_model::resources::PortSet::from_ports(&ports).unwrap());
         prop_assert_eq!(grant.issued_at, common.issued_at);
         prop_assert_eq!(grant.expires_at, common.issued_at + ttl);
         prop_assert_eq!(&grant.domain_id, &common.domain_id);

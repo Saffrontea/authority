@@ -385,13 +385,37 @@
       return { body, headers: await deviceProofHeaders(sessionToken, 'access.revoke', bindings) };
     };
 
-    window.authorityRequestTcpAuthorization = async function (ports, includeNetwork = false, ttlSeconds = 10, automaticRoute = false) {
+    function tcpPortIntervals(input) {
+      const values = Array.isArray(input) ? input : String(input).split(',');
+      if (!values.length || values.length > 4096) throw new Error('Choose a bounded port range.');
+      const intervals = values.map(value => {
+        if (typeof value === 'object' && value !== null) {
+          if (Object.keys(value).sort().join(',') !== 'end,start') throw new Error('Invalid port interval.');
+          return { start: value.start, end: value.end };
+        }
+        const text = String(value).trim();
+        if (!/^\d+(?:-\d+)?$/.test(text)) throw new Error('Use ports or inclusive ranges, such as 8080-8180.');
+        const parts = text.split('-').map(Number);
+        return { start: parts[0], end: (parts[1] ?? parts[0]) + 1 };
+      }).sort((a, b) => a.start - b.start || a.end - b.end);
+      const result = [];
+      for (const interval of intervals) {
+        if (!Number.isInteger(interval.start) || !Number.isInteger(interval.end) || interval.start < 1 || interval.start >= interval.end || interval.end > 65536) throw new Error('Ports must be in 1-65535.');
+        const previous = result[result.length - 1];
+        if (previous && interval.start <= previous.end) previous.end = Math.max(previous.end, interval.end);
+        else result.push({ ...interval });
+      }
+      return result;
+    }
+
+    window.authorityRequestTcpAuthorization = async function (ports, includeNetwork = false, ttlSeconds = 10, automaticRoute = false, addresses = {}) {
+      ports = tcpPortIntervals(ports);
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
       const sessionToken = sessionStorage.getItem('authority-session');
       if (!access || !sessionToken) throw new Error('TCP authorization prerequisites are missing.');
       const body = { device_id: access.device_id, target_node_id: access.target_node_id,
-        destination_ports: ports, include_network: includeNetwork, ttl_seconds: ttlSeconds };
-      const bindings = [body.device_id, body.target_node_id, JSON.stringify(ports), String(includeNetwork), String(ttlSeconds)];
+        destination_ports: ports, source_addresses: addresses.source_addresses ?? null, destination_addresses: addresses.destination_addresses ?? null, include_network: includeNetwork, ttl_seconds: ttlSeconds };
+      const bindings = [body.device_id, body.target_node_id, JSON.stringify(ports), String(includeNetwork), String(ttlSeconds), JSON.stringify(body.source_addresses), JSON.stringify(body.destination_addresses)];
       if (automaticRoute) {
         if (includeNetwork) throw new Error('Choose automatic routing or an explicit network grant.');
         body.automatic_route = true;
@@ -532,7 +556,7 @@
       busy(document.querySelector('#tcp-authorize'), async () => {
         const output = document.querySelector('#tcp-result');
         try {
-          const ports = document.querySelector('#tcp-ports').value.split(',').map(value => Number(value.trim()));
+          const ports = document.querySelector('#tcp-ports').value.split(',').map(value => value.trim());
           const ttl = Number(document.querySelector('#tcp-ttl').value);
           const authorization = await window.authorityRequestTcpAuthorization(
             ports, document.querySelector('#tcp-network').checked, ttl,

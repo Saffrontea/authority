@@ -1,0 +1,34 @@
+{
+  "version": "2",
+  "issuer": "domain-authority:example",
+  "domain_id": "domain_example",
+  "subject_user_id": "user_01",
+  "device_id": "device_01",
+  "target_node_id": "node_01",
+  "policy_id": "policy_01@1",
+  "decision_id": "0123456789abcdef0123456789abcdef",
+  "issued_at": 1700000000,
+  "not_before": 1700000000,
+  "expires_at": 1700000060,
+  "audience": "network-agent",
+  "resources": {
+    "source_addresses": [
+      {
+        "start": 0,
+        "end": 1
+      }
+    ],
+    "destination_addresses": [
+      {
+        "start": 172818434,
+        "end": 172818435
+      }
+    ],
+    "destination_ports": [
+      {
+        "start": 8080,
+        "end": 8081
+      }
+    ]
+  }
+}

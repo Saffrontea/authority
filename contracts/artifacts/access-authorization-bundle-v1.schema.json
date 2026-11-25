@@ -4,16 +4,27 @@
   "title": "AccessAuthorizationBundleV1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "decision_id", "ssh_authorization", "network_grant"],
+  "required": [
+    "version",
+    "decision_id",
+    "ssh_authorization",
+    "network_grant"
+  ],
   "properties": {
-    "version": { "const": "1" },
+    "version": {
+      "const": "1"
+    },
     "decision_id": {
       "type": "string",
       "minLength": 32,
       "maxLength": 128,
       "pattern": "^[A-Za-z0-9_-]+$"
     },
-    "ssh_authorization": { "$ref": "signed-issuance-authorization-v1.schema.json" },
-    "network_grant": { "$ref": "signed-network-access-grant-v1.schema.json" }
+    "ssh_authorization": {
+      "$ref": "signed-issuance-authorization-v2.schema.json"
+    },
+    "network_grant": {
+      "$ref": "signed-network-access-grant-v2.schema.json"
+    }
   }
 }

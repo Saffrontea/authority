@@ -43,10 +43,10 @@ pub open spec fn allows(scope: AbilityScope, atom: Atom) -> bool {
         (AbilityScope::MeshMembership { wireguard_public_key, address }, Atom::Peer { key, address: at }) =>
             wireguard_public_key == key && address == at,
         (AbilityScope::NetworkReachability { source, destination }, Atom::Route { source: from, destination: to }) =>
-            source == from && destination == to,
+            source.contains(from) && destination.contains(to),
 
         (AbilityScope::NetworkRouteAuthorization { source, destination }, Atom::RouteInstalled { source: from, destination: to }) =>
-            source == from && destination == to,
+            source.contains(from) && destination.contains(to),
         (AbilityScope::SshSession { public_key_fingerprint, principals, terminal_token_hash },
             Atom::Ssh { key, principal, token }) =>
             public_key_fingerprint == key && terminal_token_hash == token && principals.contains(principal),
@@ -62,10 +62,10 @@ pub open spec fn allows(scope: AbilityScope, atom: Atom) -> bool {
             Atom::CredentialMtls { key, uri, audience }) =>
             client_spki_sha256 == key && identity_uri == uri && service_audience == audience,
         (AbilityScope::TcpConnection { source, destination, ports }, Atom::Tcp { source: from, destination: to, port }) =>
-            source == from && destination == to && ports.contains(port),
+            source.contains(from) && destination.contains(to) && ports.contains(port),
 
         (AbilityScope::TcpAdmission { source, destination, ports }, Atom::AdmissionTcp { source: from, destination: to, port }) =>
-            source == from && destination == to && ports.contains(port),
+            source.contains(from) && destination.contains(to) && ports.contains(port),
         _ => false,
     }
 }
@@ -74,8 +74,8 @@ pub open spec fn valid_request(scope: AbilityScope) -> bool {
     match scope {
         AbilityScope::SshCredential { principals, .. } | AbilityScope::SshSession { principals, .. } => principals.len() > 0
             && forall|principal: Seq<char>| principals.contains(principal) ==> principal.len() > 0,
-        AbilityScope::TcpAdmission { ports, .. } | AbilityScope::TcpConnection { ports, .. } => ports.len() > 0
-            && ports.len() <= MAX_TCP_PORTS && !ports.contains(0),
+        AbilityScope::TcpAdmission { source, destination, ports } | AbilityScope::TcpConnection { source, destination, ports } => source.len() > 0 && destination.len() > 0 && ports.len() > 0 && !ports.contains(0),
+        AbilityScope::NetworkRouteAuthorization { source, destination } | AbilityScope::NetworkReachability { source, destination } => source.len() > 0 && destination.len() > 0,
         _ => true,
     }
 }

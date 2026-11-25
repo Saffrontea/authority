@@ -4,6 +4,7 @@
 pub const ENFORCEMENT_LEASE_SECONDS: u32 = 5;
 pub mod connections;
 pub mod database;
+pub mod issuance;
 pub mod pki;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

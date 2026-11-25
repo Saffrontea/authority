@@ -725,7 +725,7 @@ is idempotent.
 
 The suite found that the node accepted Host certificates and a mismatched key ID
 when CA, subject key, principal and interval matched. The install path now requires
-`CertType::User` and the issuer's exact `subject_user_id:device_id` key ID before
+`CertType::User` and the issuer's exact `authority-v2:` generation/decision/time key ID before
 writing files or installing a lease. The minimized regression seed is checked in
 under `bins/node-agent/proptest-regressions`.
 

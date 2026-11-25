@@ -274,9 +274,13 @@ impl PlanningEvidence {
         match (self.selected, &self.plan) {
             (None, None) => authorized.is_empty(),
             (Some(selected), Some(plan)) => {
-                let frontier = authority_planning_core::minimal_indices(&authorized, |a, b| {
-                    evidence_leq(a.1, b.1)
-                });
+                let Ok(frontier) =
+                    authority_planning_core::minimal_indices_checked(&authorized, |a, b| {
+                        evidence_leq(a.1, b.1)
+                    })
+                else {
+                    return false;
+                };
                 let winner = frontier
                     .into_iter()
                     .map(|i| authorized[i])
@@ -376,11 +380,15 @@ impl PlanningEvidence {
     }
 }
 
-fn evidence_leq(left: &PlanEvidence, right: &PlanEvidence) -> bool {
-    crate::ability_policy::authority_leq(
+fn evidence_leq(
+    left: &PlanEvidence,
+    right: &PlanEvidence,
+) -> Result<bool, authority_planning_core::PlanningError> {
+    crate::ability_policy::authority_leq_checked(
         &left.abilities.iter().map(|a| a.ability.clone()).collect(),
         &right.abilities.iter().map(|a| a.ability.clone()).collect(),
     )
+    .map_err(|_| authority_planning_core::PlanningError::SearchLimit)
 }
 
 impl PlanEvidence {
@@ -394,6 +402,7 @@ impl PlanEvidence {
     ) -> bool {
         if let Some(envelope) = &resources.observation {
             let observation = &envelope.observation;
+            if self.abilities.iter().any(|a|matches!(&a.ability.scope,crate::scoped::AbilityScope::TcpAdmission{ports,..}|crate::scoped::AbilityScope::TcpConnection{ports,..} if !ports.is_subset(&observation.tcp_ports))) {return false;}
             if self.abilities.iter().any(|a|a.ability.validity.expires_at>observation.expires_at
                 || matches!(&a.ability.scope,crate::scoped::AbilityScope::SshCredential{principals,..}|crate::scoped::AbilityScope::SshSession{principals,..}
                     if principals.iter().any(|p|p!=&observation.challenge.resources.principal))) {return false;}
@@ -487,7 +496,10 @@ fn scope_matches_resources(
             source,
             destination,
             ..
-        } => *source == resources.source_address && *destination == resources.target_address,
+        } => {
+            *source == resources.source_address.into()
+                && *destination == resources.target_address.into()
+        }
         AbilityScope::ServiceIdentity {
             identity_uri,
             service_audience,
@@ -666,6 +678,7 @@ pub fn evaluate_selection(
     )
 }
 
+#[allow(clippy::too_many_lines)] // Candidate evidence and whole-selection failure are assembled together.
 pub(crate) fn evaluate_with<D>(
     request: &AccessRequest,
     requested: &RequestedAccess,
@@ -720,7 +733,15 @@ pub(crate) fn evaluate_with<D>(
             }
         }
     }
-    let frontier = authority_planning_core::minimal_indices(&authorized, |a, b| {
+    if failures.iter().any(|reason| {
+        matches!(
+            reason,
+            ScopeError::Policy(DenialReason::PlanningSearchLimit)
+        )
+    }) {
+        return Err(budget_failure(request, options, resources, &evaluations));
+    }
+    let frontier = authority_planning_core::minimal_indices_checked(&authorized, |a, b| {
         evidence_leq(
             a.2.evidence()
                 .plan
@@ -731,7 +752,8 @@ pub(crate) fn evaluate_with<D>(
                 .as_ref()
                 .expect("authorized plan has evidence"),
         )
-    });
+    })
+    .map_err(|_| budget_failure(request, options, resources, &evaluations))?;
     let selected = frontier.into_iter().min_by_key(|&i| authorized[i].0);
     if let Some(index) = selected {
         let (_, decision, mut plan) = authorized.swap_remove(index);
@@ -756,6 +778,33 @@ pub(crate) fn evaluate_with<D>(
         reason,
         evidence: Box::new(evidence),
     })
+}
+
+fn budget_failure(
+    request: &AccessRequest,
+    options: &SelectionOptions,
+    resources: &NetworkResources,
+    evaluations: &[CandidateEvaluation],
+) -> SelectionFailure {
+    let reason = ScopeError::Policy(DenialReason::PlanningSearchLimit);
+    let mut evidence = PlanningEvidence::base(request, options.choice);
+    evidence.resources = Some(resources.clone());
+    evidence.deployment =
+        (options.choice == RouteChoice::Automatic).then(|| options.availability.clone());
+    evidence.candidates = evaluations
+        .iter()
+        .map(|entry| {
+            if matches!(&entry.result, CandidateResult::Authorized { .. }) {
+                CandidateEvaluation::rejected(entry.candidate, &reason)
+            } else {
+                entry.clone()
+            }
+        })
+        .collect();
+    SelectionFailure {
+        reason,
+        evidence: Box::new(evidence),
+    }
 }
 
 impl PlanEvidence {

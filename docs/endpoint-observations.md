@@ -46,14 +46,14 @@ challenge-consumption and rate state in PostgreSQL; they do not use process-loca
 revocation or freshness caches.
 
 The wire contracts are [challenge v1](../contracts/artifacts/endpoint-challenge-v1.schema.json)
-and [observation v1](../contracts/artifacts/endpoint-observation-v1.schema.json).
+and [observation v2](../contracts/artifacts/endpoint-observation-v2.schema.json).
 Their canonical preimages use different domain separators. Signature verification
 uses the registered key, not a public key supplied by the reporter. Structural
 contract validation and pure planning-evidence replay do not themselves
 authenticate a node or its policy membership. Symbolic/model tests can supply
 assumed environment facts without runtime provenance; the live API cannot.
 
-The v1 signing representation is fixed by the independent Python-generated
+The versioned signing representation is fixed by the independent Python-generated
 `basic.preimage.hex` vectors. It is the named ASCII domain separator plus one NUL
 byte, followed by compact UTF-8 JSON without whitespace or slash escaping. Values
 are bounded ASCII strings and nonnegative decimal integers. Object keys follow
@@ -64,7 +64,7 @@ the declared struct order, **not** RFC 8785/JCS sorting:
 - resources: source, target, principal, ssh_ca_fingerprints, mtls_ca_sha256,
   service_audience;
 - observation: challenge, boot_id, observed_at, expires_at,
-  configuration_sha256, probe_sha256, facts.
+  configuration_sha256, probe_sha256, facts, tcp_ports.
 
 CA fingerprint arrays are lexically sorted. Fact arrays use the fixed enum order:
 SSH trust, mTLS trust, TCP enforcement, mesh route, existing route. Duplicates
@@ -79,14 +79,17 @@ explicit contract and signing vectors rather than silently changing serializatio
   the running MainPID, process start tick and OS boot ID. The probe rechecks
   these and `sshd -T -C` for the concrete source/principal. The effective trust
   file must contain exactly the expected CA fingerprint set and the principal
-  must be accepted by a captured principal file. An unrecorded change or reload
+  must be accepted by the captured root-only principal command. The receipt also
+  pins the watchdog helper and requires static principal/key bypasses and PAM
+  session migration to be disabled. An unrecorded change or reload
   requires a verified restart; merely changing a file never refreshes the receipt.
 - **mTLS trust:** a root-only Unix socket reports the service's immutable loaded
   CA, domain, target, audience and process ID. The probe checks private directory/
   socket ownership and mode, and the systemd process identity before and after
   the request. TLS acceptors, including refreshed CRL contexts, use this same
   in-memory CA rather than re-reading a mutable trust file.
-- **TCP enforcement:** the kernel's actual nftables table, set type/flags,
+- **TCP enforcement:** the signed report includes the actual normalized managed
+  port intervals. The kernel's actual nftables table, set type/flags,
   chain hooks/priorities and complete rule expressions must equal the structure
   installed by the actuator at startup. Only mutable set elements, rule handles
   and packet/byte counters are excluded from this structural comparison. This

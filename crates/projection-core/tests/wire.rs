@@ -5,8 +5,8 @@ use std::{
 };
 
 use authority_contracts_model::{
-    SignedIssuanceAuthorizationV1, SignedMtlsIssuanceAuthorizationV1, SignedNetworkAccessGrantV1,
-    SignedTcpAccessGrantV1,
+    SignedIssuanceAuthorizationV2, SignedMtlsIssuanceAuthorizationV2, SignedNetworkAccessGrantV2,
+    SignedTcpAccessGrantV2,
     protocol::{CREDENTIAL_ISSUER_AUDIENCE, NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE},
 };
 use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
@@ -114,7 +114,8 @@ fn authorize(
         policy,
         PolicyScope {
             ssh_principals: case.principals.clone(),
-            tcp_ports: case.ports.clone(),
+            tcp_ports: authority_contracts_model::resources::PortSet::from_ports(&case.ports)
+                .unwrap(),
         },
     )]);
     let requested = requested(case);
@@ -163,7 +164,9 @@ fn requested(case: &Case) -> RequestedAccess {
             ttl_seconds: case.ttls[1],
         }),
         tcp: (case.mask & 4 != 0).then(|| RequestedTcp {
-            ports: case.ports.clone(),
+            source_addresses: None,
+            destination_addresses: None,
+            ports: authority_contracts_model::resources::PortSet::from_ports(&case.ports).unwrap(),
             ttl_seconds: case.ttls[2],
         }),
         network: (case.mask & 8 != 0).then_some(RequestedNetwork {
@@ -226,19 +229,19 @@ fn consume(family: Family, value: &Value, target: &str, now: i64) -> Result<(), 
 fn consume_wire(family: Family, wire: &[u8], target: &str, now: i64) -> Result<(), WireError> {
     match family {
         Family::SshIssuer | Family::SshNode => {
-            let envelope: SignedIssuanceAuthorizationV1 = serde_json::from_slice(wire)?;
+            let envelope: SignedIssuanceAuthorizationV2 = serde_json::from_slice(wire)?;
             verify_authorization(&envelope, &KEYS.1)?;
         }
         Family::MtlsIssuer | Family::MtlsNode => {
-            let envelope: SignedMtlsIssuanceAuthorizationV1 = serde_json::from_slice(wire)?;
+            let envelope: SignedMtlsIssuanceAuthorizationV2 = serde_json::from_slice(wire)?;
             verify_mtls_authorization(&envelope, &KEYS.1)?;
         }
         Family::Wg => {
-            let envelope: SignedNetworkAccessGrantV1 = serde_json::from_slice(wire)?;
+            let envelope: SignedNetworkAccessGrantV2 = serde_json::from_slice(wire)?;
             verify_network_grant_for_node(&envelope, &KEYS.1, target, now)?;
         }
         Family::Tcp => {
-            let envelope: SignedTcpAccessGrantV1 = serde_json::from_slice(wire)?;
+            let envelope: SignedTcpAccessGrantV2 = serde_json::from_slice(wire)?;
             verify_tcp_grant_for_node(&envelope, &KEYS.1, target, now)?;
         }
     }
@@ -247,6 +250,20 @@ fn consume_wire(family: Family, wire: &[u8], target: &str, now: i64) -> Result<(
 
 fn changed(value: &Value, key: &str) -> Value {
     match value {
+        Value::Object(_) if key == "generation" => {
+            let mut changed = value.clone();
+            changed["subject_generation"] =
+                json!(value["subject_generation"].as_i64().unwrap() + 1);
+            changed
+        }
+        Value::Object(_) if key == "resources" => {
+            let mut changed = value.clone();
+            changed["destination_addresses"] =
+                json!(authority_contracts_model::resources::Ipv4Set::from([
+                    10, 77, 0, 99
+                ]));
+            changed
+        }
         Value::Number(number) => json!(number.as_i64().unwrap() + 1),
         Value::Array(values) if key == "destination_ports" => {
             let mut ports: BTreeSet<u16> = values
@@ -300,7 +317,7 @@ proptest! {
         let projected = project_authorized(&common, &plan).unwrap();
         let mut envelopes = Vec::new();
         macro_rules! add { ($field:ident, $family:expr, $sign:ident) => {
-            if let Some(claims) = projected.$field { envelopes.push(($family, serde_json::to_value($sign(claims, &KEYS.0).unwrap()).unwrap())); }
+            if let Some(claims) = projected.$field { envelopes.push(($family, serde_json::to_value($sign(claims, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.0).unwrap()).unwrap())); }
         }; }
         add!(ssh_issuance, Family::SshIssuer, sign_authorization);
         add!(ssh_node_install, Family::SshNode, sign_authorization);
@@ -344,9 +361,9 @@ proptest! {
                     prop_assert_eq!(&body["nonce"], &json!(common.decision_id));
                 }
                 Family::Tcp => {
-                    prop_assert_eq!(&body["destination_ports"], &json!(case.ports));
-                    prop_assert_eq!(&body["source_address"], &json!("10.77.0.1"));
-                    prop_assert_eq!(&body["destination_address"], &json!("10.77.0.2"));
+                    prop_assert_eq!(&body["resources"]["destination_ports"], &json!(authority_contracts_model::resources::PortSet::from_ports(&case.ports).unwrap()));
+                    prop_assert_eq!(&body["resources"]["source_addresses"], &json!(authority_contracts_model::resources::Ipv4Set::from([10,77,0,1])));
+                    prop_assert_eq!(&body["resources"]["destination_addresses"], &json!(authority_contracts_model::resources::Ipv4Set::from([10,77,0,2])));
                     prop_assert_eq!(&body["decision_id"], &json!(common.decision_id));
                 }
             }
@@ -358,7 +375,7 @@ proptest! {
                 missing[family.body()].as_object_mut().unwrap().remove(key);
                 prop_assert!(matches!(consume(family, &missing, &common.target_node_id, now), Err(WireError::Schema(_))), "missing claim accepted: {key}");
             }
-            for key in ["algorithm", "key_id", "signature"] {
+            for key in ["algorithm", "key_id", "signature", "generation"] {
                 let mut tampered = decoded.clone();
                 tampered[key] = changed(&decoded[key], key);
                 prop_assert!(consume(family, &tampered, &common.target_node_id, now).is_err());
@@ -387,8 +404,8 @@ proptest! {
                 let mut bad_audience = body.clone();
                 bad_audience["audience"] = json!("other-consumer");
                 let resigned = match family {
-                    Family::Wg => serde_json::to_value(sign_network_grant(serde_json::from_value(bad_audience).unwrap(), &KEYS.0).unwrap()).unwrap(),
-                    Family::Tcp => serde_json::to_value(sign_tcp_grant(serde_json::from_value(bad_audience).unwrap(), &KEYS.0).unwrap()).unwrap(),
+                    Family::Wg => serde_json::to_value(sign_network_grant(serde_json::from_value(bad_audience).unwrap(), authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.0).unwrap()).unwrap(),
+                    Family::Tcp => serde_json::to_value(sign_tcp_grant(serde_json::from_value(bad_audience).unwrap(), authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.0).unwrap()).unwrap(),
                     _ => unreachable!(),
                 };
                 prop_assert!(matches!(consume(family, &resigned, &common.target_node_id, now), Err(WireError::Envelope(AuthorizationEnvelopeError::InvalidAudience))));

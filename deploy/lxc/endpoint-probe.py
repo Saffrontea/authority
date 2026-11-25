@@ -37,7 +37,7 @@ def ssh_files():
                     for child in glob.glob(pattern):
                         includes(child)
     includes('/etc/ssh/sshd_config')
-    paths.update(['/etc/ssh/authority-user-ca.pub', '/etc/ssh/auth_principals/deploy'])
+    paths.update(['/etc/ssh/authority-user-ca.pub', '/etc/ssh/auth_principals/deploy', '/usr/local/lib/authority/ssh-guard.py'])
     return {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in sorted(paths)}
 
 def process(unit):
@@ -76,17 +76,51 @@ def nft_layout():
         return value
     return normalize(document)
 
+def managed_tcp_ports(layout):
+    """Read the actual rule predicates, not a configured list or expanded ports."""
+    predicates = []
+    def intervals(value):
+        if type(value) is int:
+            if not 1 <= value <= 65535: raise ValueError('invalid managed port')
+            return [(value, value + 1)]
+        if isinstance(value, dict) and set(value) == {'range'}:
+            first, last = value['range']
+            if type(first) is not int or type(last) is not int or not 1 <= first <= last <= 65535:
+                raise ValueError('invalid managed port range')
+            return [(first, last + 1)]
+        if isinstance(value, dict) and set(value) == {'set'}:
+            return [interval for item in value['set'] for interval in intervals(item)]
+        raise ValueError('unsupported managed port predicate')
+    for item in layout.get('nftables', []):
+        rule = item.get('rule', {})
+        if rule.get('family') != 'inet' or rule.get('table') != 'authority_tcp': continue
+        for expression in rule.get('expr', []):
+            match = expression.get('match', {})
+            payload = match.get('left', {}).get('payload', {}) if isinstance(match.get('left'), dict) else {}
+            if payload.get('protocol') == 'tcp' and payload.get('field') in ('dport', 'sport'):
+                if match.get('op') not in ('==', 'in'): raise ValueError('unsupported TCP predicate')
+                result = []
+                for first, end in sorted(intervals(match['right'])):
+                    if result and first <= result[-1]['end']:
+                        result[-1]['end'] = max(result[-1]['end'], end)
+                    else:
+                        result.append({'start': first, 'end': end})
+                predicates.append(result)
+    if len(predicates) != 4 or not predicates[0] or any(value != predicates[0] for value in predicates):
+        raise ValueError('TCP admission predicates disagree')
+    return predicates[0]
+
 def ssh_probe(resources):
     receipt = json.loads(RECEIPT.read_text())
     if receipt['files'] != ssh_files() or receipt['process'] != process('ssh.service'):
         raise ValueError('sshd configuration is not the loaded generation')
     config = dict(line.split(' ', 1) for line in run('/usr/sbin/sshd', '-T', '-C',
         f"user={resources['principal']},host=authority-probe,addr={resources['source']}").splitlines())
-    if config['pubkeyauthentication'] != 'yes' or config['authorizedprincipalscommand'] != 'none':
+    if (config['pubkeyauthentication'] != 'yes' or config['authorizedprincipalscommand'] != '/usr/local/lib/authority/ssh-guard.py authorize %u %i' or config['authorizedprincipalscommanduser'] != 'root' or config['authorizedprincipalsfile'] != 'none' or config['authorizedkeysfile'] != 'none' or config['usepam'] != 'no'):
         raise ValueError('unsupported SSH enforcement configuration')
     ca = config['trustedusercakeys']
-    principals = config['authorizedprincipalsfile'].replace('%u', resources['principal'])
-    if ca not in receipt['files'] or principals not in receipt['files']:
+    principals = '/etc/ssh/auth_principals/' + resources['principal']
+    if ca not in receipt['files'] or principals not in receipt['files'] or '/usr/local/lib/authority/ssh-guard.py' not in receipt['files']:
         raise ValueError('SSH trust/principal file not in loaded receipt')
     fingerprints = set()
     for line in Path(ca).read_text().splitlines():
@@ -153,6 +187,7 @@ def probe(request):
         layout = nft_layout()
         if layout != request['nft_layout']:
             raise ValueError('kernel admission layout changed since initialization')
+        managed_tcp_ports(layout)  # Exact checked range coverage, not a fact flag.
         return layout
     check('tcp_enforcement', tcp)
     def route():
@@ -169,7 +204,8 @@ def probe(request):
     check('mesh_route_configured', route)
     if 'mesh_route_configured' in facts:
         facts.append('existing_route_configured')
-    return {'facts': facts, 'configuration_sha256': digest(evidence), 'probe_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'errors': errors}
+    ports = managed_tcp_ports(evidence['tcp_enforcement']) if 'tcp_enforcement' in facts else []
+    return {'facts': facts, 'tcp_ports': ports, 'configuration_sha256': digest(evidence), 'probe_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'errors': errors}
 
 if __name__ == '__main__':
     mode = sys.argv[1]

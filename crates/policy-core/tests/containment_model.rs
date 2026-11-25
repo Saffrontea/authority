@@ -28,11 +28,17 @@ fn atoms(scope: &AbilityScope) -> BTreeSet<Atom> {
         AbilityScope::NetworkReachability {
             source,
             destination,
-        } => BTreeSet::from([Atom::Route(*source, *destination)]),
+        } => BTreeSet::from([Atom::Route(
+            source.as_host().unwrap(),
+            destination.as_host().unwrap(),
+        )]),
         AbilityScope::NetworkRouteAuthorization {
             source,
             destination,
-        } => BTreeSet::from([Atom::RouteInstalled(*source, *destination)]),
+        } => BTreeSet::from([Atom::RouteInstalled(
+            source.as_host().unwrap(),
+            destination.as_host().unwrap(),
+        )]),
         AbilityScope::SshSession {
             public_key_fingerprint,
             principals,
@@ -84,16 +90,32 @@ fn atoms(scope: &AbilityScope) -> BTreeSet<Atom> {
             destination,
             ports,
         } => ports
+            .intervals()
             .iter()
-            .map(|port| Atom::Tcp(*source, *destination, *port))
+            .flat_map(|interval| interval.start..interval.end)
+            .map(|port| {
+                Atom::Tcp(
+                    source.as_host().unwrap(),
+                    destination.as_host().unwrap(),
+                    u16::try_from(port).unwrap(),
+                )
+            })
             .collect(),
         AbilityScope::TcpAdmission {
             source,
             destination,
             ports,
         } => ports
+            .intervals()
             .iter()
-            .map(|port| Atom::AdmissionTcp(*source, *destination, *port))
+            .flat_map(|interval| interval.start..interval.end)
+            .map(|port| {
+                Atom::AdmissionTcp(
+                    source.as_host().unwrap(),
+                    destination.as_host().unwrap(),
+                    u16::try_from(port).unwrap(),
+                )
+            })
             .collect(),
     }
 }
@@ -105,7 +127,7 @@ fn request_valid(scope: &AbilityScope) -> bool {
             !principals.is_empty() && !principals.contains("")
         }
         AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => {
-            !ports.is_empty() && ports.len() <= 64 && !ports.contains(&0)
+            !ports.is_empty() && !ports.contains(&0)
         }
         _ => true,
     }
@@ -165,8 +187,8 @@ fn scope(
             address: source,
         },
         1 => AbilityScope::NetworkReachability {
-            source,
-            destination,
+            source: source.into(),
+            destination: destination.into(),
         },
         2 => AbilityScope::SshSession {
             public_key_fingerprint: key.into(),
@@ -179,9 +201,9 @@ fn scope(
             service_audience: "service".into(),
         },
         _ => AbilityScope::TcpConnection {
-            source,
-            destination,
-            ports: ports.clone(),
+            source: source.into(),
+            destination: destination.into(),
+            ports: authority_contracts_model::resources::PortSet::from_ports(ports).unwrap(),
         },
     }
 }
@@ -193,7 +215,7 @@ proptest! {
         (key, token) in ("[a-z]{0,8}", "[a-z]{0,8}"),
         (from, to) in (any::<u32>(), any::<u32>()),
         principals in prop::collection::btree_set("[a-z]{0,6}", 0..8),
-        ports in prop::collection::btree_set(any::<u16>(), 0..70),
+        ports in prop::collection::btree_set(1_u16..=u16::MAX, 0..70),
         (start, end) in (any::<i64>(), any::<i64>()),
     ) {
         let binding = AccessBinding { domain_id: Uuid::from_u128(1), subject_user_id: Uuid::from_u128(2),
@@ -213,14 +235,14 @@ proptest! {
             3 => {
                 match &mut requested.scope {
                     AbilityScope::SshSession { principals, .. } | AbilityScope::SshCredential { principals, .. } => { principals.pop_first(); },
-                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { ports.pop_first(); },
+                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { if let Some(first)=ports.intervals().first() {*ports=ports.difference(&authority_contracts_model::resources::PortSet::range(u16::try_from(first.start).unwrap(),u16::try_from(first.start).unwrap()).unwrap()).unwrap();} },
                     _ => {},
                 }
             },
             4 => {
                 match &mut requested.scope {
                     AbilityScope::SshSession { principals, .. } | AbilityScope::SshCredential { principals, .. } => { principals.insert("outside".into()); },
-                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { ports.insert(u16::MAX); },
+                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { *ports=ports.union(&"65535".parse().unwrap()).unwrap(); },
                     AbilityScope::ServiceIdentity { service_audience, .. } => *service_audience = "other".into(),
                     _ => {},
                 }
@@ -228,7 +250,7 @@ proptest! {
             5 => {
                 match &mut requested.scope {
                     AbilityScope::SshSession { principals, .. } | AbilityScope::SshCredential { principals, .. } => { principals.insert(String::new()); },
-                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { ports.insert(0); },
+                    AbilityScope::TcpConnection { ports, .. } | AbilityScope::TcpAdmission { ports, .. } => { *ports=authority_contracts_model::resources::PortSet::empty(); },
                     _ => {},
                 }
             },

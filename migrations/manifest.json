@@ -47,6 +47,12 @@
     },
     "0016_endpoint_observations.sql": {
       "sha256": "6b91b8636445a978af133f5633e9821c4c295b8893f9bdfd718b5920e3d22e8c"
+    },
+    "0017_identity_generations.sql": {
+      "sha256": "8cc9489170c0a437b4f3dc2c6c8d574b09f63bb185ced9e00396ee87e69c0a8a"
+    },
+    "0018_identity_revocation_commands.sql": {
+      "sha256": "51654b62540991087bec6e17e089d84ab82eea2174b88f84fa24fa5a922b4bc5"
     }
   }
 }

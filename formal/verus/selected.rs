@@ -7,7 +7,7 @@ pub open spec fn empty_selected() -> SelectedProjections {
 }
 
 pub open spec fn ssh_pair_agrees(common: CommonDecisionClaims, input: Option<(SshProjectionRequest, i64)>,
-    issue: Option<IssuanceAuthorizationV1>, install: Option<IssuanceAuthorizationV1>) -> bool {
+    issue: Option<IssuanceAuthorizationV2>, install: Option<IssuanceAuthorizationV2>) -> bool {
     match (input, issue, install) {
         (Some((request, ttl)), Some(a), Some(b)) =>
             ssh_agrees(common, request, common.decision_id, credential_audience(), ttl, a)
@@ -37,7 +37,7 @@ pub open spec fn network_option_agrees(common: CommonDecisionClaims, input: Opti
     }
 }
 pub open spec fn tcp_option_agrees(common: CommonDecisionClaims, input: Option<(TcpProjectionRequest, i64)>,
-    output: Option<TcpAccessGrantV1>) -> bool {
+    output: Option<TcpAccessGrantV2>) -> bool {
     match (input, output) {
         (Some((request, ttl)), Some(c)) => tcp_agrees(common, request, ttl, c) && tcp_valid(c),
         (_, None) => true,

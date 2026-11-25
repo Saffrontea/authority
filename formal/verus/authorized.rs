@@ -78,17 +78,17 @@ pub open spec fn network_scope(c: NetworkAccessGrantV1, s: AbilityScope) -> bool
     match s { AbilityScope::MeshMembership { wireguard_public_key, address } =>
         c.wireguard_public_key == wireguard_public_key && c.mesh_address == ip_text(address), _ => false }
 }
-pub open spec fn tcp_scope(c: TcpAccessGrantV1, s: AbilityScope) -> bool {
+pub open spec fn tcp_scope(c: TcpAccessGrantV2, s: AbilityScope) -> bool {
     match s { AbilityScope::TcpAdmission { source, destination, ports } =>
-        c.source_address == ip_text(source) && c.destination_address == ip_text(destination)
-            && c.destination_ports.to_set() == ports && c.destination_ports.no_duplicates(), _ => false }
+        c.resources.source_addresses == source && c.resources.destination_addresses == destination
+            && c.resources.destination_ports == ports, _ => false }
 }
-pub open spec fn ssh_scope(c: IssuanceAuthorizationV1, s: AbilityScope) -> bool {
+pub open spec fn ssh_scope(c: IssuanceAuthorizationV2, s: AbilityScope) -> bool {
     match s { AbilityScope::SshCredential { public_key_fingerprint, principals, .. } =>
         c.ssh_public_key_fingerprint == public_key_fingerprint && c.principals.to_set() == principals
             && c.principals.no_duplicates(), _ => false }
 }
-pub open spec fn ssh_install_scope(c: IssuanceAuthorizationV1, s: AbilityScope) -> bool {
+pub open spec fn ssh_install_scope(c: IssuanceAuthorizationV2, s: AbilityScope) -> bool {
     ssh_scope(c, s) && match s { AbilityScope::SshCredential { terminal_token_hash, .. } => c.nonce == terminal_token_hash, _ => false }
 }
 pub open spec fn mtls_scope(c: MtlsIssuanceAuthorizationV1, s: AbilityScope) -> bool {

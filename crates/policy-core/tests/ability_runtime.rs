@@ -80,7 +80,12 @@ fn run(
         },
         &RequestedAccess {
             tcp: Some(RequestedTcp {
-                ports: ports.iter().copied().collect(),
+                source_addresses: None,
+                destination_addresses: None,
+                ports: authority_contracts_model::resources::PortSet::from_ports(
+                    &ports.iter().copied().collect(),
+                )
+                .unwrap(),
                 ttl_seconds: 10,
             }),
             ..RequestedAccess::default()
@@ -152,7 +157,12 @@ fn cidr_range_policies_narrow_to_the_request_and_preserve_deny_holes() {
     else {
         panic!("admission scope");
     };
-    assert_eq!(ports, &BTreeSet::from([8080, 65535]));
+    assert_eq!(
+        ports,
+        &"8080,65535"
+            .parse::<authority_contracts_model::resources::PortSet>()
+            .unwrap()
+    );
     let mut deny = policy(12, Ability::TcpConnection, &[8081], 105, 106);
     deny.effect = Effect::Deny;
     deny.selector = AbilitySelector::TcpConnectionRange {
@@ -259,4 +269,15 @@ fn ownership_revocation_and_expiry_cannot_be_reused_as_permissions() {
         }
         assert!(run(vec![direct, derived], &[8080]).is_err());
     }
+}
+
+#[test]
+fn permission_partition_budget_is_a_whole_selection_failure() {
+    let rules = (1..=4097)
+        .map(|id| policy(id, Ability::TcpAdmission, &[8080], 0, 200))
+        .collect();
+    assert_eq!(
+        run(rules, &[8080]).unwrap_err().code(),
+        "planning_search_limit"
+    );
 }

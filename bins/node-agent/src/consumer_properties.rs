@@ -143,7 +143,18 @@ fn certificate(case: &Case, variant: Variant) -> String {
         .key_id(if matches!(variant, Variant::WrongIdentity) {
             "other-user:other-device".into()
         } else {
-            format!("user_{:x}:device_01", case.id)
+            authority_issuer_core::fence::ssh_key_id(
+                &sign_authorization(
+                    projections(case).ssh_issuance,
+                    authority_contracts_model::fence::IdentityGenerations {
+                        subject: 1,
+                        device: 1,
+                    },
+                    &KEYS.control,
+                )
+                .unwrap(),
+            )
+            .unwrap()
         })
         .unwrap();
     for principal in &case.principals {
@@ -161,7 +172,7 @@ fn certificate(case: &Case, variant: Variant) -> String {
 }
 
 fn request(
-    authorization: Option<&SignedIssuanceAuthorizationV1>,
+    authorization: Option<&SignedIssuanceAuthorizationV2>,
     certificate: &str,
 ) -> InstallCertificateRequest {
     serde_json::from_value(json!({"authorization": authorization, "certificate": certificate}))
@@ -182,18 +193,18 @@ proptest! {
         state.install_terminal_lease(TerminalLease { token_hash: previous_hash.clone(), expires_at: case.now + 600 }).unwrap();
         let projected = projections(&case);
         let claims = projected.ssh_node_install;
-        let signed = sign_authorization(claims.clone(), &KEYS.control).unwrap();
+        let signed = sign_authorization(claims.clone(), authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
         let valid_certificate = certificate(&case, Variant::Valid);
         let mut rejected = Vec::new();
         rejected.push((request(None, &valid_certificate), case.now, "missing_node_authorization"));
-        let issuer = sign_authorization(projected.ssh_issuance, &KEYS.control).unwrap();
+        let issuer = sign_authorization(projected.ssh_issuance, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap();
         rejected.push((request(Some(&issuer), &valid_certificate), case.now, "node_authorization_not_active"));
         for time in [case.now - 1, case.now + ttl] {
             rejected.push((request(Some(&signed), &valid_certificate), time, "node_authorization_not_active"));
         }
         let mut bad_claim = claims.clone();
         bad_claim.ssh_public_key_fingerprint = KEYS.subject[1-key].public_key().fingerprint(HashAlg::Sha256).to_string();
-        rejected.push((request(Some(&sign_authorization(bad_claim, &KEYS.control).unwrap()), &valid_certificate), case.now, "node_authorization_key_mismatch"));
+        rejected.push((request(Some(&sign_authorization(bad_claim, authority_contracts_model::fence::IdentityGenerations { subject: 1, device: 1 }, &KEYS.control).unwrap()), &valid_certificate), case.now, "node_authorization_key_mismatch"));
         let mut bad_signature = signed.clone();
         bad_signature.signature.replace_range(..1, if signed.signature.starts_with('A') { "B" } else { "A" });
         rejected.push((request(Some(&bad_signature), &valid_certificate), case.now, "invalid_node_authorization"));
@@ -246,11 +257,31 @@ fn concurrent_installs_and_admitted_terminals_keep_their_exact_certificate() {
     let a_claims = projections(&first).ssh_node_install;
     let b_claims = projections(&second).ssh_node_install;
     let a = request(
-        Some(&sign_authorization(a_claims.clone(), &KEYS.control).unwrap()),
+        Some(
+            &sign_authorization(
+                a_claims.clone(),
+                authority_contracts_model::fence::IdentityGenerations {
+                    subject: 1,
+                    device: 1,
+                },
+                &KEYS.control,
+            )
+            .unwrap(),
+        ),
         &a_cert,
     );
     let b = request(
-        Some(&sign_authorization(b_claims.clone(), &KEYS.control).unwrap()),
+        Some(
+            &sign_authorization(
+                b_claims.clone(),
+                authority_contracts_model::fence::IdentityGenerations {
+                    subject: 1,
+                    device: 1,
+                },
+                &KEYS.control,
+            )
+            .unwrap(),
+        ),
         &b_cert,
     );
     install_ssh_certificate_with_clock(&state, &a, || Ok(first.now)).unwrap();

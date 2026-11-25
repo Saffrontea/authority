@@ -1,3 +1,4 @@
+from tcp_resources import ports as port_intervals
 """Logical timed state reconstruction; TLC independently checks each recorded edge."""
 import time
 
@@ -23,7 +24,7 @@ class TimedTrace:
             raise ValueError('a timed binding cannot change its immutable expiry')
         tcp = value['tcp_grant']['grant']
         self.trace['tcp_expiries'][name] = tcp['expires_at'] - self.epoch
-        assert tcp['destination_ports'] == requested_ports, 'issued TCP scope differs from request'
+        assert tcp['resources']['destination_ports'] == port_intervals(requested_ports), 'issued TCP scope differs from request'
         self.trace['tcp_ports'][name] = list(requested_ports)
         if 'network_grant' in value:
             self.trace['wg_expiries'][name] = value['network_grant']['grant']['expires_at'] - self.epoch

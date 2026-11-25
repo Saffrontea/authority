@@ -114,9 +114,11 @@ fn project_scope(scope: &AbilityScope) -> ScopeProjection {
             destination,
             ports,
         } => ScopeProjection::Tcp(TcpProjectionRequest {
-            source_address: source.to_string(),
-            destination_address: destination.to_string(),
-            destination_ports: ports.iter().copied().collect(),
+            resources: authority_contracts_model::resources::TcpResourcesV1 {
+                source_addresses: source.clone(),
+                destination_addresses: destination.clone(),
+                destination_ports: ports.clone(),
+            },
         }),
     }
 }

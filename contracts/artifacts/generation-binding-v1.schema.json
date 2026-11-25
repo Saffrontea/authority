@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/generation-binding-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "domain_id",
+    "subject_user_id",
+    "device_id",
+    "subject_generation",
+    "device_generation"
+  ],
+  "properties": {
+    "domain_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "subject_user_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    },
+    "subject_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "device_generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    }
+  }
+}

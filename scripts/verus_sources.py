@@ -82,7 +82,10 @@ def inject(template, replacements):
 
 
 def value_types(source):
-    for concrete, logical in [("BTreeSet", "Set"), ("String", "Seq<char>"),
+    source = source.replace("authority_contracts_model::resources::", "").replace("crate::resources::", "")
+    # Trusted semantic views of canonical interval sets; interval algorithms are
+    # verified independently by executable property tests, not this adapter.
+    for concrete, logical in [("PortSet", "Set<u16>"), ("Ipv4Set", "Set<u32>"), ("BTreeSet", "Set"), ("String", "Seq<char>"),
                               ("Uuid", "u128"), ("Ipv4Addr", "u32")]:
         source = re.sub(rf"\b{concrete}\b", logical, source)
     return source
@@ -101,6 +104,7 @@ def scopes_source():
                       "pub enum AbilityScope {", "pub struct ScopedAbility {"]:
         declaration, _ = block(source, signature)
         declarations.append(value_types(declaration))
+    declarations.append(checked_declaration((ROOT / "crates/contracts-model/src/resources.rs").read_text(), "TcpResourcesV1", {"source_addresses": "Ipv4Set", "destination_addresses": "Ipv4Set", "destination_ports": "PortSet"}))
     declarations.append(block(enums, "pub enum Ability {")[0])
     maximum = re.findall(r"pub const MAX_TCP_PORTS: usize = (\d+);", protocol)
     if len(maximum) != 1:
@@ -112,7 +116,7 @@ def scopes_source():
     # rather than shared references. Each operation is the standard value view.
     contains = contains.replace("selected.iter().all(|principal| !principal.is_empty())",
         "(forall|principal: Seq<char>| selected.contains(principal) ==> principal.len() > 0)")
-    contains = contains.replace("!selected.is_empty()", "selected.len() > 0")
+    contains = re.sub(r"!(selected|from|to)\.is_empty\(\)", r"\1.len() > 0", contains)
     contains = contains.replace(".is_subset(", ".subset_of(").replace(".contains(&0)", ".contains(0)")
     contains = contains.replace("authority_contracts_model::protocol::MAX_TCP_PORTS", "MAX_TCP_PORTS")
     _, kind = block(ability_impl, "pub const fn kind(&self) -> Ability {")
@@ -162,7 +166,7 @@ REQUEST_FIELDS = {
     "NetworkProjectionRequest": {"wireguard_public_key": "String", "mesh_address": "String"},
     "SshProjectionRequest": {"public_key_fingerprint": "String", "principals": "Vec<String>", "terminal_token_hash": "String"},
     "MtlsProjectionRequest": {"client_spki_sha256": "String", "identity_uri": "String", "service_audience": "String"},
-    "TcpProjectionRequest": {"source_address": "String", "destination_address": "String", "destination_ports": "Vec<u16>"},
+    "TcpProjectionRequest": {"resources": "authority_contracts_model::resources::TcpResourcesV1"},
 }
 
 
@@ -190,7 +194,7 @@ def projection_source():
     matches = matches.replace("authority_contracts_model::protocol::domain_issuer", "domain_issuer")
     return scopes_source() + inject((ROOT / "formal/verus/projection.rs").read_text(), {
         "PRODUCTION_PROJECTION_TYPES": "\n\n".join(declarations),
-        "PRODUCTION_PROJECT_SCOPE": body, "PRODUCTION_COMMON_MATCHES": "!(" + matches + ")",
+        "PRODUCTION_PROJECT_SCOPE": value_types(body), "PRODUCTION_COMMON_MATCHES": "!(" + matches + ")",
     })
 
 
@@ -228,6 +232,7 @@ def protocol_string(name):
 def contract_values(body):
     constants = {
         "authority_contracts_model::protocol::CONTRACT_VERSION_V1": "version_v1()",
+        "authority_contracts_model::protocol::CONTRACT_VERSION_V2": "version_v2()",
         "CREDENTIAL_ISSUER_AUDIENCE": "credential_audience()",
         "NODE_AGENT_AUDIENCE": "node_audience()",
         "NETWORK_AGENT_AUDIENCE": "network_audience()",
@@ -236,7 +241,7 @@ def contract_values(body):
         body = body.replace(native, logical)
     nonce = '''format!("{}_mtls_{}", common.decision_id, audience.replace('-', "_"))'''
     body = body.replace(nonce, "mtls_nonce(common.decision_id, audience)")
-    body = body.replace("authority_contracts_model::TcpAccessGrantV1", "TcpAccessGrantV1")
+    body = body.replace("authority_contracts_model::TcpAccessGrantV2", "TcpAccessGrantV2")
     body = body.replace(".clone()", "").replace(".to_owned()", "")
     body = body.replace("&common.decision_id", "common.decision_id")
     body = body.replace("&request.terminal_token_hash", "request.terminal_token_hash")
@@ -254,26 +259,26 @@ def contract_values(body):
 def constructors_source():
     library = (ROOT / "crates/projection-core/src/lib.rs").read_text()
     contract_files = [ROOT / "crates/contracts-model/src/lib.rs", ROOT / "crates/contracts-model/src/tcp.rs"]
-    names = ["IssuanceAuthorizationV1", "MtlsIssuanceAuthorizationV1", "NetworkAccessGrantV1", "TcpAccessGrantV1"]
+    names = ["IssuanceAuthorizationV2", "MtlsIssuanceAuthorizationV1", "NetworkAccessGrantV1", "TcpAccessGrantV2"]
     declarations = []
     for name in names:
         source = next(path.read_text() for path in contract_files if f"pub struct {name} {{" in path.read_text())
         common_fields = ["version", "issuer", "domain_id", "subject_user_id", "device_id", "target_node_id", "policy_id", "issued_at", "not_before", "expires_at", "audience"]
         extras = {
-            "IssuanceAuthorizationV1": ["ssh_public_key_fingerprint", "principals", "nonce"],
+            "IssuanceAuthorizationV2": ["ssh_public_key_fingerprint", "principals", "decision_id", "nonce"],
             "MtlsIssuanceAuthorizationV1": ["client_spki_sha256", "identity_uri", "service_audience", "decision_id", "nonce"],
             "NetworkAccessGrantV1": ["wireguard_public_key", "mesh_address", "nonce"],
-            "TcpAccessGrantV1": ["source_address", "destination_address", "destination_ports", "decision_id"],
+            "TcpAccessGrantV2": ["resources", "decision_id"],
         }
         fields = {field: ("i64" if field in ["issued_at", "not_before", "expires_at"] else
-            "Vec<String>" if field == "principals" else "Vec<u16>" if field == "destination_ports" else "String")
+            "Vec<String>" if field == "principals" else "crate::resources::TcpResourcesV1" if field == "resources" else "String")
             for field in common_fields + extras[name]}
         declarations.append(checked_declaration(source, name, fields))
     replacements = {"PRODUCTION_CONTRACT_TYPES": "\n\n".join(declarations)}
     for name in ["ssh_contract", "mtls_contract", "project_network", "project_tcp"]:
         _, body = block(library, f"fn {name}(")
         replacements[f"PRODUCTION_{name.upper()}"] = contract_values(body)
-    for name in ["CONTRACT_VERSION_V1", "CREDENTIAL_ISSUER_AUDIENCE", "NODE_AGENT_AUDIENCE", "NETWORK_AGENT_AUDIENCE"]:
+    for name in ["CONTRACT_VERSION_V1", "CONTRACT_VERSION_V2", "CREDENTIAL_ISSUER_AUDIENCE", "NODE_AGENT_AUDIENCE", "NETWORK_AGENT_AUDIENCE"]:
         replacements[name] = protocol_string(name)
     template = (ROOT / "formal/verus/constructors.rs").read_text()
     # The previous units are checked again here so no theorem is imported via an
@@ -299,9 +304,9 @@ def selected_source():
     declarations.append(declaration)
     if not re.search(r"#\[derive\([^]]*\bDefault\b[^]]*\)\]\s*pub struct SelectedProjections", source) or "impl Default for SelectedProjections" in source:
         raise SystemExit("SelectedProjections must use field-derived Default; update proof if changed")
-    selected_fields = {"ssh_issuance": "Option<IssuanceAuthorizationV1>", "ssh_node_install": "Option<IssuanceAuthorizationV1>",
+    selected_fields = {"ssh_issuance": "Option<IssuanceAuthorizationV2>", "ssh_node_install": "Option<IssuanceAuthorizationV2>",
         "network_grant": "Option<NetworkAccessGrantV1>", "mtls_issuance": "Option<MtlsIssuanceAuthorizationV1>",
-        "mtls_node_install": "Option<MtlsIssuanceAuthorizationV1>", "tcp_grant": "Option<TcpAccessGrantV1>"}
+        "mtls_node_install": "Option<MtlsIssuanceAuthorizationV1>", "tcp_grant": "Option<TcpAccessGrantV2>"}
     declarations.append(checked_declaration(source, "SelectedProjections", selected_fields))
     _, body = block(source, "pub fn project_plan(")
     prefix = re.match(r"\s*let mut result = SelectedProjections::default\(\);\s*for mechanism in &plan.mechanisms\s*\{", body)
