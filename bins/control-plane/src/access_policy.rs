@@ -53,41 +53,7 @@ pub async fn authorize(
     limits: LifetimeLimits,
     selection: &SelectionOptions,
 ) -> Result<AuthorizationOutcome, sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock_shared(policy.ability_policy_lock_key($1, $2, $3))")
-        .bind(request.domain_id)
-        .bind(request.subject_user_id)
-        .bind(request.target_node_id)
-        .execute(&mut **transaction)
-        .await?;
-    let rows = sqlx::query(
-        "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
-                policy.required_device_id, policy.target_node_id, policy.enabled, \
-                policy.effect, policy.priority, policy.revision, policy.selector, \
-                EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
-                CEIL(EXTRACT(EPOCH FROM policy.valid_from))::bigint AS valid_from, \
-                FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
-                host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
-                client.owner_user_id AS device_owner_user_id, \
-                client.status = 'active' AS device_active, \
-                target.status = 'active' AND target_device.status = 'active' \
-                    AND target_device.domain_id = policy.domain_id AS target_active, \
-                target.endpoint_facts, client.wireguard_public_key, \
-                host(client.mesh_address) AS device_mesh_address \
-         FROM policy.ability_policies AS policy \
-         JOIN device.devices AS client ON client.id = $3 \
-         JOIN device.nodes AS target ON target.id = $4 \
-         JOIN device.devices AS target_device ON target_device.id = target.device_id \
-         WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
-           AND policy.target_node_id = $4 \
-         ORDER BY policy.id, policy.revision \
-         FOR SHARE OF client, target, target_device",
-    )
-    .bind(request.domain_id)
-    .bind(request.subject_user_id)
-    .bind(request.device_id)
-    .bind(request.target_node_id)
-    .fetch_all(&mut **transaction)
-    .await?;
+    let rows = snapshot_rows(transaction, &request).await?;
 
     let Some(first) = rows.first() else {
         return Ok(AuthorizationOutcome::Denied(Box::new(
@@ -100,15 +66,35 @@ pub async fn authorize(
         device_active: first.try_get("device_active")?,
         target_active: first.try_get("target_active")?,
     };
-    let environment = first
-        .try_get::<Vec<String>, _>("endpoint_facts")?
-        .into_iter()
-        .map(|fact| {
-            serde_json::from_value(serde_json::Value::String(fact))
-                .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))
-        })
-        .collect::<Result<_, _>>()?;
+    if identity.device_domain_id != request.domain_id
+        || identity.device_owner_user_id != Some(request.subject_user_id)
+    {
+        return Ok(AuthorizationOutcome::Denied(Box::new(
+            SelectionFailure::policy(&request, selection, DenialReason::DeviceMismatch),
+        )));
+    }
+    let checked = crate::endpoint_observation::snapshot(first, &request);
+    let envelope = match checked {
+        Ok(envelope) => envelope,
+        Err(cause) => {
+            tracing::warn!(%cause,"endpoint observation refused");
+            return Ok(AuthorizationOutcome::Denied(Box::new(
+                SelectionFailure::policy(
+                    &request,
+                    selection,
+                    DenialReason::EndpointObservationUnavailable,
+                ),
+            )));
+        }
+    };
+    let environment = envelope.observation.facts.clone();
+    let remaining = envelope.observation.expires_at - request.evaluated_at;
+    let limits = LifetimeLimits {
+        ssh_seconds: limits.ssh_seconds.min(remaining),
+        network_seconds: limits.network_seconds.min(remaining),
+    };
     let resources = NetworkResources {
+        observation: Some(Box::new(envelope)),
         environment,
         registered_wireguard_key: String::from_utf8(first.try_get("wireguard_public_key")?)
             .map_err(|cause| sqlx::Error::Decode(Box::new(cause)))?,
@@ -145,6 +131,95 @@ pub async fn authorize(
         }))),
         Err(reason) => Ok(AuthorizationOutcome::Denied(Box::new(reason))),
     }
+}
+
+/// Only API entry point: a failed refresh never falls back to an older report.
+pub async fn authorize_with_refresh(
+    transaction: &mut Transaction<'_, Postgres>,
+    refresh: &Result<i64, String>,
+    request: AccessRequest,
+    requested: &RequestedAccess,
+    limits: LifetimeLimits,
+    selection: &SelectionOptions,
+) -> Result<AuthorizationOutcome, sqlx::Error> {
+    if let Err(cause) = refresh {
+        tracing::warn!(%cause,node=%request.target_node_id,"fresh endpoint observation unavailable");
+    }
+    let outcome = authorize(transaction, request.clone(), requested, limits, selection).await?;
+    if let AuthorizationOutcome::Allowed(ref allowed) = outcome {
+        let revision = allowed
+            .plan
+            .evidence()
+            .resources
+            .as_ref()
+            .and_then(|r| r.observation.as_ref())
+            .map(|o| o.observation.challenge.revision);
+        if refresh
+            .as_ref()
+            .ok()
+            .zip(revision)
+            .is_none_or(|(required, actual)| actual < *required)
+        {
+            return Ok(AuthorizationOutcome::Denied(Box::new(
+                SelectionFailure::policy(
+                    &request,
+                    selection,
+                    DenialReason::EndpointObservationUnavailable,
+                ),
+            )));
+        }
+    }
+    Ok(outcome)
+}
+
+async fn snapshot_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &AccessRequest,
+) -> Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared(policy.ability_policy_lock_key($1, $2, $3))")
+        .bind(request.domain_id)
+        .bind(request.subject_user_id)
+        .bind(request.target_node_id)
+        .execute(&mut **transaction)
+        .await?;
+    // Lock BEFORE reading the joined observation: a SELECT that waits for a
+    // row lock otherwise retains the statement's older READ COMMITTED snapshot.
+    sqlx::query("SELECT n.id FROM device.nodes n JOIN device.devices d ON d.id=n.device_id WHERE n.id=$1 AND d.domain_id=$2 FOR SHARE OF n,d")
+        .bind(request.target_node_id).bind(request.domain_id)
+        .execute(&mut **transaction)
+        .await?;
+    let rows = sqlx::query(
+        "SELECT policy.id, policy.domain_id, policy.subject_user_id, \
+                policy.required_device_id, policy.target_node_id, policy.enabled, \
+                policy.effect, policy.priority, policy.revision, policy.selector, \
+                EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
+                CEIL(EXTRACT(EPOCH FROM policy.valid_from))::bigint AS valid_from, \
+                FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
+                host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
+                client.owner_user_id AS device_owner_user_id, \
+                client.status = 'active' AS device_active, \
+                target.status = 'active' AND target_device.status = 'active' \
+                    AND target_device.domain_id = policy.domain_id AS target_active, \
+                target_device.device_public_key AS target_public_key, obs.envelope AS observation, obs.pending_challenge, obs.consumed, obs.revision AS observation_revision, client.wireguard_public_key, \
+                host(client.mesh_address) AS device_mesh_address \
+         FROM policy.ability_policies AS policy \
+         JOIN device.devices AS client ON client.id = $3 \
+         JOIN device.nodes AS target ON target.id = $4 \
+         JOIN device.devices AS target_device ON target_device.id = target.device_id \
+         LEFT JOIN device.endpoint_observations obs ON obs.node_id = target.id AND obs.domain_id = policy.domain_id \
+         WHERE policy.domain_id = $1 AND policy.subject_user_id = $2 \
+           AND policy.target_node_id = $4 \
+         ORDER BY policy.id, policy.revision \
+         FOR SHARE OF client, target, target_device",
+    )
+    .bind(request.domain_id)
+    .bind(request.subject_user_id)
+    .bind(request.device_id)
+    .bind(request.target_node_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    Ok(rows)
 }
 
 fn stored_rule(row: &sqlx::postgres::PgRow) -> Result<StoredAbilityPolicy, PolicyReadError> {
@@ -588,7 +663,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[ignore = "requires LXC PostgreSQL and a bootstrapped poc:e2e policy"]
-    async fn endpoint_manifests_are_explicit_and_unknown_facts_fail_closed() {
+    async fn unsigned_manifests_cannot_override_signed_endpoint_evidence() {
         let pool = lxc_pool(2).await;
         let (request, _) = live_tcp_request(&pool).await;
         let inputs = RequestedAccess {
@@ -598,29 +673,32 @@ pub(crate) mod tests {
             }),
             ..RequestedAccess::default()
         };
-        for (facts, expected) in [
-            (vec![], "deny"),
-            (vec!["tcp_enforcement"], "deny"),
-            (
-                vec!["tcp_enforcement", "existing_route_configured"],
-                "allow",
-            ),
-            (
-                vec![
-                    "tcp_enforcement",
-                    "existing_route_configured",
-                    "future.fact",
-                ],
-                "invalid",
-            ),
-        ] {
+        for mutation in 0..6 {
             let mut tx = begin_authorization(&pool).await.unwrap();
-            sqlx::query("UPDATE device.nodes SET endpoint_facts=$2 WHERE id=$1")
-                .bind(request.target_node_id)
-                .bind(facts)
-                .execute(&mut *tx)
-                .await
-                .unwrap();
+            sqlx::query("UPDATE device.nodes SET endpoint_facts=ARRAY['future.fact','tcp_enforcement','existing_route_configured'] WHERE id=$1").bind(request.target_node_id).execute(&mut *tx).await.unwrap();
+            let query = match mutation {
+                0 => None,
+                1 => Some("UPDATE device.endpoint_observations SET envelope=NULL WHERE node_id=$1"),
+                2 => {
+                    Some("UPDATE device.endpoint_observations SET consumed=false WHERE node_id=$1")
+                }
+                3 => Some(
+                    "UPDATE device.endpoint_observations SET envelope=jsonb_set(envelope,'{observation,facts}','[\"future.fact\"]') WHERE node_id=$1",
+                ),
+                4 => Some(
+                    "UPDATE device.endpoint_observations SET envelope=jsonb_set(envelope,'{observation,expires_at}','1') WHERE node_id=$1",
+                ),
+                _ => Some(
+                    "UPDATE device.endpoint_observations SET envelope=jsonb_set(envelope,'{observation,challenge,resources,source}','\"10.77.0.99\"') WHERE node_id=$1",
+                ),
+            };
+            if let Some(query) = query {
+                sqlx::query(query)
+                    .bind(request.target_node_id)
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
             let result = authorize(
                 &mut tx,
                 request.clone(),
@@ -631,11 +709,18 @@ pub(crate) mod tests {
                 },
                 &SelectionOptions::exact(Route::Direct),
             )
-            .await;
-            match expected {
-                "allow" => assert!(matches!(result, Ok(AuthorizationOutcome::Allowed(_)))),
-                "deny" => assert!(matches!(result, Ok(AuthorizationOutcome::Denied(_)))),
-                _ => assert!(matches!(result, Err(sqlx::Error::Decode(_)))),
+            .await
+            .unwrap();
+            if mutation == 0 {
+                assert!(
+                    matches!(result, AuthorizationOutcome::Allowed(_)),
+                    "unsigned manifest must be ignored"
+                );
+            } else {
+                assert!(
+                    matches!(result, AuthorizationOutcome::Denied(_)),
+                    "mutation {mutation} must deny"
+                );
             }
             tx.rollback().await.unwrap();
         }

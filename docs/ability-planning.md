@@ -85,13 +85,15 @@ ability set, grant permissions, or satisfy authority prerequisites themselves.
 The conditional catalog currently uses `ssh_ca_trusted`, `mtls_ca_trusted`,
 `tcp_enforcement`, `mesh_route_configured`, and `existing_route_configured`.
 
-Production reads these operator-declared facts from `device.nodes.endpoint_facts`
-in the same locked READ COMMITTED snapshot as policy and target metadata. They
-are not request fields. The default is an empty manifest, so an upgraded node
-requires explicit configuration before usable authority can be derived. The PoC's
-privileged bootstrap declares its installed fixture configuration. These are
-configuration assertions, not live probes or automatic discovery of CA trust;
-operators must keep them consistent with deployment changes.
+Production now requires [signed endpoint observations](endpoint-observations.md)
+from the registered target. Device-authenticated requests cause a fresh CP
+challenge and target probe. Reports are verified again in the locked READ
+COMMITTED policy snapshot; unsigned `endpoint_facts` are ignored. The evidence
+binds concrete resources, CA identities, revision, nonce, boot instance, validity
+and probe/configuration digests. Failed refreshes never reuse old evidence.
+The lease bounds ability validity; target monitoring withdraws managed network
+state on support loss. These are trusted software observations, not hardware
+attestation or a guarantee that a remote kernel cannot change after a sample.
 
 Every derived output retains the direct input's subject/device/domain/target,
 key, audience, principal/port set and validity. All authorization prerequisites
@@ -423,9 +425,10 @@ warnings denied.
 
 ## Outstanding trust-model changes
 
-Signed live environment observations, subject/device issuance fences, symbolic
-resource ranges, and scoped administration/genesis are not yet implemented.
+Signed live environment observations are implemented for the managed LXC
+profile. Subject/device issuance fences, symbolic resource ranges, and scoped
+administration/genesis are not yet implemented.
 [Authority model next iteration](authority-model-next.md) specifies their trust
 assumptions, wire/transaction changes and acceptance checks. In particular,
-operator-declared `endpoint_facts` and the demo bootstrap token are explicit
-remaining limits; they are not attestation or modeled administrative authority.
+the trusted target probe and demo bootstrap token are explicit trust assumptions;
+software signatures are not hardware attestation or modeled administrative authority.

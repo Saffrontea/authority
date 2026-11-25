@@ -46,11 +46,19 @@
     },
     "artifacts/policy-plan-evaluated-v2.schema.json": {
       "version": 2,
-      "sha256": "a171c5a7aff79e8547e0632dd96ed31c19f563954a55459265f31692f8a7548d"
+      "sha256": "1b3d70a123cfc800e16c6d73496ba4f65f62fa9069b120101d8aeedd11d97db3"
     },
     "artifacts/policy-decision-evaluated-v2.schema.json": {
       "version": 2,
       "sha256": "c6b4490f1ccf0884248e6f02ba4a421b0b23f60b6a730cbd1eec4518ff4ce905"
+    },
+    "artifacts/endpoint-challenge-v1.schema.json": {
+      "version": 1,
+      "sha256": "09a116610d571586206eb58ab43c8ab0613ed03f3c9f544d53ff853d1a21d897"
+    },
+    "artifacts/endpoint-observation-v1.schema.json": {
+      "version": 1,
+      "sha256": "edf91ea39455b050b0d3543f3ec3c4452b51160054e790bd79184a766ce4459e"
     }
   }
 }

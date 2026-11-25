@@ -737,6 +737,9 @@
               "existing_route_configured"
             ]
           }
+        },
+        "observation": {
+          "$ref": "endpoint-observation-v1.schema.json"
         }
       }
     },

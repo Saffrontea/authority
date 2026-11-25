@@ -1,11 +1,11 @@
 # Authority model: selection, observation, revocation and genesis
 
 Status: partial implementation. Authority-order selection is implemented in this
-iteration. The remaining sections specify the next changes; endpoint observations,
-selector revocation, resource intervals and modeled enrollment are **not yet live**.
-The current deployment still trusts operator-written `endpoint_facts` and an
-out-of-model bootstrap token. Neither should be described as fully attested or
-fully self-describing authorization.
+iteration. Signed endpoint observations now drive the managed LXC access path;
+see [implemented protocol and its limits](endpoint-observations.md). Selector
+revocation, resource intervals and modeled enrollment remain **not yet live**.
+The bootstrap token is still an external trust root. The target probe is trusted
+software, not hardware-backed attestation or fully self-describing authority.
 
 ## Authority order and its limits
 
@@ -39,11 +39,11 @@ order. Existing Verus BFS proofs cover the mechanism-minimizing `solve` primitiv
 they do not prove the new Pareto search or its ordering. The proof boundary must
 be extended before claiming a formal least-authority guarantee.
 
-## Next implementation: signed, fresh environment observations
+## Signed, fresh environment observations
 
 Replace the free-form fact array with a versioned signed node observation. Bind:
 
-- domain and node ID, registered signing-key ID/generation;
+- domain and node ID, with verification against the currently registered key;
 - CP-issued unpredictable challenge and intended verifier/audience;
 - per-node monotone observation revision and boot instance;
 - observed_at, expires_at, and the configuration generation/digests;

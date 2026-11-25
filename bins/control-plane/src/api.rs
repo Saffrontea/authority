@@ -288,7 +288,7 @@ async fn create_demo_access(
     sqlx::query(
         "INSERT INTO device.nodes \
          (id, device_id, hostname, mesh_address, ssh_principals, status, endpoint_facts) \
-         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active', ARRAY['ssh_ca_trusted','mtls_ca_trusted','tcp_enforcement','mesh_route_configured','existing_route_configured']) \
+         VALUES ($1, $2, 'poc-target', $3::inet, ARRAY['deploy'], 'active', ARRAY[]::text[]) \
          ON CONFLICT (id) DO UPDATE SET device_id = EXCLUDED.device_id, \
              mesh_address = EXCLUDED.mesh_address, status = 'active', endpoint_facts = EXCLUDED.endpoint_facts",
     )
@@ -939,6 +939,14 @@ struct AccessAuthorizationResponse {
     mtls_node_authorization: SignedMtlsIssuanceAuthorizationV1,
 }
 
+async fn fresh_environment(
+    state: &AppState,
+    session: &AuthenticatedSession,
+    target: Uuid,
+) -> Result<i64, String> {
+    crate::endpoint_observation::refresh(state, session.user_id, session.device_id, target).await
+}
+
 async fn issue_access_authorization(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -961,12 +969,14 @@ async fn issue_access_authorization(
     if request.device_id != session.device_id {
         return Err(ApiError::forbidden("session_device_mismatch"));
     }
+    let observation_refresh = fresh_environment(&state, &session, request.target_node_id).await;
     let issued_at = unix_timestamp()?;
     let mut transaction = access_policy::begin_authorization(state.pool())
         .await
         .map_err(ApiError::database)?;
-    let decision = access_policy::authorize(
+    let decision = access_policy::authorize_with_refresh(
         &mut transaction,
+        &observation_refresh,
         access_policy::request(
             state.domain_id(),
             session.user_id,
@@ -2176,12 +2186,14 @@ async fn issue_tcp_authorization(
     {
         return Err(ApiError::bad_request("invalid_tcp_request"));
     }
+    let observation_refresh = fresh_environment(&state, &session, request.target_node_id).await;
     let now = unix_timestamp()?;
     let mut transaction = access_policy::begin_authorization(state.pool())
         .await
         .map_err(ApiError::database)?;
-    let outcome = access_policy::authorize(
+    let outcome = access_policy::authorize_with_refresh(
         &mut transaction,
+        &observation_refresh,
         access_policy::request(
             state.domain_id(),
             session.user_id,

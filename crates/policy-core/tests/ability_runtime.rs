@@ -86,6 +86,7 @@ fn run(
             ..RequestedAccess::default()
         },
         &NetworkResources {
+            observation: None,
             source_address: [10, 77, 0, 1].into(),
             target_address: [10, 77, 0, 2].into(),
             registered_wireguard_key: "registered".to_owned(),

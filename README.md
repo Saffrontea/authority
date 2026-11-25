@@ -169,17 +169,20 @@ and `policy.plan.evaluated` v2 within the authorization transaction. Policy read
 scoped evaluation and all decision writes share one READ COMMITTED transaction with
 a shared advisory policy guard and device/target row locks; responses are returned after commit.
 The graph separates direct credential/admission authority from derived usable
-abilities. Trusted endpoint and route facts come from `device.nodes.endpoint_facts`;
-new or upgraded nodes default to an empty manifest and fail closed until configured.
-The PoC bootstrap declares its installed fixture environment. Audit v2 records the
+abilities. Endpoint and route facts come from fresh target-signed observations;
+`device.nodes.endpoint_facts` is ignored. The target probes the managed sshd,
+loaded mTLS CA, nftables structure and concrete WireGuard routing. Publication
+consumes a CP challenge atomically under the target row lock; the authorization
+snapshot verifies it again. Failed refreshes deny and target monitoring withdraws
+managed kernel state on support loss. Audit v2 records the signed report and
 complete derivation trace. Only the current planning format is accepted; there is
 no legacy catalog or replay fallback.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
-Signed live endpoint observations, subject/device revocation fences, symbolic
-resource ranges and scoped administration remain unimplemented. The demo
-bootstrap token is an external trust root; operator-written facts are not live
-attestation. [The next authority-model iteration](docs/authority-model-next.md)
+Subject/device revocation fences, symbolic resource ranges and scoped
+administration remain unimplemented. The demo bootstrap token and trusted target
+probe remain trust assumptions. [Endpoint observations](docs/endpoint-observations.md)
+authenticate software reports; they are not hardware-backed attestation. [The next authority-model iteration](docs/authority-model-next.md)
 specifies these remaining contracts, trust assumptions and acceptance checks.
 
 ## Testing without Passkey hardware

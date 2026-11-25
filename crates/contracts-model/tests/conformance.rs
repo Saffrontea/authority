@@ -378,3 +378,57 @@ fn oversized_fingerprints_are_rejected_before_signing() {
         &format!("SHA256:{}", "A".repeat(43))
     ));
 }
+
+#[test]
+fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
+    use authority_contracts_model::observation::{
+        SignedEndpointChallengeV1, SignedEndpointObservationV1,
+    };
+    for name in ["endpoint-challenge-v1", "endpoint-observation-v1"] {
+        for kind in ["valid", "invalid"] {
+            for path in contract_vectors(name, kind) {
+                let bytes = fs::read(&path).unwrap();
+                let accepted = if name == "endpoint-challenge-v1" {
+                    serde_json::from_slice::<SignedEndpointChallengeV1>(&bytes)
+                        .is_ok_and(|c| c.validate().is_ok())
+                } else {
+                    serde_json::from_slice::<SignedEndpointObservationV1>(&bytes)
+                        .is_ok_and(|c| c.validate().is_ok())
+                };
+                assert_eq!(accepted, kind == "valid", "{}", path.display());
+            }
+        }
+    }
+    let challenge: SignedEndpointChallengeV1 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/endpoint-challenge-v1/valid/basic.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        encode_hex(&challenge.challenge.signing_preimage().unwrap()),
+        include_str!(
+            "../../../contracts/test-vectors/endpoint-challenge-v1/valid/basic.preimage.hex"
+        )
+        .trim()
+    );
+    let report: SignedEndpointObservationV1 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/endpoint-observation-v1/valid/basic.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        encode_hex(&report.observation.signing_preimage().unwrap()),
+        include_str!(
+            "../../../contracts/test-vectors/endpoint-observation-v1/valid/basic.preimage.hex"
+        )
+        .trim()
+    );
+    assert_ne!(
+        report.observation.signing_preimage().unwrap(),
+        report.observation.challenge.signing_preimage().unwrap()
+    );
+    for clock in [i64::MIN, i64::MAX] {
+        assert!(!report.observation.active(clock));
+    }
+    let mut json = serde_json::to_value(report).unwrap();
+    json["observation"]["facts"] = serde_json::json!(["tcp_enforcement", "tcp_enforcement"]);
+    assert!(serde_json::from_value::<SignedEndpointObservationV1>(json).is_err());
+}

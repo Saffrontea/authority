@@ -119,6 +119,7 @@ fn authorize(
     )]);
     let requested = requested(case);
     let resources = NetworkResources {
+        observation: None,
         environment: authority_policy_core::realization::endpoint_facts(),
         source_address: "10.77.0.1".parse().unwrap(),
         target_address: "10.77.0.2".parse().unwrap(),

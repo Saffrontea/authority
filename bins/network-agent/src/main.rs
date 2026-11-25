@@ -1,3 +1,4 @@
+mod observation;
 mod tcp;
 
 use std::{
@@ -40,6 +41,7 @@ use tracing_subscriber::EnvFilter;
 struct AppState(Arc<Inner>);
 
 struct Inner {
+    observer: Option<Arc<observation::Observer>>,
     verifier: OpenSslEd25519Verifier,
     node_id: String,
     interface: String,
@@ -326,7 +328,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let tcp = tcp::TcpAdmission::initialize(&interface, tcp_ports)?;
     clear_all_peers(&interface)?;
+    let observer = Arc::new(observation::Observer::new(
+        identity_signer,
+        identity_path.with_file_name("endpoint-observation-fence"),
+    )?);
     let state = AppState(Arc::new(Inner {
+        observer: Some(observer),
         verifier,
         node_id,
         interface,
@@ -338,9 +345,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revocations: Mutex::new(revocations),
         identity: NodeIdentity { public_key, proof },
     }));
+    observation::start_monitor(state.clone());
     let router = Router::new()
         .route("/health", get(|| async { StatusCode::NO_CONTENT }))
         .route("/v1/identity", get(identity))
+        .route("/v1/endpoint-observations", post(observation::observe))
         .route("/v1/network-grants", post(apply_grant))
         .route("/v1/tcp-grants", post(apply_tcp_grant))
         .route("/v1/revocations", post(apply_revocation))
@@ -440,6 +449,7 @@ async fn apply_grant(
     if policy.active_peers.len() >= MAX_ACTIVE_PEERS && !policy.active_peers.contains_key(&peer) {
         return Err(ApiError::unavailable("peer_capacity_reached"));
     }
+    observation::require_network(&state, &envelope.grant, now)?;
     let nonce = envelope.grant.nonce.clone();
     let expires_at = envelope.grant.expires_at;
     let decision_id = nonce.clone();
@@ -731,6 +741,7 @@ async fn apply_tcp_grant(
     let response = json!({ "decision_id": envelope.grant.decision_id, "expires_at": envelope.grant.expires_at,
         "destination_ports": envelope.grant.destination_ports });
     let decision_nonce = format!("tcp_{}", envelope.grant.decision_id);
+    observation::require_tcp(&state, &envelope.grant, &decision_nonce, now)?;
     let tcp = policy
         .tcp
         .as_mut()

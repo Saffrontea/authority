@@ -140,17 +140,9 @@ pub fn realize(
     )
 }
 
-/// Operator-declared endpoint configuration, never a client-provided permission.
-/// These describe support/trust, not current network or process liveness.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EndpointFact {
-    SshCaTrusted,
-    MtlsCaTrusted,
-    TcpEnforcement,
-    MeshRouteConfigured,
-    ExistingRouteConfigured,
-}
+/// Typed endpoint support evidence, never a client-provided permission.
+/// The live control plane requires fresh reports from the registered target key.
+pub use authority_contracts_model::observation::EndpointFact;
 
 #[must_use]
 pub fn endpoint_facts() -> BTreeSet<EndpointFact> {

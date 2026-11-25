@@ -2,6 +2,7 @@ mod access_policy;
 mod api;
 mod auth_limits;
 mod config;
+mod endpoint_observation;
 mod grant_ledger;
 mod planning_audit;
 mod revocation_delivery;

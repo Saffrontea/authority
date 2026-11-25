@@ -81,6 +81,15 @@ add rule inet authority_tcp outbound oifname "{interface}" tcp sport {{ {ports_t
         Ok(removed.is_some())
     }
 
+    pub fn clear(&mut self) -> Result<(), String> {
+        let previous = std::mem::take(&mut self.grants);
+        if let Err(cause) = self.sync() {
+            self.grants = previous;
+            return Err(cause);
+        }
+        Ok(())
+    }
+
     fn sync(&self) -> Result<(), String> {
         let now_ms = i64::try_from(
             SystemTime::now()

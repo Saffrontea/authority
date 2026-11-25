@@ -375,6 +375,7 @@ Environment=AUTHORITY_MTLS_CA_CERTIFICATE_FILE=/etc/authority-mtls-client-ca.pem
 Environment=AUTHORITY_DB_HOST=${database_host}
 Environment=AUTHORITY_DB_PASSWORD_FILE=/etc/authority-db-password
 Environment=AUTHORITY_PKI_PUBLIC_ORIGIN=${pki_origin}
+Environment=AUTHORITY_MTLS_OBSERVATION_SOCKET=/run/authority-observation/mtls-3004.sock
 Environment=AUTHORITY_MTLS_SERVICE_KEY_FILE=/var/lib/authority/mtls-server-key.pem
 Environment=AUTHORITY_MTLS_SERVICE_CERTIFICATE_FILE=/var/lib/authority/mtls-server-cert.pem
 Environment=AUTHORITY_DOMAIN_ID=019a6e6d-4b01-7c31-bb4c-f83220bec001
@@ -385,11 +386,11 @@ Environment=AUTHORITY_MTLS_SERVICE_TLS_BIND=0.0.0.0:8443
 Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/authority
+ReadWritePaths=/var/lib/authority /run/authority-observation
 [Install]
 WantedBy=multi-user.target
 UNIT
-sed -e 's/:3004/:3005/' -e 's/:8443/:8444/' /etc/systemd/system/authority-mtls-service.service > /etc/systemd/system/authority-mtls-service-2.service
+sed -e 's/:3004/:3005/' -e 's/:8443/:8444/' -e 's/mtls-3004.sock/mtls-3005.sock/' /etc/systemd/system/authority-mtls-service.service > /etc/systemd/system/authority-mtls-service-2.service
 sed -i -e 's/AUTHORITY_DB_HOST=${database_host}/AUTHORITY_DB_HOST=127.0.0.1/' /etc/systemd/system/authority-mtls-service.service
 printf '\n[Service]\nEnvironment=AUTHORITY_DB_PORT=15432\n' >> /etc/systemd/system/authority-mtls-service.service
 systemctl daemon-reload
@@ -456,6 +457,9 @@ systemctl enable authority-ssh-mesh-proxy.socket >/dev/null
 systemctl restart authority-ssh-mesh-proxy.socket
 CONTAINER_SCRIPT
   log "installing network-agent with container-held identity"
+  as_root install -d -m 0755 "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority"
+  attach "${TARGET_NAME}" install -m 0755 /usr/sbin/nft /usr/local/lib/authority/nft-observe
+  as_root install -m 0755 "${SCRIPT_DIR}/endpoint-probe.py" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/lib/authority/endpoint-probe.py"
   as_root install -m 0755 "${NETWORK_AGENT_BINARY}" "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new"
   as_root mv -f "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent.new" \
     "${LXC_PATH}/${TARGET_NAME}/rootfs/usr/local/bin/authority-network-agent"
@@ -486,6 +490,13 @@ TrustedUserCAKeys /etc/ssh/authority-user-ca.pub
 AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 EOF
 sshd -t
+install -d -m 0755 /etc/systemd/system/ssh.service.d
+cat > /etc/systemd/system/ssh.service.d/authority-observation.conf <<'EOF'
+[Service]
+ExecStartPre=/usr/bin/python3 /usr/local/lib/authority/endpoint-probe.py ssh-before
+ExecStartPost=/usr/bin/python3 /usr/local/lib/authority/endpoint-probe.py ssh-after
+EOF
+systemctl daemon-reload
 systemctl enable ssh.service >/dev/null
 systemctl restart ssh.service
 
@@ -683,6 +694,7 @@ main() {
     mtls-stop) attach "${TARGET_NAME}" systemctl stop authority-mtls-service.service authority-mtls-service-2.service ;;
     mtls-start) attach "${TARGET_NAME}" systemctl start authority-mtls-service.service authority-mtls-service-2.service ;;
     mtls-restart) attach "${TARGET_NAME}" systemctl restart authority-mtls-service.service authority-mtls-service-2.service ;;
+    observation-break) attach "${TARGET_NAME}" /usr/sbin/nft flush chain inet authority_tcp inbound ;;
     agent-status) network_agent_status ;;
     agent-restart)
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service

@@ -44,6 +44,9 @@
     },
     "0015_authentication_capacity.sql": {
       "sha256": "43add6d5b4368fd7999377cde44ed2296d0c760e4880ac5b2c68c81a47b833c1"
+    },
+    "0016_endpoint_observations.sql": {
+      "sha256": "6b91b8636445a978af133f5633e9821c4c295b8893f9bdfd718b5920e3d22e8c"
     }
   }
 }

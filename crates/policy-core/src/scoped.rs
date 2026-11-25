@@ -306,6 +306,9 @@ impl ScopedAbility {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkResources {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation:
+        Option<Box<authority_contracts_model::observation::SignedEndpointObservationV1>>,
     pub source_address: Ipv4Addr,
     pub target_address: Ipv4Addr,
     pub registered_wireguard_key: String,

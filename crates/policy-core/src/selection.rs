@@ -212,6 +212,9 @@ impl PlanningEvidence {
         {
             return false;
         }
+        if !self.observation_consistent() {
+            return false;
+        }
         if !self.availability_consistent() {
             return false;
         }
@@ -293,6 +296,23 @@ impl PlanningEvidence {
         }
     }
 
+    fn observation_consistent(&self) -> bool {
+        let Some(resources) = &self.resources else {
+            return true;
+        };
+        let Some(envelope) = &resources.observation else {
+            return true;
+        };
+        let o = &envelope.observation;
+        o.active(self.evaluated_at)
+            && o.challenge.domain_id == self.binding.domain_id.to_string()
+            && o.challenge.target_node_id == self.binding.target_node_id.to_string()
+            && o.challenge.resources.source == resources.source_address
+            && o.challenge.resources.target == resources.target_address
+            && o.challenge.resources.service_audience == resources.service_audience
+            && o.facts == resources.environment
+    }
+
     fn availability_consistent(&self) -> bool {
         if self.selected.is_some() && self.resources.is_none() {
             return false;
@@ -372,6 +392,12 @@ impl PlanEvidence {
         outcomes: &BTreeSet<Outcome>,
         resources: &NetworkResources,
     ) -> bool {
+        if let Some(envelope) = &resources.observation {
+            let observation = &envelope.observation;
+            if self.abilities.iter().any(|a|a.ability.validity.expires_at>observation.expires_at
+                || matches!(&a.ability.scope,crate::scoped::AbilityScope::SshCredential{principals,..}|crate::scoped::AbilityScope::SshSession{principals,..}
+                    if principals.iter().any(|p|p!=&observation.challenge.resources.principal))) {return false;}
+        }
         let mut kinds = BTreeSet::new();
         for record in &self.abilities {
             if record.ability.binding != binding

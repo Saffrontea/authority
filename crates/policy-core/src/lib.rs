@@ -203,6 +203,8 @@ impl AccessDecision {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum DenialReason {
+    #[error("fresh signed endpoint observation unavailable")]
+    EndpointObservationUnavailable,
     #[error("stored policy contains invalid capability vocabulary")]
     InvalidPolicy,
     #[error("no authorized realization satisfies the requested intent")]
@@ -232,6 +234,7 @@ impl DenialReason {
     #[must_use]
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::EndpointObservationUnavailable => "endpoint_observation_unavailable",
             Self::InvalidPolicy => "invalid_policy",
             Self::NoApplicablePolicy => "no_applicable_policy",
             Self::NoRealization => "no_authorized_realization",
@@ -256,7 +259,8 @@ impl DenialReason {
             Self::ExplicitDeny(capability) | Self::MissingCapability(capability) => {
                 Some(*capability)
             }
-            Self::InvalidPolicy
+            Self::EndpointObservationUnavailable
+            | Self::InvalidPolicy
             | Self::NoApplicablePolicy
             | Self::NoRealization
             | Self::PlanningSearchLimit

@@ -51,3 +51,47 @@ fn planning_accepts_only_the_current_explicit_format() {
         assert!(serde_json::from_value::<PlanningEvidence>(value).is_err());
     }
 }
+
+#[test]
+fn observation_lease_bounds_every_candidate_and_matches_the_recorded_environment() {
+    use authority_contracts_model::observation::SignedEndpointObservationV1;
+    let event: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/policy-plan-evaluated-v2/valid/existing-route.json"
+    ))
+    .unwrap();
+    let mut planning = event["planning"].clone();
+    let clock = planning["evaluated_at"].as_i64().unwrap();
+    let mut report: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/endpoint-observation-v1/valid/basic.json"
+    ))
+    .unwrap();
+    report["observation"]["challenge"]["domain_id"] = planning["binding"]["domain_id"].clone();
+    report["observation"]["challenge"]["target_node_id"] =
+        planning["binding"]["target_node_id"].clone();
+    report["observation"]["facts"] = planning["resources"]["environment"].clone();
+    report["observation"]["observed_at"] = clock.into();
+    report["observation"]["expires_at"] = (clock + 600).into();
+    report["observation"]["challenge"]["issued_at"] = clock.into();
+    report["observation"]["challenge"]["expires_at"] = (clock + 30).into();
+    planning["resources"]["observation"] = report.clone();
+    assert!(
+        serde_json::from_value::<PlanningEvidence>(planning.clone())
+            .unwrap()
+            .is_consistent()
+    );
+
+    // The report itself is still active and structurally valid, but cannot
+    // support the twenty-second admission or its longer-lived alternative.
+    report["observation"]["observed_at"] = (clock - 590).into();
+    report["observation"]["expires_at"] = (clock + 10).into();
+    report["observation"]["challenge"]["issued_at"] = (clock - 590).into();
+    report["observation"]["challenge"]["expires_at"] = (clock - 560).into();
+    let active: SignedEndpointObservationV1 = serde_json::from_value(report.clone()).unwrap();
+    assert!(active.observation.active(clock));
+    planning["resources"]["observation"] = report;
+    assert!(
+        !serde_json::from_value::<PlanningEvidence>(planning)
+            .unwrap()
+            .is_consistent()
+    );
+}

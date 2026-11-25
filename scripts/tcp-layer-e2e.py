@@ -94,6 +94,9 @@ assert combined['tcp_grant']['grant']['source_address'] == '10.77.0.1'
 assert combined['tcp_grant']['grant']['destination_address'] == '10.77.0.2'
 http(f'{agent}/v1/network-grants', combined['network_grant'])
 http(f'{agent}/v1/tcp-grants', combined['tcp_grant'])
+# Live observation withdrawal can discard the server's previous WG session.
+# Fresh authorization also refreshes the client transport, as after agent restart.
+subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
 wait(lambda: allowed(2223))
 assert not allowed(2224), 'unselected port was admitted'
 
@@ -241,3 +244,40 @@ trace_spec = importlib.util.spec_from_file_location(
 trace_module = importlib.util.module_from_spec(trace_spec)
 trace_spec.loader.exec_module(trace_module)
 trace_module.run(issue, revoke, http, wait, allowed, agent, control, probe, pull)
+
+
+# A signed configuration assertion must not survive real enforcement drift.
+active = issue([8080], ttl=40, network=True)
+http(f'{agent}/v1/network-grants', active['network_grant'])
+http(f'{agent}/v1/tcp-grants', active['tcp_grant'])
+subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+wait(lambda: allowed(2223))
+old_unapplied = issue([8081], ttl=40)
+try:
+    subprocess.run(['./scripts/authority-agent.sh', 'run', '_mesh:test-observation-break'], check=True)
+    denied = browser("window.authorityRequestTcpAuthorization([8081],false,10,false)"
+        ".then(value=>done({unexpected:true})).catch(error=>done({denial:error.message}));", [])
+    assert 'denial' in denied and not denied.get('unexpected'), denied
+    wait(lambda: not allowed(2223))
+finally:
+    subprocess.run(['./scripts/authority-agent.sh', 'run', '_mesh:agent-restart'], check=True)
+
+def observation_agent_ready():
+    try:
+        with urllib.request.urlopen(agent + '/v1/identity', timeout=1) as response:
+            return response.status == 200
+    except OSError:
+        return False
+wait(observation_agent_ready)
+try:
+    fresh = issue([8080], ttl=20, network=True)
+    http(f'{agent}/v1/network-grants', fresh['network_grant'])
+    http(f'{agent}/v1/tcp-grants', fresh['tcp_grant'])
+    subprocess.run(['mise', 'run', 'mesh:client:reconnect'], check=True, stdout=subprocess.DEVNULL)
+    wait(lambda: allowed(2223))
+    assert time.time() < old_unapplied['tcp_grant']['grant']['expires_at'], 'stale grant only failed by expiry'
+    assert http(f'{agent}/v1/tcp-grants', old_unapplied['tcp_grant'], 503)['error'] == 'endpoint_observation_unavailable'
+    assert not allowed(2224), 'pre-fence unapplied grant revived after enforcement repair'
+finally:
+    subprocess.run(['./scripts/authority-agent.sh', 'run', '_mesh:agent-restart'], check=True)
+print('Endpoint observations: real nft drift denied authorization, withdrew installed access, and fenced old grants across repair/restart', flush=True)

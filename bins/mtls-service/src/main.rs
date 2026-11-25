@@ -75,9 +75,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         subscribe(subscriber, instance, lease_sender).await;
     });
-    let _ = tls_acceptor(None)?;
+    let _ = tls_acceptor(&service.ca, None)?;
     let tls = TcpListener::bind(required("AUTHORITY_MTLS_SERVICE_TLS_BIND")?).await?;
     let listener = TcpListener::bind(required("AUTHORITY_MTLS_SERVICE_BIND")?).await?;
+    start_enforcement_observer(service.clone()).await?;
     let tls_service = service.clone();
     let slots = Arc::new(tokio::sync::Semaphore::new(64));
     tokio::spawn(async move {
@@ -114,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn tls_acceptor(
+    ca: &openssl::x509::X509,
     store: Option<openssl::x509::store::X509Store>,
 ) -> Result<Arc<SslAcceptor>, String> {
     let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
@@ -131,7 +133,8 @@ fn tls_acceptor(
         .check_private_key()
         .map_err(|error| error.to_string())?;
     acceptor
-        .set_ca_file(required("AUTHORITY_MTLS_CA_CERTIFICATE_FILE")?)
+        .cert_store_mut()
+        .add_cert(ca.clone())
         .map_err(|error| error.to_string())?;
     acceptor.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
     acceptor.set_options(SslOptions::NO_TICKET);
@@ -403,7 +406,62 @@ async fn crl_acceptor(state: &Service) -> Result<Arc<SslAcceptor>, String> {
             store
                 .set_flags(X509VerifyFlags::CRL_CHECK)
                 .map_err(|e| e.to_string())?;
-            Ok((tls_acceptor(Some(store.build()))?, deadline))
+            Ok((tls_acceptor(&state.ca, Some(store.build()))?, deadline))
         })
         .await
+}
+
+async fn start_enforcement_observer(state: Service) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+    let path = required("AUTHORITY_MTLS_OBSERVATION_SOCKET")?;
+    let parent = std::path::Path::new(&path)
+        .parent()
+        .ok_or("enforcement socket parent missing")?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(parent)
+        .map_err(|e| e.to_string())?;
+    let metadata = std::fs::metadata(parent).map_err(|e| e.to_string())?;
+    if metadata.uid() != 0 || metadata.permissions().mode() & 0o077 != 0 {
+        return Err("unsafe enforcement socket directory".into());
+    }
+
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() || metadata.uid() != 0 {
+                return Err("unsafe enforcement socket path".into());
+            }
+            if tokio::net::UnixStream::connect(&path).await.is_ok() {
+                return Err("enforcement socket already active".into());
+            }
+            std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.to_string()),
+    }
+    let listener = tokio::net::UnixListener::bind(&path).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| e.to_string())?;
+    let router = Router::new()
+        .route("/enforcement", get(loaded_enforcement))
+        .with_state(state);
+    tokio::spawn(async move {
+        if let Err(cause) = axum::serve(listener, router).await {
+            warn!(%cause,"enforcement observer stopped");
+        }
+    });
+    Ok(())
+}
+async fn loaded_enforcement(
+    State(state): State<Service>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let digest = state
+        .ca
+        .digest(openssl::hash::MessageDigest::sha256())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        serde_json::json!({"domain_id":state.domain,"target_node_id":state.target,
+        "process_id":std::process::id(),"mtls_ca_sha256":digest.iter().fold(String::with_capacity(64), |mut output,b| {use std::fmt::Write;let _=write!(output,"{b:02x}");output}),"service_audience":state.audience}),
+    ))
 }

@@ -423,3 +423,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-partition"
 
 [tasks."_mesh:mtls-restore"]
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh mtls-restore"
+
+[tasks."_mesh:test-observation-break"]
+description = "Internal E2E only: change the actual admission structure"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh observation-break"
