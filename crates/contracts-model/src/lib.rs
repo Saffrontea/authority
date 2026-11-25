@@ -2,6 +2,7 @@
 //!
 //! This crate contains no database, HTTP, CA, or policy-engine adapters.
 
+pub mod fence;
 pub mod observation;
 pub mod protocol;
 mod tcp;

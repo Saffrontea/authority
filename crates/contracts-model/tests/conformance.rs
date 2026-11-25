@@ -106,6 +106,29 @@ fn common_revocation_vectors_conform() {
     }
 }
 
+#[test]
+fn scoped_revocation_vectors_match_independent_preimages() {
+    use authority_contracts_model::fence::SignedScopedRevocationNoticeV3;
+    for path in contract_vectors("signed-scoped-revocation-notice-v3", "valid") {
+        let value: SignedScopedRevocationNoticeV3 =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value.validate().unwrap();
+        let expected = fs::read_to_string(path.with_extension("preimage.hex")).unwrap();
+        assert_eq!(
+            encode_hex(&value.notice.signing_preimage().unwrap()),
+            expected.trim()
+        );
+    }
+    for path in contract_vectors("signed-scoped-revocation-notice-v3", "invalid") {
+        assert!(
+            serde_json::from_slice::<SignedScopedRevocationNoticeV3>(&fs::read(&path).unwrap())
+                .map_or(true, |value| value.validate().is_err()),
+            "{}",
+            path.display()
+        );
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);

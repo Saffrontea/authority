@@ -1,5 +1,7 @@
 //! Cryptographic ports and application logic for issuance authorization.
 
+pub mod fence;
+
 use authority_device_auth_core::{decode_base64url, encode_base64url};
 
 use authority_contracts_model::protocol::{NETWORK_AGENT_AUDIENCE, NODE_AGENT_AUDIENCE};

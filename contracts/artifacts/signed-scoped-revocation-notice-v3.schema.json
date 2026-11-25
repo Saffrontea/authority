@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://authority.invalid/contracts/signed-scoped-revocation-notice-v3.schema.json",
+  "title": "SignedScopedRevocationNoticeV3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "notice",
+    "algorithm",
+    "key_id",
+    "signature"
+  ],
+  "properties": {
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "issuer",
+        "domain_id",
+        "target_node_id",
+        "reason",
+        "sequence",
+        "revoked_at",
+        "expires_at",
+        "adapter_kinds",
+        "selector"
+      ],
+      "properties": {
+        "version": {
+          "const": 3
+        },
+        "issuer": {
+          "$ref": "#/$defs/identifier"
+        },
+        "domain_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "target_node_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "revoked_at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "adapter_kinds": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ssh.certificate",
+              "ssh.session",
+              "wireguard.peer",
+              "mtls.client_certificate",
+              "tcp.port"
+            ]
+          }
+        },
+        "selector": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "decision_id"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "decision"
+                },
+                "decision_id": {
+                  "$ref": "#/$defs/identifier"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "subject_user_id",
+                "minimum_generation"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "subject"
+                },
+                "subject_user_id": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "minimum_generation": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "device_id",
+                "minimum_generation"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "device"
+                },
+                "device_id": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "minimum_generation": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9223372036854775807
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "algorithm": {
+      "const": "Ed25519"
+    },
+    "key_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 80,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_.:@-]+$"
+    }
+  }
+}

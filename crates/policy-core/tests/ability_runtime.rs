@@ -116,6 +116,69 @@ fn direct_permission_cannot_hide_a_denied_mandatory_derived_effect() {
 }
 
 #[test]
+fn cidr_range_policies_narrow_to_the_request_and_preserve_deny_holes() {
+    use authority_policy_core::resources::IntervalSet;
+    let subnet = || IntervalSet::cidr("10.0.0.0".parse().unwrap(), 8).unwrap();
+    let mut direct = policy(10, Ability::TcpAdmission, &[8080], 0, 200);
+    direct.selector = AbilitySelector::TcpAdmissionRange {
+        source: subnet(),
+        destination: subnet(),
+        ports: IntervalSet::ports(1024, 65535).unwrap(),
+    };
+    let mut effect = policy(11, Ability::TcpConnection, &[8080], 0, 200);
+    effect.selector = AbilitySelector::TcpConnectionRange {
+        source: subnet(),
+        destination: subnet(),
+        ports: IntervalSet::ports(1024, 65535).unwrap(),
+    };
+    let (_, plan) = run(vec![direct.clone(), effect.clone()], &[8080, 65535]).unwrap();
+    assert_eq!(
+        run(vec![direct.clone(), effect.clone()], &[80])
+            .unwrap_err()
+            .code(),
+        "tcp_port_denied"
+    );
+    let admission = plan
+        .evidence()
+        .plan
+        .as_ref()
+        .unwrap()
+        .abilities
+        .iter()
+        .find(|a| a.ability.scope.kind() == Ability::TcpAdmission)
+        .unwrap();
+    let authority_policy_core::scoped::AbilityScope::TcpAdmission { ports, .. } =
+        &admission.ability.scope
+    else {
+        panic!("admission scope");
+    };
+    assert_eq!(ports, &BTreeSet::from([8080, 65535]));
+    let mut deny = policy(12, Ability::TcpConnection, &[8081], 105, 106);
+    deny.effect = Effect::Deny;
+    deny.selector = AbilitySelector::TcpConnectionRange {
+        source: subnet(),
+        destination: subnet(),
+        ports: IntervalSet::ports(8081, 8090).unwrap(),
+    };
+    assert!(run(vec![direct.clone(), effect.clone(), deny.clone()], &[8080]).is_ok());
+    assert_eq!(
+        run(
+            vec![direct.clone(), effect.clone(), deny.clone()],
+            &[8080, 8081]
+        )
+        .unwrap_err()
+        .code(),
+        "explicit_ability_deny"
+    );
+    deny.selector = AbilitySelector::TcpConnectionRange {
+        source: IntervalSet::cidr("192.0.2.0".parse().unwrap(), 24).unwrap(),
+        destination: subnet(),
+        ports: IntervalSet::ports(1, 65535).unwrap(),
+    };
+    assert!(run(vec![direct, effect, deny], &[8080]).is_ok());
+}
+
+#[test]
 fn each_ability_requires_its_own_permission() {
     let direct = policy(10, Ability::TcpAdmission, &[8080], 0, 200);
     let derived = policy(11, Ability::TcpConnection, &[8080], 0, 200);

@@ -299,6 +299,20 @@ async fn create_demo_access(
     .await
     .map_err(ApiError::internal)?;
     let request_key = json!({"mode":"request"});
+    // Policies use symbolic resources; emitted grants remain the exact concrete
+    // request supported by the current adapters, never this entire selector.
+    let source_range = authority_policy_core::resources::IntervalSet::cidr(
+        client_mesh_address.parse().map_err(ApiError::internal)?,
+        32,
+    )
+    .map_err(ApiError::internal)?;
+    let destination_range = authority_policy_core::resources::IntervalSet::cidr(
+        target_mesh_address.parse().map_err(ApiError::internal)?,
+        32,
+    )
+    .map_err(ApiError::internal)?;
+    let port_range = authority_policy_core::resources::IntervalSet::ports(8080, 8081)
+        .map_err(ApiError::internal)?;
     let selectors = vec![
         json!({"kind":"mesh_membership", "wireguard_public_key":client_wireguard_key, "address":client_mesh_address}),
         json!({"kind":"network_route_authorization", "source":client_mesh_address, "destination":target_mesh_address}),
@@ -307,8 +321,8 @@ async fn create_demo_access(
         json!({"kind":"ssh_session", "principals":["deploy"], "key":request_key, "terminal_token":request_key}),
         json!({"kind":"mtls_credential", "service_audience":crate::config::DEMO_SERVICE_AUDIENCE, "key":request_key}),
         json!({"kind":"service_identity", "service_audience":crate::config::DEMO_SERVICE_AUDIENCE, "key":request_key}),
-        json!({"kind":"tcp_admission", "source":client_mesh_address, "destination":target_mesh_address, "ports":[8080,8081]}),
-        json!({"kind":"tcp_connection", "source":client_mesh_address, "destination":target_mesh_address, "ports":[8080,8081]}),
+        json!({"kind":"tcp_admission_range", "source":source_range, "destination":destination_range, "ports":port_range}),
+        json!({"kind":"tcp_connection_range", "source":source_range, "destination":destination_range, "ports":port_range}),
     ];
     for selector in selectors {
         sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect) VALUES ($1,$2,$3,$4,$5,$6,'allow')")

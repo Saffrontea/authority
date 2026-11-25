@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod ability_policy;
 pub mod capabilities;
 pub mod realization;
+pub mod resources;
 pub mod scoped;
 pub mod selection;
 

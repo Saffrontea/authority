@@ -870,13 +870,16 @@ fn applicable_ability_rules<'a>(
 fn authorize_ability(
     ability: &ScopedAbility,
     rules: &[crate::ability_policy::AbilityRule],
+    has_kind_policy: bool,
 ) -> Result<BTreeSet<PolicyRef>, ScopeError> {
     use crate::ability_policy::{PermissionError, authorize};
     let kind = ability.scope.kind();
     match authorize(ability, rules) {
         Ok(sources) => Ok(sources),
         Err(PermissionError::InvalidRule) => Err(DenialReason::InvalidPolicy.into()),
-        Err(PermissionError::InvalidRequest) => Err(ScopeError::InvalidRequest),
+        Err(PermissionError::InvalidRequest | PermissionError::PartitionBudget) => {
+            Err(ScopeError::InvalidRequest)
+        }
         Err(PermissionError::ExplicitDeny(_)) => {
             Err(DenialReason::ExplicitAbilityDeny(kind).into())
         }
@@ -885,7 +888,7 @@ fn authorize_ability(
             instant.validity.expires_at = instant.validity.not_before + 1;
             Err(if authorize(&instant, rules).is_ok() {
                 ScopeError::LifetimeExceeded(kind.effective())
-            } else if rules.is_empty() {
+            } else if !has_kind_policy {
                 ScopeError::Policy(DenialReason::MissingAbility(kind))
             } else {
                 ScopeError::ScopeDenied(kind.effective())
@@ -965,7 +968,10 @@ fn ability_permissions(
         if !ability.contains(&ability) {
             return Err(ScopeError::InvalidRequest);
         }
-        match authorize_ability(&ability, &rules) {
+        // A range selector can have an empty resource intersection. Its policy
+        // still exists: distinguish out-of-scope from an entirely missing kind.
+        let has_kind_policy = applicable.iter().any(|rule| rule.selector.kind() == kind);
+        match authorize_ability(&ability, &rules, has_kind_policy) {
             Ok(sources) => {
                 permissions.insert(kind, (ability.clone(), sources));
             }

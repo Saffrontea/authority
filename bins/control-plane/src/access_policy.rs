@@ -420,7 +420,7 @@ pub(crate) mod tests {
         let (request, _) = live_tcp_request(&pool).await;
         let mut writer = begin_authorization(&pool).await.unwrap();
         let deny_id = Uuid::new_v4();
-        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,selector,'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind'='tcp_connection' LIMIT 1")
+        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,selector,'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind' IN ('tcp_connection','tcp_connection_range') LIMIT 1")
             .bind(deny_id).bind(request.domain_id).bind(request.subject_user_id).bind(request.target_node_id)
             .execute(&mut *writer).await.unwrap();
         let reader_pool = pool.clone();
@@ -472,7 +472,7 @@ pub(crate) mod tests {
             "SELECT p.domain_id, p.subject_user_id, p.required_device_id, p.target_node_id, n.device_id AS target_device_id \
              FROM policy.ability_policies p JOIN device.devices d ON d.id = p.required_device_id \
              JOIN device.nodes n ON n.id = p.target_node_id \
-             WHERE p.enabled AND p.effect = 'allow' AND p.selector->>'kind' = 'tcp_connection' \
+             WHERE p.enabled AND p.effect = 'allow' AND p.selector->>'kind' IN ('tcp_connection','tcp_connection_range') \
                AND d.owner_user_id = p.subject_user_id AND d.status = 'active' \
              ORDER BY p.id DESC LIMIT 1"
         ).fetch_one(pool).await.expect("run poc:e2e to bootstrap a policy first");
@@ -600,7 +600,7 @@ pub(crate) mod tests {
         let (request, _) = live_tcp_request(&pool).await;
         let mut tx = begin_authorization(&pool).await.unwrap();
         let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,jsonb_set(selector,'{ports}','[8081]'::jsonb),'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind'='tcp_connection' LIMIT 1")
+        sqlx::query("INSERT INTO policy.ability_policies (id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority) SELECT $1,domain_id,subject_user_id,required_device_id,target_node_id,jsonb_set(selector,'{ports}', CASE WHEN selector->>'kind'='tcp_connection_range' THEN '[{\"start\":8081,\"end\":8082}]'::jsonb ELSE '[8081]'::jsonb END),'deny',100 FROM policy.ability_policies WHERE domain_id=$2 AND subject_user_id=$3 AND target_node_id=$4 AND selector->>'kind' IN ('tcp_connection','tcp_connection_range') LIMIT 1")
             .bind(id).bind(request.domain_id).bind(request.subject_user_id).bind(request.target_node_id)
             .execute(&mut *tx).await.unwrap();
         for (ports, allowed) in [

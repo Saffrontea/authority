@@ -5,6 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod fence;
+
 const COMPACT_EVERY: usize = 256;
 
 /// A durable, expiry-aware record of consumed signed-envelope nonces.

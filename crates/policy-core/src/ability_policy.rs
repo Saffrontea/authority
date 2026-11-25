@@ -22,6 +22,7 @@ pub enum PermissionError {
     InvalidRequest,
     ExplicitDeny(PolicyRef),
     Uncovered,
+    PartitionBudget,
 }
 
 fn atoms(scope: &AbilityScope) -> Vec<AbilityScope> {
@@ -83,6 +84,20 @@ pub fn authorize(
     {
         return Err(PermissionError::InvalidRule);
     }
+    if let Some(region) = tcp_region(requested) {
+        let mut symbolic = Vec::new();
+        for rule in rules {
+            if same_tcp_identity(requested, &rule.authority) {
+                symbolic.push(crate::resources::RegionRule {
+                    policy: rule.policy,
+                    priority: rule.priority,
+                    effect: rule.effect,
+                    region: tcp_region(&rule.authority).ok_or(PermissionError::InvalidRule)?,
+                });
+            }
+        }
+        return crate::resources::authorize(&region, &symbolic, crate::resources::MAX_INTERVALS);
+    }
     let authorities: Vec<_> = rules.iter().map(|rule| &rule.authority).collect();
     let mut sources = BTreeSet::new();
     for atom in fragments(requested, &authorities) {
@@ -103,6 +118,65 @@ pub fn authorize(
         sources.insert(winner.policy);
     }
     Ok(sources)
+}
+
+fn same_tcp_identity(left: &ScopedAbility, right: &ScopedAbility) -> bool {
+    if left.binding != right.binding || left.scope.kind() != right.scope.kind() {
+        return false;
+    }
+    match (&left.scope, &right.scope) {
+        (
+            AbilityScope::TcpAdmission {
+                source: a,
+                destination: b,
+                ..
+            },
+            AbilityScope::TcpAdmission {
+                source: c,
+                destination: d,
+                ..
+            },
+        )
+        | (
+            AbilityScope::TcpConnection {
+                source: a,
+                destination: b,
+                ..
+            },
+            AbilityScope::TcpConnection {
+                source: c,
+                destination: d,
+                ..
+            },
+        ) => a == c && b == d,
+        _ => false,
+    }
+}
+
+fn tcp_region(ability: &ScopedAbility) -> Option<crate::resources::Region<2>> {
+    use crate::resources::{Interval, IntervalSet, Region};
+    let (AbilityScope::TcpAdmission { ports, .. } | AbilityScope::TcpConnection { ports, .. }) =
+        &ability.scope
+    else {
+        return None;
+    };
+    Some(Region([
+        IntervalSet::new(
+            ports
+                .iter()
+                .map(|p| Interval {
+                    start: u64::from(*p),
+                    end: u64::from(*p) + 1,
+                })
+                .collect(),
+        )
+        .ok()?,
+        IntervalSet::new(vec![Interval {
+            start: u64::try_from(ability.validity.not_before).ok()?,
+            end: u64::try_from(ability.validity.expires_at).ok()?,
+        }])
+        .ok()?,
+    ]))
 }
 
 // Resource/time partitioning is shared by permission evaluation and authority order.
@@ -146,6 +220,18 @@ fn fragments(requested: &ScopedAbility, authorities: &[&ScopedAbility]) -> Vec<S
 pub fn authority_leq(left: &BTreeSet<ScopedAbility>, right: &BTreeSet<ScopedAbility>) -> bool {
     let cover: Vec<_> = right.iter().collect();
     left.iter().all(|requested| {
+        if let Some(region) = tcp_region(requested) {
+            if !requested.contains(requested) {
+                return false;
+            }
+            let cover: Vec<_> = right
+                .iter()
+                .filter(|r| same_tcp_identity(requested, r))
+                .filter_map(tcp_region)
+                .collect();
+            return crate::resources::uncovered(&region, &cover, crate::resources::MAX_INTERVALS)
+                .is_ok_and(|r| r.is_empty());
+        }
         requested.contains(requested)
             && fragments(requested, &cover)
                 .iter()
@@ -214,6 +300,18 @@ pub enum AbilitySelector {
         destination: std::net::Ipv4Addr,
         ports: BTreeSet<u16>,
     },
+    /// Symbolic policy resources. They are intersected with the concrete request;
+    /// a broad policy never widens the authority projected into an adapter grant.
+    TcpAdmissionRange {
+        source: crate::resources::IntervalSet,
+        destination: crate::resources::IntervalSet,
+        ports: crate::resources::IntervalSet,
+    },
+    TcpConnectionRange {
+        source: crate::resources::IntervalSet,
+        destination: crate::resources::IntervalSet,
+        ports: crate::resources::IntervalSet,
+    },
 }
 
 impl AbilitySelector {
@@ -244,6 +342,27 @@ impl AbilitySelector {
                     && ports.len() <= authority_contracts_model::protocol::MAX_TCP_PORTS
                     && !ports.contains(&0)
             }
+            Self::TcpAdmissionRange {
+                source,
+                destination,
+                ports,
+            }
+            | Self::TcpConnectionRange {
+                source,
+                destination,
+                ports,
+            } => {
+                let within = |set: &crate::resources::IntervalSet, first, end| {
+                    !set.is_empty()
+                        && set
+                            .intervals()
+                            .iter()
+                            .all(|i| first <= i.start && i.end <= end)
+                };
+                within(source, 0, 1_u64 << 32)
+                    && within(destination, 0, 1_u64 << 32)
+                    && within(ports, 1, 65536)
+            }
             Self::MtlsCredential {
                 service_audience,
                 key,
@@ -271,8 +390,8 @@ impl AbilitySelector {
             Self::SshSession { .. } => Ability::SshSession,
             Self::MtlsCredential { .. } => Ability::MtlsCredential,
             Self::ServiceIdentity { .. } => Ability::ServiceIdentity,
-            Self::TcpAdmission { .. } => Ability::TcpAdmission,
-            Self::TcpConnection { .. } => Ability::TcpConnection,
+            Self::TcpAdmission { .. } | Self::TcpAdmissionRange { .. } => Ability::TcpAdmission,
+            Self::TcpConnection { .. } | Self::TcpConnectionRange { .. } => Ability::TcpConnection,
         }
     }
 
@@ -288,6 +407,12 @@ impl AbilitySelector {
     /// Resolve only explicitly request-bound key material. Resources and authority
     /// kinds always come from the stored selector, even for deny rules.
     pub(crate) fn scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
+        if matches!(
+            self,
+            Self::TcpAdmissionRange { .. } | Self::TcpConnectionRange { .. }
+        ) {
+            return self.range_scope(requested);
+        }
         Some(match (self, requested) {
             (
                 Self::MeshMembership {
@@ -345,6 +470,62 @@ impl AbilitySelector {
             },
             _ => return self.key_scope(requested),
         })
+    }
+
+    fn range_scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {
+        match (self, requested) {
+            (
+                Self::TcpAdmissionRange {
+                    source,
+                    destination,
+                    ports,
+                },
+                AbilityScope::TcpAdmission {
+                    source: src,
+                    destination: dst,
+                    ports: requested_ports,
+                },
+            )
+            | (
+                Self::TcpConnectionRange {
+                    source,
+                    destination,
+                    ports,
+                },
+                AbilityScope::TcpConnection {
+                    source: src,
+                    destination: dst,
+                    ports: requested_ports,
+                },
+            ) => {
+                if !source.contains_point(u64::from(u32::from(*src)))
+                    || !destination.contains_point(u64::from(u32::from(*dst)))
+                {
+                    return None;
+                }
+                let intersection: BTreeSet<_> = requested_ports
+                    .iter()
+                    .filter(|p| ports.contains_point(u64::from(**p)))
+                    .copied()
+                    .collect();
+                if intersection.is_empty() {
+                    return None;
+                }
+                Some(match requested {
+                    AbilityScope::TcpAdmission { .. } => AbilityScope::TcpAdmission {
+                        source: *src,
+                        destination: *dst,
+                        ports: intersection,
+                    },
+                    _ => AbilityScope::TcpConnection {
+                        source: *src,
+                        destination: *dst,
+                        ports: intersection,
+                    },
+                })
+            }
+            _ => None,
+        }
     }
 
     fn key_scope(&self, requested: &AbilityScope) -> Option<AbilityScope> {

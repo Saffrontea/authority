@@ -1,0 +1,23 @@
+{
+  "notice": {
+    "version": 3,
+    "issuer": "cp",
+    "domain_id": "domain",
+    "target_node_id": "target",
+    "selector": {
+      "kind": "subject",
+      "subject_user_id": "alice",
+      "minimum_generation": 2
+    },
+    "reason": "compromised",
+    "sequence": 1,
+    "revoked_at": 100,
+    "expires_at": 200,
+    "adapter_kinds": [
+      "wireguard.peer"
+    ]
+  },
+  "algorithm": "Ed25519",
+  "key_id": "test",
+  "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+}

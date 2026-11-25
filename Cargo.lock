@@ -219,6 +219,7 @@ version = "0.1.0"
 dependencies = [
  "authority-contracts-model",
  "authority-device-auth-core",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
@@ -351,7 +352,10 @@ dependencies = [
 name = "authority-replay-ledger"
 version = "0.1.0"
 dependencies = [
+ "authority-contracts-model",
  "proptest",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

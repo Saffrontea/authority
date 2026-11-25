@@ -59,6 +59,10 @@
     "artifacts/endpoint-observation-v1.schema.json": {
       "version": 1,
       "sha256": "edf91ea39455b050b0d3543f3ec3c4452b51160054e790bd79184a766ce4459e"
+    },
+    "artifacts/signed-scoped-revocation-notice-v3.schema.json": {
+      "version": 3,
+      "sha256": "90730623f220a6e10447e780b8543ca026e1b99fa249daed7db1ee0a0397f809"
     }
   }
 }

@@ -179,7 +179,11 @@ complete derivation trace. Only the current planning format is accepted; there i
 no legacy catalog or replay fallback.
 See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
-Subject/device revocation fences, symbolic resource ranges and scoped
+TCP policies support symbolic port intervals and IPv4 ranges; exact resource/time
+subtraction also drives TCP permission evaluation and authority comparison.
+[Symbolic resources and fence primitives](docs/symbolic-resources.md) documents
+their wire syntax, tested guarantees and current adapter limits.
+Subject/device revocation enforcement, fully symbolic request/grant scopes and scoped
 administration remain unimplemented. The demo bootstrap token and trusted target
 probe remain trust assumptions. [Endpoint observations](docs/endpoint-observations.md)
 authenticate software reports; they are not hardware-backed attestation. [The next authority-model iteration](docs/authority-model-next.md)
