@@ -121,3 +121,20 @@ valid old consumed grants therefore require reauthorization. An explicit trusted
 administrative reactivation advances generations again. Old sessions and unredeemed
 grants remain invalid and a fresh passkey session is required. Scoped enrollment
 and administration through the general ability policy remain future work.
+
+
+Operator provisioning and delivery recovery are described in
+[Operator administration](operator-administration.md). Traffic grants exclude
+unspecified, multicast and limited broadcast addresses across every interval in
+both address axes. A policy's universal IPv4 set can still narrow a concrete
+request; a traffic grant containing those special addresses is rejected in full.
+
+SSH admission and renewal use a separate in-memory fence view and session mutex.
+Publication refreshes this view, including poisoned persistence state, before
+cleanup receipts. Admission checks its own session and performs no global cleanup.
+Kernel/replay transactions run in bounded blocking jobs with four admission slots.
+The Linux deployment uses GNU coreutils `timeout` to give external actuator
+commands a one-second deadline; batched SSH stop jobs are
+submitted without blocking and completion waits for empty service cgroups.
+Ambiguous kernel timeouts retain repair work: TCP rules are rebuilt from tracked
+grants, and uncertain WG peers are withdrawn before any cleanup acknowledgment.

@@ -523,6 +523,7 @@ TimeoutStopSec=5s
 ExecStart=/usr/local/bin/authority-network-agent
 ExecStopPost=/usr/bin/python3 /usr/local/lib/authority/actuator-stop.py
 Environment=AUTHORITY_CONTROL_PLANE_PUBLIC_KEY_FILE=/etc/authority-control-plane.pub.pem
+Environment=AUTHORITY_DOMAIN_ID=019a6e6d-4b01-7c31-bb4c-f83220bec001
 Environment=AUTHORITY_WIREGUARD_INTERFACE=wg0
 Environment=AUTHORITY_NETWORK_AGENT_REPLAY_LEDGER_FILE=/var/lib/authority/network-agent-replay-ledger
 Environment=AUTHORITY_NETWORK_AGENT_IDENTITY_FILE=/var/lib/authority/node-identity.pem
@@ -713,6 +714,7 @@ main() {
       attach "${TARGET_NAME}" journalctl --since '-3min' -u ssh.service --no-pager -n 30
       attach "${TARGET_NAME}" journalctl --since '-3min' --grep 'SSH guard failed' --no-pager -n 20
       ;;
+    agent-pid) attach "${TARGET_NAME}" systemctl show authority-network-agent.service --property MainPID --value ;;
     agent-status) network_agent_status ;;
     agent-restart)
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service

@@ -15,6 +15,9 @@ pub(super) fn store<'a>(
     binding: &GenerationBinding,
     kind: AdapterGrantKindV1,
 ) -> Result<&'a mut FenceStore, String> {
+    if binding.domain_id != state.0.domain_id {
+        return Err("identity fence domain mismatch".into());
+    }
     let domain = binding
         .domain_id
         .parse::<uuid::Uuid>()
@@ -48,7 +51,13 @@ pub(super) fn require(
     binding: &GenerationBinding,
     kind: AdapterGrantKindV1,
 ) -> Result<(), ApiError> {
-    reconcile(state, policy).map_err(ApiError::internal)?;
+    if binding.domain_id != state.0.domain_id {
+        return Err(ApiError::unauthorized(
+            "invalid_identity_domain",
+            "grant belongs to another configured domain",
+        ));
+    }
+    repair_uncertain(state, policy).map_err(ApiError::internal)?;
     if store(state, policy, binding, kind)
         .map_err(ApiError::internal)?
         .rejects(binding)
@@ -58,8 +67,28 @@ pub(super) fn require(
     Ok(())
 }
 
+fn repair_uncertain(state: &AppState, policy: &mut PolicyState) -> Result<(), String> {
+    if policy.uncertain_tcp {
+        policy.tcp.as_ref().ok_or("TCP not configured")?.sync()?;
+        policy.uncertain_tcp = false;
+    }
+    if !policy.uncertain_peers.is_empty() {
+        let peers: Vec<_> = policy.uncertain_peers.iter().cloned().collect();
+        super::remove_peers(&state.0.interface, &peers)?;
+        for peer in peers {
+            policy.active_peers.remove(&peer);
+            policy
+                .bindings
+                .remove(&(AdapterGrantKindV1::WireGuardPeer, peer));
+        }
+        policy.uncertain_peers.clear();
+    }
+    Ok(())
+}
+
 pub(super) fn reconcile(state: &AppState, policy: &mut PolicyState) -> Result<(), String> {
-    super::ssh::reconcile(state, policy)?;
+    repair_uncertain(state, policy)?;
+    super::ssh::reconcile(state)?;
     let rejected: Vec<_> = policy
         .bindings
         .iter()
@@ -83,9 +112,16 @@ pub(super) fn reconcile(state: &AppState, policy: &mut PolicyState) -> Result<()
             .ok_or("TCP not configured")?
             .revoke_many(&tcp)?;
     }
+    let peers: Vec<_> = rejected
+        .iter()
+        .filter(|(kind, id)| {
+            *kind == AdapterGrantKindV1::WireGuardPeer && policy.active_peers.contains_key(id)
+        })
+        .map(|(_, id)| id.clone())
+        .collect();
+    super::remove_peers(&state.0.interface, &peers)?;
     for (kind, id) in rejected {
-        if kind == AdapterGrantKindV1::WireGuardPeer && policy.active_peers.contains_key(&id) {
-            super::run_wg(&["set", &state.0.interface, "peer", &id, "remove"])?;
+        if kind == AdapterGrantKindV1::WireGuardPeer {
             policy.active_peers.remove(&id);
         }
         policy.bindings.remove(&(kind, id));
@@ -102,6 +138,25 @@ pub(super) fn reconcile(state: &AppState, policy: &mut PolicyState) -> Result<()
 }
 
 pub(super) async fn apply(
+    state: State<AppState>,
+    envelope: Json<SignedScopedRevocationNoticeV3>,
+) -> Result<Json<Value>, ApiError> {
+    let permit = state
+        .0
+        .0
+        .actuator_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::unavailable("actuator_busy"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        apply_blocking(state, envelope)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+
+fn apply_blocking(
     State(state): State<AppState>,
     Json(envelope): Json<SignedScopedRevocationNoticeV3>,
 ) -> Result<Json<Value>, ApiError> {
@@ -117,7 +172,7 @@ pub(super) async fn apply(
             authority_issuer_core::fence::verify(
                 &envelope,
                 &state.0.verifier,
-                &n.domain_id,
+                &state.0.domain_id,
                 &state.0.node_id,
                 kind,
                 now,
@@ -138,10 +193,13 @@ pub(super) async fn apply(
     };
     let mut policy = state.0.policy_state.lock().map_err(ApiError::internal)?;
     for kind in kinds {
-        store(&state, &mut policy, &binding, kind)
-            .map_err(ApiError::internal)?
-            .advance(&n.selector)
-            .map_err(ApiError::internal)?;
+        let store = store(&state, &mut policy, &binding, kind).map_err(ApiError::internal)?;
+        let result = store.advance(&n.selector);
+        if kind == AdapterGrantKindV1::SshCertificate {
+            // Publish even a poisoned view before retrying failed persistence.
+            state.0.ssh_state.lock().map_err(ApiError::internal)?.fence = Some(store.view());
+        }
+        result.map_err(ApiError::internal)?;
     }
     reconcile(&state, &mut policy).map_err(ApiError::internal)?;
     let signature = state
@@ -160,32 +218,38 @@ pub(super) fn start_monitor(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let result = state
-                .0
-                .policy_state
-                .lock()
-                .map_err(|e| e.to_string())
-                .and_then(|mut policy| {
-                    reconcile(&state, &mut policy)?;
-                    let now = super::unix_timestamp()?;
-                    let peers: Vec<_> = policy
-                        .active_peers
-                        .iter()
-                        .filter(|(_, active)| {
-                            active.expires_at <= now
-                                || policy
-                                    .revoked_decisions
-                                    .get(&active.decision_id)
-                                    .is_some_and(|expiry| *expiry > now)
-                        })
-                        .map(|(peer, _)| peer.clone())
-                        .collect();
-                    for peer in peers {
-                        super::run_wg(&["set", &state.0.interface, "peer", &peer, "remove"])?;
-                        policy.active_peers.remove(&peer);
-                    }
-                    notify_systemd("WATCHDOG=1")
-                });
+            let cleanup_state = state.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let state = cleanup_state;
+                state
+                    .0
+                    .policy_state
+                    .lock()
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut policy| {
+                        reconcile(&state, &mut policy)?;
+                        let now = super::unix_timestamp()?;
+                        let peers: Vec<_> = policy
+                            .active_peers
+                            .iter()
+                            .filter(|(_, active)| {
+                                active.expires_at <= now
+                                    || policy
+                                        .revoked_decisions
+                                        .get(&active.decision_id)
+                                        .is_some_and(|expiry| *expiry > now)
+                            })
+                            .map(|(peer, _)| peer.clone())
+                            .collect();
+                        super::remove_peers(&state.0.interface, &peers)?;
+                        for peer in peers {
+                            policy.active_peers.remove(&peer);
+                        }
+                        notify_systemd("WATCHDOG=1")
+                    })
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
             if let Err(cause) = result {
                 tracing::warn!(%cause,"identity fence cleanup will retry");
             }

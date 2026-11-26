@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from tcp_probe import echo
+from tcp_probe import echo, probe as probe_tcp
 
 session, control, issuer, node, agent, client = sys.argv[1:]
 root = Path(__file__).resolve().parents[1]
@@ -37,6 +37,12 @@ def browser(script, args=None):
         'script': 'const done=arguments[arguments.length-1]; ' + script, 'args': args or []})['value']
     assert 'error' not in result, result
     return result.get('value')
+
+def enforcer_pid():
+    output = subprocess.check_output([str(root / 'scripts/authority-agent.sh'),'run','_mesh:agent-pid'],text=True)
+    values = [int(line) for line in output.splitlines() if line.isdecimal()]
+    assert len(values) == 1 and values[0] > 1, 'enforcer process is unavailable'
+    return values[0]
 
 def issue():
     prepared = browser('window.authorityPrepareAccessAuthorization().then(value=>done({value})).catch(e=>done({error:e.message}));')
@@ -130,6 +136,16 @@ with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
                 assert response.status == 200
                 response.read()
                 streams.append(connection)
+            dangling = None
+            if selector == 'device':
+                dangling = browser('window.authorityRequestTcpAuthorization([8081],false,40).then(value=>done({value})).catch(e=>done({error:e.message}));')
+                try:
+                    subprocess.run([str(root / 'scripts/authority-agent.sh'),'run','_mesh:test-nft-commit-hang'],check=True,stdout=subprocess.DEVNULL)
+                    http(agent + '/v1/tcp-grants',dangling['tcp_grant'],expected=500)
+                finally:
+                    subprocess.run(['mise','run','mesh:test:nft-restore'],check=True,stdout=subprocess.DEVNULL)
+                assert ssh.poll() is None, 'healthy SSH lease was starved by slow kernel mutation'
+            original_enforcer_pid = enforcer_pid()
             old_token = browser("done({value:sessionStorage.getItem('authority-session')});")
             environment = {**os.environ, 'AUTHORITY_OPERATOR_KEY_FILE':str(root / '.secrets/operator-ed25519.pem')}
             result = subprocess.run([str(root / 'target/debug/authority-admin'), control, domain, selector,
@@ -137,6 +153,7 @@ with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
             receipt = json.loads(result.stdout)
             assert receipt['completed'] and receipt['pending_receivers'] == 0, receipt
             assert receipt['notices'], 'no selector fence was published'
+            assert enforcer_pid() == original_enforcer_pid, 'normal revocation restarted the enforcer and unrelated leases'
             # A replayed, committed operation cannot advance the epoch twice.
             environment['AUTHORITY_OPERATION_NONCE'] = receipt['operation_nonce']
             duplicate = subprocess.run([str(root / 'target/debug/authority-admin'), control, domain, selector,
@@ -172,6 +189,11 @@ with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
             prepared = browser('window.authorityPrepareAccessAuthorization().then(value=>done({value})).catch(e=>done({error:e.message}));')
             http(control + '/v1/access-authorizations', prepared['body'], prepared['headers'], expected=401)
             login(old_token)
+            if dangling is not None:
+                subprocess.run(['mise','run','mesh:client:reconnect'],check=True,stdout=subprocess.DEVNULL)
+                subprocess.run(['mise','run','mesh:verify'],check=True,stdout=subprocess.DEVNULL)
+                assert time.time() < dangling['tcp_grant']['grant']['expires_at'], 'uncertain grant only disappeared by expiry'
+                assert not probe_tcp(client,2224)['admitted'], 'timed-out committed kernel rule survived the signed revocation receipt'
             fresh = issue()
             current = fresh['ssh_authorization']['generation']
             field = 'device_generation' if selector == 'device' else 'subject_generation'

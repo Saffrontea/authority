@@ -30,6 +30,15 @@ fi
 rm -f /run/authority-e2e-wg-cursor
 CONTAINER
     ;;
+  nft-commit-hang)
+    lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
+systemctl is-active --quiet authority-network-agent.service
+test ! -e /run/authority-e2e-nft-binary
+mv /usr/sbin/nft /run/authority-e2e-nft-binary
+printf '#!/bin/sh\n/run/authority-e2e-nft-binary "$@" || exit $?\nsleep 2\n' > /usr/sbin/nft
+chmod 0755 /usr/sbin/nft
+CONTAINER
+    ;;
   nft-fail)
     lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
 systemctl is-active --quiet authority-network-agent.service
@@ -40,6 +49,7 @@ CONTAINER
     ;;
   nft-restore)
     lxc-attach -P "${lxc_path}" -n "${container}" -- sh -seu <<'CONTAINER'
+if [ -f /run/authority-e2e-nft-binary ]; then mv /run/authority-e2e-nft-binary /usr/sbin/nft; fi
 mode_file=/run/authority-e2e-nft-mode
 if [ -f "$mode_file" ]; then
   mode=$(cat "$mode_file")

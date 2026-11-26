@@ -84,3 +84,22 @@ fn corruption_and_failed_commit_never_reopen_access() {
     drop(store);
     assert!(FenceStore::open(&path, "domain", "target").is_err());
 }
+
+#[test]
+fn immutable_admission_views_are_isolated_and_publish_monotone_updates() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = FenceStore::open(directory.path().join("fence"), "domain", "target").unwrap();
+    let before = store.view();
+    let old = binding("alice", "clean", 1, 1);
+    store
+        .advance(&RevocationSelector::Subject {
+            subject_user_id: "alice".into(),
+            minimum_generation: 2,
+        })
+        .unwrap();
+    assert!(!before.rejects(&old));
+    let published = store.view();
+    assert!(published.rejects(&old));
+    assert!(!published.rejects(&binding("alice", "clean", 2, 1)));
+    assert!(!published.rejects(&binding("bob", "clean", 1, 1)));
+}

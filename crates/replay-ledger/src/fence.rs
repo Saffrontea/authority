@@ -45,6 +45,40 @@ pub struct FenceStore {
     _lock: File,
 }
 
+/// Immutable admission view; readers never wait for persistence or kernel work.
+#[derive(Clone)]
+pub struct FenceView {
+    domain: String,
+    entries: BTreeMap<Identity, i64>,
+    poisoned: bool,
+}
+impl FenceView {
+    #[must_use]
+    pub fn rejects(&self, binding: &GenerationBinding) -> bool {
+        rejects(&self.domain, &self.entries, self.poisoned, binding)
+    }
+}
+fn rejects(
+    domain: &str,
+    entries: &BTreeMap<Identity, i64>,
+    poisoned: bool,
+    binding: &GenerationBinding,
+) -> bool {
+    poisoned
+        || binding.validate().is_err()
+        || binding.domain_id != domain
+        || entries
+            .get(&Identity::Subject {
+                id: binding.subject_user_id.clone(),
+            })
+            .is_some_and(|minimum| binding.subject_generation < *minimum)
+        || entries
+            .get(&Identity::Device {
+                id: binding.device_id.clone(),
+            })
+            .is_some_and(|minimum| binding.device_generation < *minimum)
+}
+
 impl FenceStore {
     /// # Errors
     /// Rejects malformed stores, cross-domain/target reuse, duplicate records and
@@ -183,12 +217,16 @@ impl FenceStore {
     /// Fail closed for malformed bindings, wrong domain and ambiguous I/O state.
     #[must_use]
     pub fn rejects(&self, binding: &GenerationBinding) -> bool {
-        self.poisoned
-            || binding.validate().is_err()
-            || binding.domain_id != self.domain
-            || self.entries.iter().any(|(identity, generation)| {
-                selector(identity, *generation).rejects(&self.domain, binding, "")
-            })
+        rejects(&self.domain, &self.entries, self.poisoned, binding)
+    }
+
+    #[must_use]
+    pub fn view(&self) -> FenceView {
+        FenceView {
+            domain: self.domain.clone(),
+            entries: self.entries.clone(),
+            poisoned: self.poisoned,
+        }
     }
 
     fn persist(&self, bytes: &[u8]) -> Result<(), String> {

@@ -46,20 +46,24 @@ struct Inner {
     observer: Option<Arc<observation::Observer>>,
     verifier: OpenSslEd25519Verifier,
     node_id: String,
+    domain_id: String,
     interface: String,
     replay_ledger: Mutex<ReplayLedger>,
     policy_state: Mutex<PolicyState>,
+    ssh_state: Mutex<ssh::SshState>,
+    actuator_slots: Arc<tokio::sync::Semaphore>,
     identity: NodeIdentity,
     revocations: Mutex<ReplayLedger>,
 }
 
 #[derive(Default)]
 struct PolicyState {
+    uncertain_peers: std::collections::HashSet<String>,
+    uncertain_tcp: bool,
     active_peers: HashMap<String, ActivePeer>,
     revoked_decisions: HashMap<String, i64>,
     tcp: Option<tcp::TcpAdmission>,
     fences: HashMap<(String, AdapterGrantKindV1), authority_replay_ledger::fence::FenceStore>,
-    ssh_sessions: HashMap<(u32, u64), ssh::Session>,
     bindings:
         HashMap<(AdapterGrantKindV1, String), authority_contracts_model::fence::GenerationBinding>,
 }
@@ -279,11 +283,15 @@ struct IdentityResponse {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)] // Startup must finish durable initialization before binding listeners.
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let bind: SocketAddr = value("AUTHORITY_NETWORK_AGENT_BIND", "0.0.0.0:3003")?.parse()?;
+    let domain_id = required("AUTHORITY_DOMAIN_ID")?
+        .parse::<uuid::Uuid>()?
+        .to_string();
     let interface = value("AUTHORITY_WIREGUARD_INTERFACE", "wg0")?;
     let browser_origins = origins(
         "AUTHORITY_BROWSER_ORIGINS",
@@ -343,8 +351,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         observer: Some(observer),
         verifier,
         node_id,
+        domain_id,
         interface,
         replay_ledger: Mutex::new(replay_ledger),
+        ssh_state: Mutex::new(ssh::SshState::default()),
+        actuator_slots: Arc::new(tokio::sync::Semaphore::new(4)),
         policy_state: Mutex::new(PolicyState {
             tcp: Some(tcp),
             ..PolicyState::default()
@@ -352,6 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revocations: Mutex::new(revocations),
         identity: NodeIdentity { public_key, proof },
     }));
+    ssh::initialize(&state)?;
     observation::start_monitor(state.clone());
     fence::start_monitor(state.clone());
     ssh::start(state.clone()).await?;
@@ -424,6 +436,26 @@ fn load_or_generate_identity(path: &PathBuf) -> Result<OpenSslEd25519Signer, Str
 
 #[allow(clippy::too_many_lines)] // Verification, kernel update and replay commit share a locked boundary.
 async fn apply_grant(
+    state: State<AppState>,
+    envelope: Json<SignedNetworkAccessGrantV2>,
+) -> Result<Json<ApplyResponse>, ApiError> {
+    let permit = state
+        .0
+        .0
+        .actuator_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::unavailable("actuator_busy"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        apply_grant_blocking(state, envelope)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+
+#[allow(clippy::too_many_lines)] // Kernel and replay updates form one serialized transaction.
+fn apply_grant_blocking(
     State(state): State<AppState>,
     Json(envelope): Json<SignedNetworkAccessGrantV2>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
@@ -498,7 +530,10 @@ async fn apply_grant(
             );
             Ok(())
         })
-        .map_err(ApiError::internal)?;
+        .map_err(|error| {
+            policy.uncertain_peers.insert(peer.clone());
+            ApiError::internal(error)
+        })?;
     if applied.is_none() {
         return Err(ApiError::conflict("network_grant_replayed"));
     }
@@ -508,13 +543,22 @@ async fn apply_grant(
     tokio::spawn(async move {
         tokio::time::sleep_until(expiry_deadline).await;
         loop {
-            match expire_peer_if_current(
-                &expiry_state.0.policy_state,
-                &peer,
-                &decision_id,
-                expires_at,
-                || run_wg(&["set", &interface, "peer", &peer, "remove"]),
-            ) {
+            let state_copy = expiry_state.clone();
+            let peer_copy = peer.clone();
+            let decision_copy = decision_id.clone();
+            let interface_copy = interface.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                expire_peer_if_current(
+                    &state_copy.0.policy_state,
+                    &peer_copy,
+                    &decision_copy,
+                    expires_at,
+                    || run_wg(&["set", &interface_copy, "peer", &peer_copy, "remove"]),
+                )
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()));
+            match result {
                 Ok(false) => return,
                 Ok(true) => {
                     info!(%peer, "expired WireGuard peer");
@@ -537,6 +581,26 @@ async fn apply_grant(
 
 #[allow(clippy::too_many_lines)] // Persist tombstones and withdraw all selected adapters before acknowledgment.
 async fn apply_revocation(
+    state: State<AppState>,
+    envelope: Json<SignedDecisionRevocationNoticeV2>,
+) -> Result<Json<RevokeResponse>, ApiError> {
+    let permit = state
+        .0
+        .0
+        .actuator_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::unavailable("actuator_busy"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        apply_revocation_blocking(state, envelope)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+
+#[allow(clippy::too_many_lines)] // Persist all selected tombstones before cleanup and acknowledgment.
+fn apply_revocation_blocking(
     State(state): State<AppState>,
     Json(envelope): Json<SignedDecisionRevocationNoticeV2>,
 ) -> Result<Json<RevokeResponse>, ApiError> {
@@ -619,7 +683,7 @@ async fn apply_revocation(
             .map_err(ApiError::internal)?;
     }
     drop(ledger);
-    ssh::reconcile(&state, &mut policy).map_err(ApiError::internal)?;
+    fence::reconcile(&state, &mut policy).map_err(ApiError::internal)?;
     let tcp_removed = if affects_tcp {
         policy
             .tcp
@@ -652,8 +716,14 @@ async fn apply_revocation(
     }))
 }
 
+fn bounded_command(program: &str) -> Command {
+    let mut command = Command::new("/usr/bin/timeout");
+    command.args(["--kill-after=0.2s", "1s", program]);
+    command
+}
+
 fn run_wg(arguments: &[&str]) -> Result<(), String> {
-    let output = Command::new("/usr/bin/wg")
+    let output = bounded_command("/usr/bin/wg")
         .args(arguments)
         .output()
         .map_err(|error| error.to_string())?;
@@ -664,17 +734,30 @@ fn run_wg(arguments: &[&str]) -> Result<(), String> {
     }
 }
 
+fn remove_peers(interface: &str, peers: &[String]) -> Result<(), String> {
+    if peers.is_empty() {
+        return Ok(());
+    }
+    let mut arguments = vec!["set", interface];
+    for peer in peers {
+        arguments.extend(["peer", peer.as_str(), "remove"]);
+    }
+    run_wg(&arguments)
+}
+
 fn clear_all_peers(interface: &str) -> Result<(), String> {
-    let output = Command::new("/usr/bin/wg")
+    let output = bounded_command("/usr/bin/wg")
         .args(["show", interface, "peers"])
         .output()
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
-    for peer in String::from_utf8_lossy(&output.stdout).split_whitespace() {
-        run_wg(&["set", interface, "peer", peer, "remove"])?;
-    }
+    let peers: Vec<_> = String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    remove_peers(interface, &peers)?;
     Ok(())
 }
 
@@ -723,6 +806,7 @@ fn origins(name: &str, default: &str) -> Result<Vec<HeaderValue>, String> {
     }
 }
 
+#[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -767,6 +851,25 @@ impl IntoResponse for ApiError {
 }
 
 async fn apply_tcp_grant(
+    state: State<AppState>,
+    envelope: Json<authority_contracts_model::SignedTcpAccessGrantV2>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let permit = state
+        .0
+        .0
+        .actuator_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::unavailable("actuator_busy"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        apply_tcp_grant_blocking(state, envelope)
+    })
+    .await
+    .map_err(ApiError::internal)?
+}
+
+fn apply_tcp_grant_blocking(
     State(state): State<AppState>,
     Json(envelope): Json<authority_contracts_model::SignedTcpAccessGrantV2>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -818,7 +921,10 @@ async fn apply_tcp_grant(
         .consume_with(&decision_nonce, envelope.grant.expires_at, now, || {
             tcp.apply(envelope.grant, now)
         })
-        .map_err(ApiError::internal)?;
+        .map_err(|error| {
+            policy.uncertain_tcp = true;
+            ApiError::internal(error)
+        })?;
     if applied.is_none() {
         return Err(ApiError::conflict("tcp_grant_replayed"));
     }

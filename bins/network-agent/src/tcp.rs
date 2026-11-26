@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     io::Write,
-    process::{Command, Stdio},
+    process::{Child, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -29,7 +29,7 @@ impl TcpAdmission {
         interface: &str,
         ports: authority_contracts_model::resources::PortSet,
     ) -> Result<Self, String> {
-        let exists = Command::new("/usr/sbin/nft")
+        let exists = super::bounded_command("/usr/sbin/nft")
             .args(["list", "table", "inet", "authority_tcp"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -102,7 +102,7 @@ add rule inet authority_tcp outbound oifname "{interface}" tcp sport {{ {ports_t
         Ok(())
     }
 
-    fn sync(&self) -> Result<(), String> {
+    pub(super) fn sync(&self) -> Result<(), String> {
         let now_ms = i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -193,19 +193,27 @@ fn rules_for_grants<'a>(
 }
 
 fn nft(script: &str) -> Result<(), String> {
-    let mut child = Command::new("/usr/sbin/nft")
+    let child = super::bounded_command("/usr/sbin/nft")
         .args(["-f", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| e.to_string())?;
-    let mut input = child.stdin.take().ok_or("missing nft stdin")?;
-    input
-        .write_all(script.as_bytes())
-        .map_err(|e| e.to_string())?;
-    drop(input);
+    finish_script(child, script)
+}
+
+fn finish_script(mut child: Child, script: &str) -> Result<(), String> {
+    let written = match child.stdin.take() {
+        Some(mut input) => input
+            .write_all(script.as_bytes())
+            .map_err(|error| error.to_string()),
+        None => Err("missing nft stdin".into()),
+    };
+    // Always reap, including a timeout or an early stdin close. The external
+    // deadline also bounds a child that never drains its input pipe.
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    written?;
     if output.status.success() {
         Ok(())
     } else {
@@ -225,6 +233,23 @@ mod tests {
         grant.decision_id = decision.to_owned();
         grant.expires_at = expiry;
         grant
+    }
+
+    #[test]
+    fn closed_stdin_still_reaps_the_failed_child() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exec 0<&-; exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(finish_script(child, &"x".repeat(128 * 1024)).is_err());
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "failed actuator child was not reaped"
+        );
     }
 
     #[test]

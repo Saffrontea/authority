@@ -289,13 +289,18 @@ pub fn start_monitor(state: AppState) {
                 if let Err(cause) = observer.invalidate() {
                     tracing::error!(%cause,"cannot persist endpoint observation fence");
                 }
-                if let Err(cause) = withdraw_kernel(&state) {
+                let cleanup_state = state.clone();
+                let result = tokio::task::spawn_blocking(move || withdraw_kernel(&cleanup_state))
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()));
+                if let Err(cause) = result {
                     tracing::warn!(%cause,"endpoint withdrawal will retry");
                 }
             }
         }
     });
 }
+#[allow(clippy::too_many_lines)] // One challenge owns probe, signature, acceptance and freshness fencing.
 pub async fn observe(
     State(state): State<AppState>,
     Json(signed): Json<SignedEndpointChallengeV1>,
@@ -311,6 +316,7 @@ pub async fn observe(
     if signed.validate().is_err()
         || !challenge.active(now)
         || challenge.target_node_id != state.0.node_id
+        || challenge.domain_id != state.0.domain_id
     {
         return Err(rejected());
     }
@@ -375,8 +381,12 @@ pub async fn observe(
             .sign(&observation.signing_preimage().map_err(internal)?)
             .map_err(internal)?,
     );
-    observer
-        .accept(&state, signed, observation.clone())
+    let accept_observer = observer.clone();
+    let accept_state = state.clone();
+    let report = observation.clone();
+    tokio::task::spawn_blocking(move || accept_observer.accept(&accept_state, signed, report))
+        .await
+        .map_err(internal)?
         .map_err(internal)?;
     // Give a CP clock at the slow edge of the permitted skew a strictly newer
     // issuance second than the durable fence. No previous grant can cross it.
@@ -496,7 +506,7 @@ pub fn require_tcp(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use authority_contracts_model::observation::{
         CHALLENGE_TTL, EndpointChallengeV1, OBSERVATION_AUDIENCE, ObservationResources,
@@ -553,6 +563,20 @@ mod tests {
                 fence: now - 2,
             }),
         }
+    }
+    pub(crate) fn ssh_observer(path: PathBuf) -> Observer {
+        let observer = observer(path);
+        observer
+            .support
+            .lock()
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .report
+            .facts
+            .insert(EndpointFact::SshCaTrusted);
+        observer
     }
     #[test]
     fn lost_support_is_fenced_durably_and_old_grants_do_not_return_after_repair() {
