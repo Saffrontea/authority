@@ -59,9 +59,14 @@ impl TcpResourcesV1 {
     /// # Errors
     /// A TCP grant cannot grant an empty resource product.
     pub fn validate(&self) -> Result<(), crate::ContractError> {
+        // Traffic selectors exclude unspecified, multicast and limited broadcast
+        // addresses over every represented point. A broad
+        // policy set may include these addresses; an issued ACL must not.
         for addresses in [&self.source_addresses, &self.destination_addresses] {
-            if addresses.as_host().is_some_and(|address| {
-                address.is_unspecified() || address.is_multicast() || address.is_broadcast()
+            if addresses.intervals().iter().any(|interval| {
+                interval.start == 0
+                    || interval.end == (1_u64 << 32)
+                    || (interval.start < 0xf000_0000 && interval.end > 0xe000_0000)
             }) {
                 return Err(crate::ContractError::InvalidMeshAddress);
             }
