@@ -92,8 +92,8 @@ def value_types(source):
 
 
 def scopes_source():
-    source = (ROOT / "crates/policy-core/src/scoped.rs").read_text()
-    enums = (ROOT / "crates/policy-core/src/realization.rs").read_text()
+    source = (ROOT / "crates/access-catalog/src/scoped.rs").read_text()
+    enums = (ROOT / "crates/access-catalog/src/realization.rs").read_text()
     protocol = (ROOT / "crates/contracts-model/src/protocol.rs").read_text()
     scope_declaration, _ = block(source, "pub enum AbilityScope {")
     variants = re.findall(r"^    (\w+) \{", scope_declaration, re.MULTILINE)
@@ -288,7 +288,7 @@ def constructors_source():
 
 def selected_source():
     source = (ROOT / "crates/projection-core/src/selection.rs").read_text()
-    topology = (ROOT / "crates/policy-core/src/realization.rs").read_text()
+    topology = (ROOT / "crates/access-catalog/src/realization.rs").read_text()
     planner = (ROOT / "crates/planning-core/src/lib.rs").read_text()
     declarations = []
     declaration, _ = block(topology, "pub enum AccessMechanism {")

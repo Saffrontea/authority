@@ -80,7 +80,7 @@ def verifier(install):
 
 
 def validity_source():
-    source = (ROOT / "crates/policy-core/src/scoped.rs").read_text()
+    source = (ROOT / "crates/access-catalog/src/scoped.rs").read_text()
     structs = re.findall(r"pub struct Validity \{([^{}]*)\}", source)
     if len(structs) != 1 or re.sub(r"\s+", "", structs[0]) != "pubnot_before:i64,pubexpires_at:i64,":
         raise SystemExit("Validity fields changed; update the proof extraction and specification")

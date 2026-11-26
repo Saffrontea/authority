@@ -1,12 +1,13 @@
 //! The current access catalog, separate from the protocol-independent solver.
 //!
 //! This coarse topology is instantiated with identity/resource/principal/port/time
-//! scopes by `scoped::evaluate_ability_scoped` in the production authorization path.
+//! scopes by policy-core in the production authorization path.
 //! The compatibility enums alone do not authorize adapter contract material.
 
-use std::collections::BTreeSet;
+use crate::scoped::{NetworkResources, ScopedAbility};
+use std::collections::{BTreeMap, BTreeSet};
 
-use authority_planning_core::{Mechanism, Model, Plan, PlanningError, Request, solve};
+use authority_planning_core::{Derivation, Mechanism, Model, Plan, PlanningError, Request, solve};
 
 use serde::{Deserialize, Serialize};
 
@@ -155,7 +156,8 @@ pub fn endpoint_facts() -> BTreeSet<EndpointFact> {
     ])
 }
 
-pub(crate) fn conditional_catalog(
+#[must_use]
+pub fn conditional_catalog(
     route: Route,
 ) -> authority_planning_core::ConditionalModel<Ability, AccessMechanism, EndpointFact> {
     use authority_planning_core::{Conditional, ConditionalModel, Derivation};
@@ -251,6 +253,66 @@ pub(crate) fn conditional_catalog(
     }
 }
 
-pub(crate) fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
+#[must_use]
+pub fn catalog(route: Route) -> Model<Ability, AccessMechanism> {
     conditional_catalog(route).instantiate(&endpoint_facts())
+}
+
+/// Instantiate supported scoped hyperedges from the current observation.
+#[must_use]
+pub fn instantiate(
+    route: Route,
+    abilities: &BTreeMap<Ability, ScopedAbility>,
+    resources: &NetworkResources,
+) -> Model<ScopedAbility, AccessMechanism> {
+    let catalog = conditional_catalog(route).instantiate(&resources.environment);
+    let scope = |kinds: &BTreeSet<Ability>| {
+        kinds
+            .iter()
+            .map(|kind| abilities.get(kind).cloned())
+            .collect::<Option<BTreeSet<_>>>()
+    };
+    Model {
+        mechanisms: catalog
+            .mechanisms
+            .into_iter()
+            .filter_map(|edge| {
+                if edge.id == AccessMechanism::TcpAdmission
+                    && let Some(envelope) = &resources.observation
+                {
+                    let ability = abilities.get(&Ability::TcpAdmission)?;
+                    let tcp = ability.scope.tcp_resources()?;
+                    if !tcp
+                        .destination_ports
+                        .is_subset(&envelope.observation.tcp_ports)
+                    {
+                        return None;
+                    }
+                }
+                Some(Mechanism {
+                    id: edge.id,
+                    requires: scope(&edge.requires)?,
+                    provides: scope(&edge.provides)?,
+                })
+            })
+            .collect(),
+        derivations: catalog
+            .derivations
+            .into_iter()
+            .filter_map(|edge| {
+                let requires = scope(&edge.requires)?;
+                let provides = scope(&edge.provides)?;
+                if !provides.iter().all(|output| {
+                    requires.iter().all(|input| {
+                        input.binding == output.binding && input.validity.contains(output.validity)
+                    }) && requires
+                        .iter()
+                        .any(|input| input.scope.effective() == output.scope)
+                }) {
+                    return None;
+                }
+                Some(Derivation { requires, provides })
+            })
+            .collect(),
+    }
 }

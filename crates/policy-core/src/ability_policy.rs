@@ -25,210 +25,67 @@ pub enum PermissionError {
     PartitionBudget,
 }
 
-fn atoms(scope: &AbilityScope) -> Vec<AbilityScope> {
-    match scope {
-        AbilityScope::SshCredential { principals, .. }
-        | AbilityScope::SshSession { principals, .. } => principals
-            .iter()
-            .map(|principal| {
-                let mut atom = scope.clone();
-                match &mut atom {
-                    AbilityScope::SshCredential { principals, .. }
-                    | AbilityScope::SshSession { principals, .. } => {
-                        *principals = BTreeSet::from([principal.clone()]);
-                    }
-                    _ => unreachable!(),
-                }
-                atom
-            })
-            .collect(),
-        _ => vec![scope.clone()],
-    }
-}
-
-/// Authorize the entire requested interval and scope, returning every winning
-/// policy needed as evidence. A narrow deny cannot disappear behind a broad allow.
-/// At equal priority, any matching deny overrides all allows. Revisions identify
-/// a version of ONE policy; they never rank different policies. Policy IDs only
-/// select deterministic provenance among rules with the same priority/effect.
-/// Rules are supplied from one authenticated, locked policy snapshot.
+/// Authorize an entire symbolic product. At equal priority deny wins;
+/// policy revisions identify provenance and never rank independent policies.
 ///
 /// # Errors
-/// Rejects invalid inputs, any uncovered atom/time segment, or a winning deny.
+/// Rejects invalid, uncovered or denied authority, including algebra budgets.
 pub fn authorize(
     requested: &ScopedAbility,
     rules: &[AbilityRule],
 ) -> Result<BTreeSet<PolicyRef>, PermissionError> {
-    if !requested.contains(requested) {
-        return Err(PermissionError::InvalidRequest);
-    }
-    if rules
+    use authority_access_catalog::algebra::authority;
+    use authority_planning_core::authority::{self as kernel, Error, Rule};
+    let (identity, region) = authority(requested).map_err(|_| PermissionError::InvalidRequest)?;
+    let rules = rules
         .iter()
-        .any(|rule| rule.policy.revision < 1 || !rule.authority.contains(&rule.authority))
-    {
-        return Err(PermissionError::InvalidRule);
-    }
-    if let Some(region) = resource_region(requested) {
-        let mut symbolic = Vec::new();
-        for rule in rules {
-            if same_resource_identity(requested, &rule.authority) {
-                symbolic.push(crate::resources::RegionRule {
-                    policy: rule.policy,
-                    priority: rule.priority,
-                    effect: rule.effect,
-                    region: resource_region(&rule.authority).ok_or(PermissionError::InvalidRule)?,
-                });
+        .map(|rule| {
+            if rule.policy.revision < 1 {
+                return Err(PermissionError::InvalidRule);
             }
-        }
-        return crate::resources::authorize(&region, &symbolic, crate::resources::MAX_INTERVALS);
-    }
-    let authorities: Vec<_> = rules.iter().map(|rule| &rule.authority).collect();
-    let mut sources = BTreeSet::new();
-    for atom in fragments(requested, &authorities).map_err(|_| PermissionError::PartitionBudget)? {
-        let winner = rules
-            .iter()
-            .filter(|rule| rule.authority.contains(&atom))
-            .max_by_key(|rule| {
-                (
-                    rule.priority,
-                    rule.effect == Effect::Deny,
-                    rule.policy.policy_id,
-                )
+            let (identity, space) =
+                authority(&rule.authority).map_err(|_| PermissionError::InvalidRule)?;
+            Ok(Rule {
+                identity,
+                space,
+                priority: rule.priority,
+                deny: rule.effect == Effect::Deny,
+                order: rule.policy.policy_id,
+                provenance: rule.policy,
             })
-            .ok_or(PermissionError::Uncovered)?;
-        if winner.effect == Effect::Deny {
-            return Err(PermissionError::ExplicitDeny(winner.policy));
-        }
-        sources.insert(winner.policy);
-    }
-    Ok(sources)
+        })
+        .collect::<Result<Vec<_>, PermissionError>>()?;
+    kernel::authorize(&identity, &region, &rules, crate::resources::MAX_INTERVALS).map_err(
+        |error| match error {
+            Error::Denied(policy) => PermissionError::ExplicitDeny(policy),
+            Error::Uncovered => PermissionError::Uncovered,
+            Error::Invalid => PermissionError::InvalidRule,
+            Error::Algebra | Error::Budget => PermissionError::PartitionBudget,
+        },
+    )
 }
 
-fn same_resource_identity(left: &ScopedAbility, right: &ScopedAbility) -> bool {
-    left.binding == right.binding
-        && left.scope.kind() == right.scope.kind()
-        && resource_region(right).is_some()
-}
-
-fn resource_region(ability: &ScopedAbility) -> Option<crate::resources::Region<4>> {
-    use crate::resources::{Interval, IntervalSet, Region};
-    let (source, destination, ports) = match &ability.scope {
-        AbilityScope::TcpAdmission {
-            source,
-            destination,
-            ports,
-        }
-        | AbilityScope::TcpConnection {
-            source,
-            destination,
-            ports,
-        } => (source, destination, ports.as_set().clone()),
-        AbilityScope::NetworkRouteAuthorization {
-            source,
-            destination,
-        }
-        | AbilityScope::NetworkReachability {
-            source,
-            destination,
-        } => (
-            source,
-            destination,
-            IntervalSet::new(vec![Interval { start: 0, end: 1 }]).ok()?,
-        ),
-        _ => return None,
-    };
-    Some(Region([
-        source.as_set().clone(),
-        destination.as_set().clone(),
-        ports,
-        IntervalSet::new(vec![Interval {
-            start: u64::try_from(ability.validity.not_before).ok()?,
-            end: u64::try_from(ability.validity.expires_at).ok()?,
-        }])
-        .ok()?,
-    ]))
-}
-
-// Resource/time partitioning is shared by permission evaluation and authority order.
-// The current finite port/principal representation is deliberately bounded.
-fn fragments(
-    requested: &ScopedAbility,
-    authorities: &[&ScopedAbility],
-) -> Result<Vec<ScopedAbility>, crate::resources::ResourceError> {
-    let mut boundaries =
-        BTreeSet::from([requested.validity.not_before, requested.validity.expires_at]);
-    for authority in authorities {
-        if authority.binding == requested.binding
-            && authority.scope.kind() == requested.scope.kind()
-        {
-            for boundary in [authority.validity.not_before, authority.validity.expires_at] {
-                if requested.validity.not_before < boundary
-                    && boundary < requested.validity.expires_at
-                {
-                    boundaries.insert(boundary);
-                }
-            }
-        }
-    }
-    let boundaries: Vec<_> = boundaries.into_iter().collect();
-    let mut fragments = Vec::new();
-    for scope in atoms(&requested.scope) {
-        for interval in boundaries.windows(2) {
-            if fragments.len() >= crate::resources::MAX_INTERVALS {
-                return Err(crate::resources::ResourceError::Budget);
-            }
-            fragments.push(ScopedAbility {
-                binding: requested.binding,
-                validity: Validity {
-                    not_before: interval[0],
-                    expires_at: interval[1],
-                },
-                scope: scope.clone(),
-            });
-        }
-    }
-    Ok(fragments)
-}
-
-/// Semantic inclusion of unions, including split resource sets and adjacent time intervals.
-/// Kinds without an explicit containment relation remain incomparable.
+/// Exact semantic inclusion of unions, with no resource-point enumeration.
 #[must_use]
 pub fn authority_leq(left: &BTreeSet<ScopedAbility>, right: &BTreeSet<ScopedAbility>) -> bool {
     authority_leq_checked(left, right).unwrap_or(false)
 }
 
 /// # Errors
-/// Exact inclusion; callers must reject the whole selection on budget failure.
+/// Callers must reject the whole selection on invalid scope or budget failure.
 pub fn authority_leq_checked(
     left: &BTreeSet<ScopedAbility>,
     right: &BTreeSet<ScopedAbility>,
 ) -> Result<bool, crate::resources::ResourceError> {
-    use crate::resources::{MAX_INTERVALS, ResourceError, uncovered};
-    let cover: Vec<_> = right.iter().collect();
-    for requested in left {
-        if !requested.contains(requested) || right.iter().any(|r| !r.contains(r)) {
-            return Err(ResourceError::Invalid);
-        }
-        if right.iter().any(|r| r.contains(requested)) {
-            continue;
-        }
-        if let Some(region) = resource_region(requested) {
-            let cover: Vec<_> = right
-                .iter()
-                .filter(|r| same_resource_identity(requested, r))
-                .filter_map(resource_region)
-                .collect();
-            if !uncovered(&region, &cover, MAX_INTERVALS)?.is_empty() {
-                return Ok(false);
-            }
-        } else if !fragments(requested, &cover)?
-            .iter()
-            .all(|part| right.iter().any(|r| r.contains(part)))
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    use crate::resources::{MAX_INTERVALS, ResourceError};
+    use authority_access_catalog::algebra::authority;
+    use authority_planning_core::authority::{Error, covered};
+    let left = left.iter().map(authority).collect::<Result<Vec<_>, _>>()?;
+    let right = right.iter().map(authority).collect::<Result<Vec<_>, _>>()?;
+    covered(&left, &right, MAX_INTERVALS).map_err(|error| match error {
+        Error::Invalid => ResourceError::Invalid,
+        _ => ResourceError::Budget,
+    })
 }
 
 /// Key choice is explicit policy: request possession or an exact pinned key.

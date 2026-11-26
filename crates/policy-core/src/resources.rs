@@ -20,6 +20,7 @@ pub fn authorize<const N: usize>(
     budget: usize,
 ) -> Result<std::collections::BTreeSet<crate::PolicyRef>, crate::ability_policy::PermissionError> {
     use crate::{Effect, ability_policy::PermissionError};
+    use authority_planning_core::authority::{self as kernel, Error, Rule};
     if requested.is_empty() {
         return Err(PermissionError::InvalidRequest);
     }
@@ -29,44 +30,43 @@ pub fn authorize<const N: usize>(
     {
         return Err(PermissionError::InvalidRule);
     }
-    if budget == 0 || rules.len() > budget {
-        return Err(PermissionError::PartitionBudget);
-    }
-    let mut ranked: Vec<_> = rules.iter().collect();
-    ranked.sort_by_key(|r| {
-        std::cmp::Reverse((r.priority, r.effect == Effect::Deny, r.policy.policy_id))
-    });
-    let mut remaining = vec![requested.clone()];
-    let mut work = budget.saturating_mul(64);
-    let mut policies = std::collections::BTreeSet::new();
-    for rule in ranked {
-        let mut next = Vec::new();
-        for region in remaining {
-            work = work
-                .checked_sub(region.operation_cost(&rule.region))
-                .ok_or(PermissionError::PartitionBudget)?;
-            if !region
-                .intersection(&rule.region)
-                .map_err(|_| PermissionError::PartitionBudget)?
-                .is_empty()
-            {
-                if rule.effect == Effect::Deny {
-                    return Err(PermissionError::ExplicitDeny(rule.policy));
-                }
-                policies.insert(rule.policy);
-            }
-            let pieces = region
-                .difference(&rule.region)
-                .map_err(|_| PermissionError::PartitionBudget)?;
-            if next.len().saturating_add(pieces.len()) > budget {
-                return Err(PermissionError::PartitionBudget);
-            }
-            next.extend(pieces);
+    let rules = rules
+        .iter()
+        .map(|rule| Rule {
+            identity: (),
+            space: NumericSpace(rule.region.clone()),
+            priority: rule.priority,
+            deny: rule.effect == Effect::Deny,
+            order: rule.policy.policy_id,
+            provenance: rule.policy,
+        })
+        .collect::<Vec<_>>();
+    kernel::authorize(&(), &NumericSpace(requested.clone()), &rules, budget).map_err(|error| {
+        match error {
+            Error::Denied(policy) => PermissionError::ExplicitDeny(policy),
+            Error::Uncovered => PermissionError::Uncovered,
+            Error::Invalid => PermissionError::InvalidRule,
+            Error::Algebra | Error::Budget => PermissionError::PartitionBudget,
         }
-        remaining = next;
-        if remaining.is_empty() {
-            return Ok(policies);
-        }
+    })
+}
+
+#[derive(Clone)]
+struct NumericSpace<const N: usize>(Region<N>);
+impl<const N: usize> authority_planning_core::authority::Space for NumericSpace<N> {
+    type Error = ResourceError;
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
-    Err(PermissionError::Uncovered)
+    fn intersection(&self, other: &Self) -> Result<Self, ResourceError> {
+        self.0.intersection(&other.0).map(Self)
+    }
+    fn difference(&self, other: &Self) -> Result<Vec<Self>, ResourceError> {
+        self.0
+            .difference(&other.0)
+            .map(|pieces| pieces.into_iter().map(Self).collect())
+    }
+    fn operation_cost(&self, other: &Self) -> usize {
+        self.0.operation_cost(&other.0)
+    }
 }

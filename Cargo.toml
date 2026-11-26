@@ -5,6 +5,7 @@ members = [
   "bins/node-agent",
   "bins/network-agent",
   "bins/mtls-service",
+  "crates/access-catalog",
   "crates/contracts-model",
   "crates/device-auth-core",
   "crates/credential-crypto-openssl",
@@ -23,6 +24,7 @@ license = "Apache-2.0"
 rust-version = "1.98"
 
 [workspace.dependencies]
+authority-access-catalog = { path = "crates/access-catalog" }
 authority-mtls-core = { path = "crates/mtls-core" }
 authority-contracts-model = { path = "crates/contracts-model" }
 authority-device-auth-core = { path = "crates/device-auth-core" }

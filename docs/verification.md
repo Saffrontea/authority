@@ -103,7 +103,7 @@ the task. It never silently skips a proof.
 
 `formal/verus/validity.rs` is a proof template. The checker extracts the exact
 `Validity` fields/types and the complete `Validity::contains` expression from
-`crates/policy-core/src/scoped.rs`, then injects both into the proof. It checks the
+`crates/access-catalog/src/scoped.rs`, then injects both into the proof. It checks the
 expression for equality with the mathematical integer interval predicate and
 proves that a contained interval cannot have a longer duration. This covers all
 `i64` endpoints, including invalid/negative/overflow-edge intervals, without
