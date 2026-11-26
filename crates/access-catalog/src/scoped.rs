@@ -340,7 +340,7 @@ impl ScopedAbility {
 pub struct NetworkResources {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation:
-        Option<Box<authority_contracts_model::observation::SignedEndpointObservationV2>>,
+        Option<Box<authority_contracts_model::observation::SignedEndpointObservationV3>>,
     pub source_address: Ipv4Addr,
     pub target_address: Ipv4Addr,
     pub registered_wireguard_key: String,

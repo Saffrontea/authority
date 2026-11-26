@@ -4,6 +4,7 @@ import base64
 import glob
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,36 @@ def managed_tcp_ports(layout):
         raise ValueError('TCP admission predicates disagree')
     return predicates[0]
 
+def tcp_coverage(interface, resources, ports):
+    """ACL coverage on an observed interface, not a claim that every host is live.
+
+    Sources must be in directly connected kernel routes; destinations must be
+    addresses actually assigned on that interface. Never infer coverage from
+    the challenge's desired ranges or from an administrator supplied prefix.
+    """
+    links = json.loads(run('/usr/sbin/ip', '-j', 'address', 'show', 'dev', interface))
+    if len(links) != 1 or 'UP' not in links[0]['flags']:
+        raise ValueError('TCP interface is not active')
+    destinations = [ipaddress.ip_network(i['local'] + '/32') for i in links[0]['addr_info'] if i['family'] == 'inet']
+    routes = json.loads(run('/usr/sbin/ip', '-j', '-4', 'route', 'show', 'dev', interface, 'scope', 'link'))
+    sources = [ipaddress.ip_network(r['dst']) for r in routes if r.get('type', 'unicast') == 'unicast' and 'dst' in r and r['dst'] != 'default' and not r.get('gateway')]
+    def canonical(networks):
+        result = []
+        for network in sorted(ipaddress.collapse_addresses(networks)):
+            first, end = int(network.network_address), int(network.broadcast_address) + 1
+            if first == 0 or end == 2**32 or first < 0xf0000000 and end > 0xe0000000:
+                raise ValueError('special addresses in observed TCP coverage')
+            if result and first <= result[-1]['end']:
+                result[-1]['end'] = max(result[-1]['end'], end)
+            else:
+                result.append({'start': first, 'end': end})
+        if not result or len(result) > 4096:
+            raise ValueError('empty or oversized observed TCP coverage')
+        return result
+    if not any(ipaddress.ip_address(resources['source']) in n for n in sources) or not any(ipaddress.ip_address(resources['target']) in n for n in destinations):
+        raise ValueError('challenge outside observed TCP coverage')
+    return {'source_addresses': canonical(sources), 'destination_addresses': canonical(destinations), 'destination_ports': ports}
+
 def ssh_probe(resources):
     receipt = json.loads(RECEIPT.read_text())
     if receipt['files'] != ssh_files() or receipt['process'] != process('ssh.service'):
@@ -187,7 +218,7 @@ def probe(request):
         layout = nft_layout()
         if layout != request['nft_layout']:
             raise ValueError('kernel admission layout changed since initialization')
-        managed_tcp_ports(layout)  # Exact checked range coverage, not a fact flag.
+        tcp_coverage(request['interface'], resources, managed_tcp_ports(layout))
         return layout
     check('tcp_enforcement', tcp)
     def route():
@@ -205,7 +236,8 @@ def probe(request):
     if 'mesh_route_configured' in facts:
         facts.append('existing_route_configured')
     ports = managed_tcp_ports(evidence['tcp_enforcement']) if 'tcp_enforcement' in facts else []
-    return {'facts': facts, 'tcp_ports': ports, 'configuration_sha256': digest(evidence), 'probe_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'errors': errors}
+    coverage = tcp_coverage(request['interface'], resources, ports) if ports else {'source_addresses': [], 'destination_addresses': [], 'destination_ports': []}
+    return {'facts': facts, 'tcp_resources': coverage, 'configuration_sha256': digest(evidence), 'probe_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), 'errors': errors}
 
 if __name__ == '__main__':
     mode = sys.argv[1]

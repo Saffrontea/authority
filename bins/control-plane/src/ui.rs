@@ -6,7 +6,7 @@ use axum::{
 
 use crate::state::AppState;
 
-const CSP_SCRIPT_HASH: &str = "S5x9Qp3/wXRT+tIjD5lCmxQ+TMzKvQXvVeTeUUwUG5g=";
+const CSP_SCRIPT_HASH: &str = "rC4LP1CYKfiLlhJ9qr/GDkD6oA0Z2D9iVh5u77O3u3E=";
 
 pub async fn index(State(state): State<AppState>) -> Response {
     let mut headers = HeaderMap::new();

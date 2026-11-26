@@ -626,8 +626,8 @@ test_resource_range() {
 BEGIN;
 INSERT INTO policy.ability_policies(id,domain_id,subject_user_id,required_device_id,target_node_id,selector,effect,priority)
 SELECT gen_random_uuid(), :'domain'::uuid, :'subject'::uuid, :'device'::uuid, :'target'::uuid,
- jsonb_build_object('kind',kind,'source',jsonb_build_array(jsonb_build_object('start',172818433,'end',172818434)),
- 'destination',jsonb_build_array(jsonb_build_object('start',172818434,'end',172818435)),
+ jsonb_build_object('kind',kind,'source',jsonb_build_array(jsonb_build_object('start',172818432,'end',172818436)),
+ 'destination',jsonb_build_array(jsonb_build_object('start',172818434,'end',172818438)),
  'ports',jsonb_build_array(jsonb_build_object('start',8080,'end',8181))), 'allow', 0
 FROM unnest(ARRAY['tcp_admission_range','tcp_connection_range']) AS kinds(kind);
 COMMIT;

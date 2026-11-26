@@ -402,7 +402,14 @@ impl PlanEvidence {
     ) -> bool {
         if let Some(envelope) = &resources.observation {
             let observation = &envelope.observation;
-            if self.abilities.iter().any(|a|matches!(&a.ability.scope,crate::scoped::AbilityScope::TcpAdmission{ports,..}|crate::scoped::AbilityScope::TcpConnection{ports,..} if !ports.is_subset(&observation.tcp_ports))) {return false;}
+            if self.abilities.iter().any(|a| {
+                a.ability
+                    .scope
+                    .tcp_resources()
+                    .is_some_and(|tcp| !tcp.is_subset(&observation.tcp_resources))
+            }) {
+                return false;
+            }
             if self.abilities.iter().any(|a|a.ability.validity.expires_at>observation.expires_at
                 || matches!(&a.ability.scope,crate::scoped::AbilityScope::SshCredential{principals,..}|crate::scoped::AbilityScope::SshSession{principals,..}
                     if principals.iter().any(|p|p!=&observation.challenge.resources.principal))) {return false;}
@@ -486,19 +493,20 @@ fn scope_matches_resources(
         | AbilityScope::NetworkRouteAuthorization {
             source,
             destination,
-        }
-        | AbilityScope::TcpAdmission {
-            source,
-            destination,
-            ..
-        }
-        | AbilityScope::TcpConnection {
-            source,
-            destination,
-            ..
         } => {
             *source == resources.source_address.into()
                 && *destination == resources.target_address.into()
+        }
+        AbilityScope::TcpAdmission { .. } | AbilityScope::TcpConnection { .. } => {
+            let Some(tcp) = scope.tcp_resources() else {
+                return false;
+            };
+            if let Some(envelope) = &resources.observation {
+                tcp.is_subset(&envelope.observation.tcp_resources)
+            } else {
+                tcp.source_addresses == resources.source_address.into()
+                    && tcp.destination_addresses == resources.target_address.into()
+            }
         }
         AbilityScope::ServiceIdentity {
             identity_uri,

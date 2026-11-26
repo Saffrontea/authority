@@ -56,6 +56,18 @@ pub struct TcpResourcesV1 {
     pub destination_ports: PortSet,
 }
 impl TcpResourcesV1 {
+    /// Every traffic selector must fit observed actuator coverage.
+    #[must_use]
+    pub fn is_subset(&self, coverage: &Self) -> bool {
+        self.source_addresses.is_subset(&coverage.source_addresses)
+            && self
+                .destination_addresses
+                .is_subset(&coverage.destination_addresses)
+            && self
+                .destination_ports
+                .is_subset(&coverage.destination_ports)
+    }
+
     /// # Errors
     /// A TCP grant cannot grant an empty resource product.
     pub fn validate(&self) -> Result<(), crate::ContractError> {

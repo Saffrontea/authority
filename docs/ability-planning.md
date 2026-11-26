@@ -52,6 +52,23 @@ are trusted application definitions, not supplied by the requesting client.
 Only monotone effects are supported. Deletions, runtime enforcement success, and
 mutable external facts require other validation or a richer transition model.
 
+## Resource algebra and catalog boundary
+
+`planning-core::authority` resolves policy precedence and union inclusion over
+caller-defined spaces. Its `Domain` and `Space` interfaces require exact
+intersection, difference, emptiness, and bounded operation cost. `Product`
+subtracts whole axes without expanding addresses, ports, time, or principals.
+One work budget covers a comparison; failures reject the complete selection.
+Policy revision is provenance, while precedence is priority, deny, then rule ID.
+
+`authority-access-catalog` owns the protocol vocabulary, conditional topology,
+scoped access types, and conversion to numeric/symbolic products. Policy-core
+supplies identity checks and locked policy snapshots to the generic engine.
+A new resource domain or a different catalog can use that engine without adding
+TCP/SSH branches to it. The queue namespace/action tests exercise this boundary
+with an independent point oracle. Current wire contracts and projections remain
+adapter specific; adding an adapter still requires its actual implementation.
+
 ## Current access integration
 
 The current catalog distinguishes direct authority from its usable effect:
@@ -142,10 +159,10 @@ including malformed inactive deny rows. Existing capability-policy rows are not
 converted or consulted by production. The capability evaluator remains a separate
 coarse model used by its own tests.
 
-For each requested ability, policy precedence is resolved independently for every
-port/principal and every interval between policy boundaries: highest priority,
+For each requested ability, policy precedence is resolved by exact symbolic
+product subtraction over resources and time: highest priority,
 then deny over allow, then policy ID. Revisions identify versions of a single
-policy and are never compared across policies. All requested atoms and time segments
+policy and are never compared across policies. The complete requested product
 must be allowed. Multiple rules can cover disjoint scope or time segments. A deny
 on one port cannot silently disappear behind a broad allow. Direct permission
 does not grant the corresponding derived authority. The entire graph is compiled
@@ -312,13 +329,13 @@ an entire policy snapshot, or guarantee runtime transport availability. Deserial
 planning evidence cannot construct the immutable `AuthorizedPlan` accepted by
 production projection.
 
-## Next extension
+## Further deployment work
 
-Persist authenticated enforcement observations and seed the solver with live roots;
-record their provenance in replay evidence, project only new grants, and publish
-dependent invalidations atomically. Environment declarations still need persisted
-source/revision/expiry metadata. Wildcard resources, CIDR containment, dynamic route
-discovery and mixed per-service routing are not modeled.
+Signed, expiring observations and symbolic CIDR/port coverage are implemented.
+The current discovery profile covers one managed WireGuard interface and its
+local addresses/direct routes. Arbitrary routed destinations, IPv6, mixed
+per-service routing and multi-context support stores need additional observed
+coverage providers and adapters. None are inferred from an allow policy.
 
 ## Validation
 

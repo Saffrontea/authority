@@ -408,13 +408,29 @@
       return result;
     }
 
+    function ipv4Intervals(input) {
+      if (input == null) return null;
+      if (!Array.isArray(input) || !input.length || input.length > 4096) throw new Error('Choose a bounded IPv4 range.');
+      const result = [];
+      for (const value of input) {
+        if (!value || Object.keys(value).sort().join(',') !== 'end,start') throw new Error('Invalid IPv4 interval.');
+        const { start, end } = value;
+        if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= end || end > 4294967296) throw new Error('Invalid IPv4 interval bounds.');
+        if (result.length && result[result.length - 1].end >= start) throw new Error('IPv4 intervals must be sorted, disjoint and nonadjacent.');
+        // Device proof bindings use the contract's field order, regardless of
+        // the caller's object insertion order (including WebDriver objects).
+        result.push({ start, end });
+      }
+      return result;
+    }
+
     window.authorityRequestTcpAuthorization = async function (ports, includeNetwork = false, ttlSeconds = 10, automaticRoute = false, addresses = {}) {
       ports = tcpPortIntervals(ports);
       const access = JSON.parse(sessionStorage.getItem('authority-demo-access') ?? 'null');
       const sessionToken = sessionStorage.getItem('authority-session');
       if (!access || !sessionToken) throw new Error('TCP authorization prerequisites are missing.');
       const body = { device_id: access.device_id, target_node_id: access.target_node_id,
-        destination_ports: ports, source_addresses: addresses.source_addresses ?? null, destination_addresses: addresses.destination_addresses ?? null, include_network: includeNetwork, ttl_seconds: ttlSeconds };
+        destination_ports: ports, source_addresses: ipv4Intervals(addresses.source_addresses), destination_addresses: ipv4Intervals(addresses.destination_addresses), include_network: includeNetwork, ttl_seconds: ttlSeconds };
       const bindings = [body.device_id, body.target_node_id, JSON.stringify(ports), String(includeNetwork), String(ttlSeconds), JSON.stringify(body.source_addresses), JSON.stringify(body.destination_addresses)];
       if (automaticRoute) {
         if (includeNetwork) throw new Error('Choose automatic routing or an explicit network grant.');

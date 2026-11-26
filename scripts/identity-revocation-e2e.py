@@ -86,6 +86,17 @@ with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
             with socket.create_connection((client,port),timeout=2) as stream:
                 echo(stream)
         subprocess.run([str(root / 'scripts/authority-agent.sh'),'run','_mesh:test-tcp-range-present'],check=True,stdout=subprocess.DEVNULL)
+        addresses = {'source_addresses': [{'start': 172818432, 'end': 172818436}],
+                     'destination_addresses': [{'start': 172818434, 'end': 172818436}]}
+        cidr = browser('window.authorityRequestTcpAuthorization([8080],false,30,false,arguments[0]).then(value=>done({value})).catch(e=>done({error:e.message}));', [addresses])
+        for key, value in addresses.items():
+            assert cidr['tcp_grant']['grant']['resources'][key] == value
+        http(agent + '/v1/tcp-grants', cidr['tcp_grant'])
+        subprocess.run([str(root / 'scripts/authority-agent.sh'),'run','_mesh:test-tcp-cidr-live'],check=True,stdout=subprocess.DEVNULL)
+        outside = {**addresses, 'destination_addresses': [{'start': 172818434, 'end': 172818437}]}
+        rejected = browser('window.authorityRequestTcpAuthorization([8080],false,10,false,arguments[0]).then(()=>done({value:false})).catch(()=>done({value:true}));', [outside])
+        assert rejected, 'unobserved CIDR address was authorized'
+        print('CIDR authorization: signed observed coverage, solver selection, evidence replay, projection and both real destination addresses verified',flush=True)
         denied = browser('window.authorityRequestTcpAuthorization(["8080-8181"],false,10).then(()=>done({value:false})).catch(()=>done({value:true}));')
         assert denied, 'unattested port range was authorized'
         automatic = browser('window.authorityRequestTcpAuthorization([8080],false,10,true).then(value=>done({value})).catch(e=>done({error:e.message}));')

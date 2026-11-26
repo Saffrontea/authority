@@ -2,7 +2,7 @@
 use crate::state::AppState;
 use authority_contracts_model::observation::{
     CHALLENGE_TTL, EndpointChallengeV1, OBSERVATION_AUDIENCE, ObservationResources,
-    SignedEndpointChallengeV1, SignedEndpointObservationV2,
+    SignedEndpointChallengeV1, SignedEndpointObservationV3,
 };
 use authority_credential_crypto_openssl::verify_device_signature;
 use authority_device_auth_core::{decode_signature, encode_base64url};
@@ -232,7 +232,7 @@ pub async fn refresh(
 async fn fetch(
     state: &AppState,
     signed: &SignedEndpointChallengeV1,
-) -> Result<SignedEndpointObservationV2, String> {
+) -> Result<SignedEndpointObservationV3, String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -257,7 +257,7 @@ async fn fetch(
         }
         bytes.extend(chunk);
     }
-    let envelope: SignedEndpointObservationV2 =
+    let envelope: SignedEndpointObservationV3 =
         serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     Ok(envelope)
 }
@@ -276,7 +276,7 @@ async fn abort(state: &AppState, node: Uuid, revision: i64) {
 pub(crate) async fn publish(
     state: &AppState,
     challenge: &EndpointChallengeV1,
-    envelope: &SignedEndpointObservationV2,
+    envelope: &SignedEndpointObservationV3,
 ) -> Result<(), String> {
     let mut tx = crate::access_policy::begin_authorization(state.pool())
         .await
@@ -320,7 +320,7 @@ pub(crate) async fn publish(
 }
 
 pub fn verify(
-    envelope: &SignedEndpointObservationV2,
+    envelope: &SignedEndpointObservationV3,
     key: &[u8; 32],
     challenge: &EndpointChallengeV1,
     clock: i64,
@@ -343,11 +343,11 @@ pub fn verify(
 pub(crate) fn snapshot(
     row: &sqlx::postgres::PgRow,
     request: &authority_policy_core::AccessRequest,
-) -> Result<SignedEndpointObservationV2, String> {
+) -> Result<SignedEndpointObservationV3, String> {
     use authority_contracts_model::observation::{
-        EndpointChallengeV1, SignedEndpointObservationV2,
+        EndpointChallengeV1, SignedEndpointObservationV3,
     };
-    let envelope: SignedEndpointObservationV2 = serde_json::from_value(
+    let envelope: SignedEndpointObservationV3 = serde_json::from_value(
         row.try_get::<serde_json::Value, _>("observation")
             .map_err(|e| e.to_string())?,
     )
@@ -396,10 +396,10 @@ pub(crate) fn snapshot(
 mod tests {
     use super::*;
     use authority_contracts_model::observation::{
-        EndpointFact, EndpointObservationV2, OBSERVATION_TTL,
+        EndpointFact, EndpointObservationV3, OBSERVATION_TTL,
     };
     use authority_credential_crypto_openssl::OpenSslEd25519Signer;
-    fn fixture() -> (OpenSslEd25519Signer, SignedEndpointObservationV2) {
+    fn fixture() -> (OpenSslEd25519Signer, SignedEndpointObservationV3) {
         let key = OpenSslEd25519Signer::generate("node-test").unwrap();
         let challenge = EndpointChallengeV1 {
             version: 1,
@@ -419,8 +419,13 @@ mod tests {
                 service_audience: "demo-api".into(),
             },
         };
-        let observation = EndpointObservationV2 {
-            tcp_ports: authority_contracts_model::resources::PortSet::range(8080, 8081).unwrap(),
+        let observation = EndpointObservationV3 {
+            tcp_resources: authority_contracts_model::resources::TcpResourcesV1 {
+                source_addresses: "10.77.0.1".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                destination_addresses: "10.77.0.2".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                destination_ports: authority_contracts_model::resources::PortSet::range(8080, 8081)
+                    .unwrap(),
+            },
             challenge,
             boot_id: "boot-test".into(),
             observed_at: 101,
@@ -436,7 +441,7 @@ mod tests {
             encode_base64url(&key.sign(&observation.signing_preimage().unwrap()).unwrap());
         (
             key,
-            SignedEndpointObservationV2 {
+            SignedEndpointObservationV3 {
                 observation,
                 signature,
             },
@@ -497,7 +502,7 @@ mod tests {
         assert!(verify(&original, &public, &challenge, 98).is_err());
         let mut json = serde_json::to_value(&original).unwrap();
         json["observation"]["facts"] = serde_json::json!(["future_fact"]);
-        assert!(serde_json::from_value::<SignedEndpointObservationV2>(json).is_err());
+        assert!(serde_json::from_value::<SignedEndpointObservationV3>(json).is_err());
     }
 }
 
@@ -506,7 +511,7 @@ mod postgres_tests {
     use super::*;
     use crate::state::EnrollmentConfig;
     use authority_contracts_model::observation::{
-        EndpointFact, EndpointObservationV2, OBSERVATION_TTL,
+        EndpointFact, EndpointObservationV3, OBSERVATION_TTL,
     };
     use authority_credential_crypto_openssl::OpenSslEd25519Signer;
     struct Fixture {
@@ -514,7 +519,7 @@ mod postgres_tests {
         node: Uuid,
         device: Uuid,
         key: OpenSslEd25519Signer,
-        report: SignedEndpointObservationV2,
+        report: SignedEndpointObservationV3,
     }
     impl Fixture {
         async fn new() -> Self {
@@ -581,9 +586,15 @@ mod postgres_tests {
                     service_audience: "demo-api".into(),
                 },
             };
-            let observation = EndpointObservationV2 {
-                tcp_ports: authority_contracts_model::resources::PortSet::range(8080, 8081)
+            let observation = EndpointObservationV3 {
+                tcp_resources: authority_contracts_model::resources::TcpResourcesV1 {
+                    source_addresses: "10.77.0.1".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                    destination_addresses: target.into(),
+                    destination_ports: authority_contracts_model::resources::PortSet::range(
+                        8080, 8081,
+                    )
                     .unwrap(),
+                },
                 challenge,
                 boot_id: "boot-test".into(),
                 observed_at: clock,
@@ -597,7 +608,7 @@ mod postgres_tests {
             };
             let signature =
                 encode_base64url(&key.sign(&observation.signing_preimage().unwrap()).unwrap());
-            let report = SignedEndpointObservationV2 {
+            let report = SignedEndpointObservationV3 {
                 observation,
                 signature,
             };
@@ -611,7 +622,7 @@ mod postgres_tests {
             fixture.pending(&fixture.report).await;
             fixture
         }
-        async fn pending(&self, report: &SignedEndpointObservationV2) {
+        async fn pending(&self, report: &SignedEndpointObservationV3) {
             let c = &report.observation.challenge;
             let mut tx = crate::access_policy::begin_authorization(self.state.pool())
                 .await

@@ -725,7 +725,7 @@
           }
         },
         "observation": {
-          "$ref": "endpoint-observation-v2.schema.json"
+          "$ref": "endpoint-observation-v3.schema.json"
         }
       }
     },

@@ -463,3 +463,7 @@ run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-lifecycle-test.sh nft-commit-
 [tasks."_mesh:agent-pid"]
 description = "Read the network enforcer process identity for restart regressions"
 run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh agent-pid"
+
+[tasks."_mesh:test-tcp-cidr-live"]
+description = "E2E only: exercise both attested CIDR destination addresses over WireGuard"
+run = "./deploy/lxc/sudo.sh ./deploy/lxc/authority-mesh.sh test-tcp-cidr-live"

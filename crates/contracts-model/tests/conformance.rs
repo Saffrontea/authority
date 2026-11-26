@@ -405,9 +405,9 @@ fn oversized_fingerprints_are_rejected_before_signing() {
 #[test]
 fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
     use authority_contracts_model::observation::{
-        SignedEndpointChallengeV1, SignedEndpointObservationV2,
+        SignedEndpointChallengeV1, SignedEndpointObservationV3,
     };
-    for name in ["endpoint-challenge-v1", "endpoint-observation-v2"] {
+    for name in ["endpoint-challenge-v1", "endpoint-observation-v3"] {
         for kind in ["valid", "invalid"] {
             for path in contract_vectors(name, kind) {
                 let bytes = fs::read(&path).unwrap();
@@ -415,7 +415,7 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
                     serde_json::from_slice::<SignedEndpointChallengeV1>(&bytes)
                         .is_ok_and(|c| c.validate().is_ok())
                 } else {
-                    serde_json::from_slice::<SignedEndpointObservationV2>(&bytes)
+                    serde_json::from_slice::<SignedEndpointObservationV3>(&bytes)
                         .is_ok_and(|c| c.validate().is_ok())
                 };
                 assert_eq!(accepted, kind == "valid", "{}", path.display());
@@ -433,14 +433,14 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
         )
         .trim()
     );
-    let report: SignedEndpointObservationV2 = serde_json::from_str(include_str!(
-        "../../../contracts/test-vectors/endpoint-observation-v2/valid/basic.json"
+    let report: SignedEndpointObservationV3 = serde_json::from_str(include_str!(
+        "../../../contracts/test-vectors/endpoint-observation-v3/valid/basic.json"
     ))
     .unwrap();
     assert_eq!(
         encode_hex(&report.observation.signing_preimage().unwrap()),
         include_str!(
-            "../../../contracts/test-vectors/endpoint-observation-v2/valid/basic.preimage.hex"
+            "../../../contracts/test-vectors/endpoint-observation-v3/valid/basic.preimage.hex"
         )
         .trim()
     );
@@ -453,7 +453,7 @@ fn endpoint_observation_contract_vectors_are_strict_and_domain_separated() {
     }
     let mut json = serde_json::to_value(report).unwrap();
     json["observation"]["facts"] = serde_json::json!(["tcp_enforcement", "tcp_enforcement"]);
-    assert!(serde_json::from_value::<SignedEndpointObservationV2>(json).is_err());
+    assert!(serde_json::from_value::<SignedEndpointObservationV3>(json).is_err());
 }
 
 #[test]

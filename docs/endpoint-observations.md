@@ -46,7 +46,7 @@ challenge-consumption and rate state in PostgreSQL; they do not use process-loca
 revocation or freshness caches.
 
 The wire contracts are [challenge v1](../contracts/artifacts/endpoint-challenge-v1.schema.json)
-and [observation v2](../contracts/artifacts/endpoint-observation-v2.schema.json).
+and [observation v3](../contracts/artifacts/endpoint-observation-v3.schema.json).
 Their canonical preimages use different domain separators. Signature verification
 uses the registered key, not a public key supplied by the reporter. Structural
 contract validation and pure planning-evidence replay do not themselves
@@ -64,7 +64,7 @@ the declared struct order, **not** RFC 8785/JCS sorting:
 - resources: source, target, principal, ssh_ca_fingerprints, mtls_ca_sha256,
   service_audience;
 - observation: challenge, boot_id, observed_at, expires_at,
-  configuration_sha256, probe_sha256, facts, tcp_ports.
+  configuration_sha256, probe_sha256, facts, tcp_resources.
 
 CA fingerprint arrays are lexically sorted. Fact arrays use the fixed enum order:
 SSH trust, mTLS trust, TCP enforcement, mesh route, existing route. Duplicates
@@ -170,3 +170,22 @@ node. The probe and identity key are trusted target components. The probe digest
 is signed provenance, not hardware-backed measurement/remote attestation. The
 bootstrap token remains an external trust root; modeled administrative genesis,
 bulk selector revocation and symbolic resource ranges are separate remaining work.
+
+## Symbolic actuator coverage
+
+Observation v3 signs the full `TcpResourcesV1` product, rather than ports alone.
+Source ranges come from directly connected kernel routes on the managed
+interface. Destination ranges are the canonical union of IPv4 addresses actually
+assigned to that interface. Ports come from the four checked nft predicates.
+These are bounds on ACL installation, not a claim that every source host is live
+or that a credential creates a route. WireGuard peer source validation remains
+independent. Policy must permit every requested address, port, and time segment.
+The solver excludes unsupported products before plan selection; evidence replay
+and the agent independently check the same subset relation. Shrinking any axis
+withdraws earlier installations. V2 reports are not accepted as inferred coverage.
+
+WireGuard membership still grants one registered source address. A CIDR TCP ACL
+uses an existing route; it does not expand a peer's `AllowedIPs`. An explicit
+direct request can select this path. Automatic selection also requires the
+existing-route availability configured for that deployment; the default mesh
+candidate cannot represent CIDR membership and must reject it.

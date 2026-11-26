@@ -27,15 +27,28 @@
     "probe_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "facts": [
       "tcp_enforcement",
-      "existing_route_configured",
-      "unknown_fact"
+      "existing_route_configured"
     ],
-    "tcp_ports": [
-      {
-        "start": 8080,
-        "end": 8082
-      }
-    ]
+    "tcp_resources": {
+      "source_addresses": [
+        {
+          "start": 172818433,
+          "end": 172818434
+        }
+      ],
+      "destination_addresses": [
+        {
+          "start": 172818434,
+          "end": 172818435
+        }
+      ],
+      "destination_ports": [
+        {
+          "start": 8080,
+          "end": 8082
+        }
+      ]
+    }
   },
   "signature": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }

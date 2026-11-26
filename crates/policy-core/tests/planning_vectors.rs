@@ -54,7 +54,7 @@ fn planning_accepts_only_the_current_explicit_format() {
 
 #[test]
 fn observation_lease_bounds_every_candidate_and_matches_the_recorded_environment() {
-    use authority_contracts_model::observation::SignedEndpointObservationV2;
+    use authority_contracts_model::observation::SignedEndpointObservationV3;
     let event: serde_json::Value = serde_json::from_str(include_str!(
         "../../../contracts/test-vectors/policy-plan-evaluated-v2/valid/existing-route.json"
     ))
@@ -62,7 +62,7 @@ fn observation_lease_bounds_every_candidate_and_matches_the_recorded_environment
     let mut planning = event["planning"].clone();
     let clock = planning["evaluated_at"].as_i64().unwrap();
     let mut report: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../contracts/test-vectors/endpoint-observation-v2/valid/basic.json"
+        "../../../contracts/test-vectors/endpoint-observation-v3/valid/basic.json"
     ))
     .unwrap();
     report["observation"]["challenge"]["domain_id"] = planning["binding"]["domain_id"].clone();
@@ -86,7 +86,7 @@ fn observation_lease_bounds_every_candidate_and_matches_the_recorded_environment
     report["observation"]["expires_at"] = (clock + 10).into();
     report["observation"]["challenge"]["issued_at"] = (clock - 590).into();
     report["observation"]["challenge"]["expires_at"] = (clock - 560).into();
-    let active: SignedEndpointObservationV2 = serde_json::from_value(report.clone()).unwrap();
+    let active: SignedEndpointObservationV3 = serde_json::from_value(report.clone()).unwrap();
     assert!(active.observation.active(clock));
     planning["resources"]["observation"] = report;
     assert!(

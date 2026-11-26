@@ -100,7 +100,7 @@ pub struct SignedEndpointChallengeV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EndpointObservationV2 {
+pub struct EndpointObservationV3 {
     pub challenge: EndpointChallengeV1,
     pub boot_id: String,
     pub observed_at: i64,
@@ -109,17 +109,30 @@ pub struct EndpointObservationV2 {
     pub probe_sha256: String,
     #[serde(deserialize_with = "unique_set")]
     pub facts: BTreeSet<EndpointFact>,
-    pub tcp_ports: crate::resources::PortSet,
+    pub tcp_resources: crate::resources::TcpResourcesV1,
 }
-impl EndpointObservationV2 {
+impl EndpointObservationV3 {
     /// Checks the bounded wire representation. Cryptographic verification is separate.
     ///
     /// # Errors
     /// Rejects unknown versions, invalid bindings, bounds or timestamps.
     pub fn validate(&self) -> Result<(), String> {
         self.challenge.validate()?;
-        if self.facts.contains(&EndpointFact::TcpEnforcement) == self.tcp_ports.is_empty()
-            || self.observed_at < 0
+        if (if self.facts.contains(&EndpointFact::TcpEnforcement) {
+            self.tcp_resources.validate().is_err()
+                || !self
+                    .tcp_resources
+                    .source_addresses
+                    .contains_point(u64::from(u32::from(self.challenge.resources.source)))
+                || !self
+                    .tcp_resources
+                    .destination_addresses
+                    .contains_point(u64::from(u32::from(self.challenge.resources.target)))
+        } else {
+            !self.tcp_resources.source_addresses.is_empty()
+                || !self.tcp_resources.destination_addresses.is_empty()
+                || !self.tcp_resources.destination_ports.is_empty()
+        }) || self.observed_at < 0
             || !hex_digest(&self.probe_sha256)
             || !super::valid_identifier(&self.boot_id)
             || !hex_digest(&self.configuration_sha256)
@@ -143,13 +156,13 @@ impl EndpointObservationV2 {
     /// Rejects invalid contracts or serialization failures.
     pub fn signing_preimage(&self) -> Result<Vec<u8>, String> {
         self.validate()?;
-        preimage(b"AUTHORITY-ENDPOINT-OBSERVATION-V2\0", self)
+        preimage(b"AUTHORITY-ENDPOINT-OBSERVATION-V3\0", self)
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SignedEndpointObservationV2 {
-    pub observation: EndpointObservationV2,
+pub struct SignedEndpointObservationV3 {
+    pub observation: EndpointObservationV3,
     pub signature: String,
 }
 fn hex_digest(s: &str) -> bool {
@@ -189,7 +202,7 @@ impl SignedEndpointChallengeV1 {
         Ok(())
     }
 }
-impl SignedEndpointObservationV2 {
+impl SignedEndpointObservationV3 {
     /// Checks the bounded wire representation. Cryptographic verification is separate.
     ///
     /// # Errors

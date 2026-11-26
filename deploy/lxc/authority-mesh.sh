@@ -585,9 +585,14 @@ class Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-for port in (8080, 8081):
-    server = Server(('10.77.0.2', port), Echo)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+for address in ('10.77.0.2', '10.77.0.3'):
+    for port in (8080, 8081):
+        try:
+            server = Server((address, port), Echo)
+        except OSError:
+            if address == '10.77.0.3': continue  # Optional CIDR test alias.
+            raise
+        threading.Thread(target=server.serve_forever, daemon=True).start()
 threading.Event().wait()
 PYTHON
 cat > /etc/systemd/system/authority-tcp-demo.service <<'UNIT'
@@ -609,6 +614,11 @@ systemctl reset-failed authority-tcp-demo.service
 systemctl restart authority-tcp-demo.service
 CONTAINER_SCRIPT
   attach "${CLIENT_NAME}" sh -seu <<'CONTAINER_SCRIPT'
+if ! command -v python3 >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends python3
+fi
 systemctl stop authority-tcp-demo-2223.service authority-tcp-demo-2224.service authority-tcp-demo-2223.socket authority-tcp-demo-2224.socket >/dev/null 2>&1 || true
 for pair in 2223:8080 2224:8081; do
   listen=${pair%:*}
@@ -746,11 +756,39 @@ finally:
     subprocess.run([nft,'delete','table','inet',table],check=True,capture_output=True)
 KERNEL
       ;;
+    test-tcp-cidr-live)
+      attach "${CLIENT_NAME}" /usr/bin/python3 - <<'PYTHON'
+import socket, subprocess
+key = subprocess.check_output(['/usr/bin/wg','show','wg0','peers'],text=True).strip()
+assert len(key.splitlines()) == 1
+try:
+    subprocess.run(['/usr/bin/wg','set','wg0','peer',key,'allowed-ips','10.77.0.2/31'],check=True)
+    subprocess.run(['/usr/sbin/ip','route','replace','10.77.0.2/31','dev','wg0'],check=True)
+    for address in ('10.77.0.2','10.77.0.3'):
+        with socket.create_connection((address,8080),timeout=2) as stream:
+            stream.sendall(b'cidr-live\n')
+            received = b''
+            while len(received) < len(b'cidr-live\n'):
+                chunk = stream.recv(128)
+                assert chunk, 'CIDR echo closed early'
+                received += chunk
+            assert received == b'cidr-live\n'
+finally:
+    subprocess.run(['/usr/bin/wg','set','wg0','peer',key,'allowed-ips','10.77.0.2/32'],check=True)
+    subprocess.run(['/usr/sbin/ip','route','del','10.77.0.2/31','dev','wg0'],check=True)
+PYTHON
+      ;;
     test-tcp-wide)
+      attach "${TARGET_NAME}" /usr/sbin/ip address replace 10.77.0.3/32 dev wg0
+      attach "${TARGET_NAME}" /usr/sbin/ip route replace 10.77.0.0/30 dev wg0
+      attach "${TARGET_NAME}" systemctl restart authority-tcp-demo.service
       attach "${TARGET_NAME}" sh -eu -c 'mkdir -p /etc/systemd/system/authority-network-agent.service.d; printf "[Service]\nEnvironment=AUTHORITY_TCP_MANAGED_PORTS=8080-8180\n" > /etc/systemd/system/authority-network-agent.service.d/e2e-range.conf; systemctl daemon-reload; systemctl restart authority-network-agent.service'
       reconnect_client
       ;;
     test-tcp-normal)
+      attach "${TARGET_NAME}" /usr/sbin/ip address del 10.77.0.3/32 dev wg0 || true
+      attach "${TARGET_NAME}" /usr/sbin/ip route del 10.77.0.0/30 dev wg0 || true
+      attach "${TARGET_NAME}" systemctl restart authority-tcp-demo.service
       attach "${TARGET_NAME}" sh -eu -c 'rm -f /etc/systemd/system/authority-network-agent.service.d/e2e-range.conf; systemctl daemon-reload; systemctl restart authority-network-agent.service'
       reconnect_client
       ;;

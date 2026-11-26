@@ -80,6 +80,24 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaises(ValueError): probe.managed_tcp_ports(changed)
         with self.assertRaises(ValueError): probe.managed_tcp_ports({'nftables': layout['nftables'][:3]})
 
+    def test_tcp_coverage_uses_kernel_routes_and_assigned_addresses(self):
+        links = [{'flags': ['UP'], 'addr_info': [{'family': 'inet', 'local': '10.77.0.2'}, {'family': 'inet', 'local': '10.77.0.3'}]}]
+        routes = [{'dst': '10.77.0.0/24'}]
+        resources = {'source': '10.77.0.1', 'target': '10.77.0.2'}
+        def run(*args):
+            return json.dumps(links if 'address' in args else routes)
+        with patch.object(probe, 'run', run):
+            coverage = probe.tcp_coverage('wg0', resources, [{'start': 8080, 'end': 8082}])
+            self.assertEqual(coverage['source_addresses'], [{'start': 172818432, 'end': 172818688}])
+            self.assertEqual(coverage['destination_addresses'], [{'start': 172818434, 'end': 172818436}])
+            for key in ('source', 'target'):
+                with self.assertRaises(ValueError):
+                    probe.tcp_coverage('wg0', {**resources, key: '192.168.0.1'}, [])
+            links[0]['addr_info'].pop()
+            self.assertEqual(probe.tcp_coverage('wg0', resources, [])['destination_addresses'], [{'start': 172818434, 'end': 172818435}])
+            routes[0]['dst'] = '224.0.0.0/4'
+            with self.assertRaises(ValueError): probe.tcp_coverage('wg0', resources, [])
+
     def test_missing_and_changed_kernel_tables_withdraw_tcp_fact(self):
         request = {'signed': {'challenge': {'resources': {}}}, 'interface': 'wg0', 'nft_layout': {'expected': True}}
         for layout in [{}, {'expected': False}]:

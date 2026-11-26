@@ -282,10 +282,7 @@ pub fn instantiate(
                 {
                     let ability = abilities.get(&Ability::TcpAdmission)?;
                     let tcp = ability.scope.tcp_resources()?;
-                    if !tcp
-                        .destination_ports
-                        .is_subset(&envelope.observation.tcp_ports)
-                    {
+                    if !tcp.is_subset(&envelope.observation.tcp_resources) {
                         return None;
                     }
                 }

@@ -1,7 +1,7 @@
 use super::{ApiError, AppState, unix_timestamp};
 use authority_contracts_model::observation::{
-    EndpointFact, EndpointObservationV2, MAX_CLOCK_SKEW, OBSERVATION_TTL,
-    SignedEndpointChallengeV1, SignedEndpointObservationV2,
+    EndpointFact, EndpointObservationV3, MAX_CLOCK_SKEW, OBSERVATION_TTL,
+    SignedEndpointChallengeV1, SignedEndpointObservationV3,
 };
 use authority_credential_crypto_openssl::OpenSslEd25519Signer;
 use authority_device_auth_core::{decode_signature, encode_base64url};
@@ -29,7 +29,7 @@ pub struct Observer {
 }
 struct Snapshot {
     signed: SignedEndpointChallengeV1,
-    report: EndpointObservationV2,
+    report: EndpointObservationV3,
 }
 struct Support {
     snapshot: Option<Snapshot>,
@@ -37,16 +37,28 @@ struct Support {
     fence: i64,
 }
 impl Observer {
-    pub fn supports_tcp(
+    fn tcp_rejection(
         &self,
-        ports: &authority_contracts_model::resources::PortSet,
-    ) -> Result<bool, String> {
+        grant: &authority_contracts_model::TcpAccessGrantV2,
+    ) -> Result<Option<&'static str>, String> {
         let support = self.support.lock().map_err(|e| e.to_string())?;
-        Ok(support.healthy
-            && support
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| ports.is_subset(&snapshot.report.tcp_ports)))
+        let Some(snapshot) = &support.snapshot else {
+            return Ok(Some("endpoint_observation_unavailable"));
+        };
+        let report = &snapshot.report;
+        if !(support.healthy
+            && report.active(unix_timestamp()?)
+            && grant.issued_at > support.fence
+            && grant.expires_at <= report.expires_at
+            && grant.domain_id == report.challenge.domain_id
+            && grant.target_node_id == report.challenge.target_node_id
+            && report.facts.contains(&EndpointFact::TcpEnforcement)
+            && report.facts.contains(&EndpointFact::MeshRouteConfigured))
+        {
+            return Ok(Some("endpoint_observation_unavailable"));
+        }
+        Ok((!grant.resources.is_subset(&report.tcp_resources))
+            .then_some("tcp_resource_scope_unobserved"))
     }
     pub fn allows_ssh(
         &self,
@@ -155,7 +167,7 @@ impl Observer {
         &self,
         state: &AppState,
         signed: SignedEndpointChallengeV1,
-        report: EndpointObservationV2,
+        report: EndpointObservationV3,
     ) -> Result<(), String> {
         let withdraw = {
             let support = self.support.lock().map_err(|e| e.to_string())?;
@@ -165,7 +177,7 @@ impl Observer {
                     || old.report.challenge.domain_id != report.challenge.domain_id
                     || old.report.challenge.resources != report.challenge.resources
                     || !old.report.facts.is_subset(&report.facts)
-                    || !old.report.tcp_ports.is_subset(&report.tcp_ports)
+                    || !old.report.tcp_resources.is_subset(&report.tcp_resources)
             })
         };
         if withdraw {
@@ -212,7 +224,7 @@ fn withdraw_kernel(state: &AppState) -> Result<(), String> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProbeResult {
-    tcp_ports: authority_contracts_model::resources::PortSet,
+    tcp_resources: authority_contracts_model::resources::TcpResourcesV1,
     facts: BTreeSet<EndpointFact>,
     configuration_sha256: String,
     probe_sha256: String,
@@ -278,7 +290,7 @@ pub fn start_monitor(state: AppState) {
                 Ok(result) => {
                     report.active(unix_timestamp().unwrap_or(i64::MAX))
                         && report.facts.is_subset(&result.facts)
-                        && report.tcp_ports.is_subset(&result.tcp_ports)
+                        && report.tcp_resources.is_subset(&result.tcp_resources)
                 }
                 Err(cause) => {
                     tracing::warn!(%cause,"live endpoint probe failed");
@@ -304,7 +316,7 @@ pub fn start_monitor(state: AppState) {
 pub async fn observe(
     State(state): State<AppState>,
     Json(signed): Json<SignedEndpointChallengeV1>,
-) -> Result<Json<SignedEndpointObservationV2>, (StatusCode, String)> {
+) -> Result<Json<SignedEndpointObservationV3>, (StatusCode, String)> {
     let now = unix_timestamp().map_err(internal)?;
     let challenge = &signed.challenge;
     let rejected = || {
@@ -365,8 +377,8 @@ pub async fn observe(
     if !signed.challenge.active(now) {
         return Err(rejected());
     }
-    let observation = EndpointObservationV2 {
-        tcp_ports: result.tcp_ports,
+    let observation = EndpointObservationV3 {
+        tcp_resources: result.tcp_resources,
         challenge: signed.challenge.clone(),
         boot_id: observer.boot_id.clone(),
         observed_at,
@@ -403,7 +415,7 @@ pub async fn observe(
     {
         return Err(rejected());
     }
-    Ok(Json(SignedEndpointObservationV2 {
+    Ok(Json(SignedEndpointObservationV3 {
         observation,
         signature,
     }))
@@ -463,44 +475,13 @@ pub fn require_tcp(
     {
         return Err(ApiError::conflict("tcp_grant_replayed"));
     }
-    let source = grant
-        .resources
-        .source_addresses
-        .as_host()
-        .ok_or_else(|| ApiError::unavailable("tcp_resource_scope_unobserved"))?
-        .to_string();
-    let target = grant
-        .resources
-        .destination_addresses
-        .as_host()
-        .ok_or_else(|| ApiError::unavailable("tcp_resource_scope_unobserved"))?
-        .to_string();
     let observer = state
         .0
         .observer
         .as_ref()
         .ok_or_else(|| ApiError::unavailable("endpoint_observation_unavailable"))?;
-    if !observer
-        .supports_tcp(&grant.resources.destination_ports)
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::unavailable("tcp_resource_scope_unobserved"));
-    }
-    if !state
-        .0
-        .observer
-        .as_ref()
-        .ok_or_else(|| ApiError::unavailable("endpoint_observation_unavailable"))?
-        .allows(
-            &grant.domain_id,
-            &source,
-            Some(&target),
-            (grant.issued_at, grant.expires_at),
-            true,
-        )
-        .map_err(ApiError::internal)?
-    {
-        return Err(ApiError::unavailable("endpoint_observation_unavailable"));
+    if let Some(code) = observer.tcp_rejection(grant).map_err(ApiError::internal)? {
+        return Err(ApiError::unavailable(code));
     }
     Ok(())
 }
@@ -531,8 +512,13 @@ pub(super) mod tests {
                 service_audience: "demo-api".into(),
             },
         };
-        let report = EndpointObservationV2 {
-            tcp_ports: authority_contracts_model::resources::PortSet::range(8080, 8081).unwrap(),
+        let report = EndpointObservationV3 {
+            tcp_resources: authority_contracts_model::resources::TcpResourcesV1 {
+                source_addresses: "10.77.0.1".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                destination_addresses: "10.77.0.2".parse::<std::net::Ipv4Addr>().unwrap().into(),
+                destination_ports: authority_contracts_model::resources::PortSet::range(8080, 8081)
+                    .unwrap(),
+            },
             challenge: challenge.clone(),
             boot_id: "boot-test".into(),
             observed_at: now,
@@ -578,6 +564,66 @@ pub(super) mod tests {
             .insert(EndpointFact::SshCaTrusted);
         observer
     }
+    #[test]
+    fn tcp_cidr_requires_complete_current_coverage_and_target_binding() {
+        use authority_contracts_model::{TcpAccessGrantV2, resources::Ipv4Set};
+        let observer =
+            observer(std::env::temp_dir().join(format!("coverage-{}", uuid::Uuid::new_v4())));
+        let mut grant: TcpAccessGrantV2 = serde_json::from_str(include_str!(
+            "../../../contracts/test-vectors/tcp-access-grant-v2/valid/basic.json"
+        ))
+        .unwrap();
+        {
+            let mut support = observer.support.lock().unwrap();
+            let report = &mut support.snapshot.as_mut().unwrap().report;
+            report.tcp_resources.source_addresses =
+                Ipv4Set::cidr("10.77.0.0".parse().unwrap(), 30).unwrap();
+            report.tcp_resources.destination_addresses =
+                Ipv4Set::cidr("10.77.0.2".parse().unwrap(), 31).unwrap();
+            grant.domain_id.clone_from(&report.challenge.domain_id);
+            grant
+                .target_node_id
+                .clone_from(&report.challenge.target_node_id);
+            grant.resources.clone_from(&report.tcp_resources);
+            grant.issued_at = report.observed_at;
+            grant.not_before = grant.issued_at;
+            grant.expires_at = grant.issued_at + 30;
+        }
+        assert_eq!(observer.tcp_rejection(&grant).unwrap(), None);
+        let mut outside = grant.clone();
+        outside.resources.source_addresses =
+            Ipv4Set::cidr("10.77.0.0".parse().unwrap(), 29).unwrap();
+        assert_eq!(
+            observer.tcp_rejection(&outside).unwrap(),
+            Some("tcp_resource_scope_unobserved")
+        );
+        outside = grant.clone();
+        outside.target_node_id = "another-node".into();
+        assert_eq!(
+            observer.tcp_rejection(&outside).unwrap(),
+            Some("endpoint_observation_unavailable")
+        );
+        observer
+            .support
+            .lock()
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .report
+            .tcp_resources
+            .destination_addresses = "10.77.0.2".parse::<std::net::Ipv4Addr>().unwrap().into();
+        assert_eq!(
+            observer.tcp_rejection(&grant).unwrap(),
+            Some("tcp_resource_scope_unobserved")
+        );
+        observer.support.lock().unwrap().fence = grant.issued_at;
+        assert_eq!(
+            observer.tcp_rejection(&grant).unwrap(),
+            Some("endpoint_observation_unavailable")
+        );
+    }
+
     #[test]
     fn lost_support_is_fenced_durably_and_old_grants_do_not_return_after_repair() {
         let directory = tempfile::tempdir().unwrap();

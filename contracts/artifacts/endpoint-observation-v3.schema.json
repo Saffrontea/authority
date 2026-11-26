@@ -17,7 +17,7 @@
         "configuration_sha256",
         "probe_sha256",
         "facts",
-        "tcp_ports"
+        "tcp_resources"
       ],
       "properties": {
         "challenge": {
@@ -54,8 +54,25 @@
             ]
           }
         },
-        "tcp_ports": {
-          "$ref": "tcp-resources-v1.schema.json#/$defs/port_set"
+        "tcp_resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_addresses",
+            "destination_addresses",
+            "destination_ports"
+          ],
+          "properties": {
+            "source_addresses": {
+              "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set"
+            },
+            "destination_addresses": {
+              "$ref": "tcp-resources-v1.schema.json#/$defs/ipv4_set"
+            },
+            "destination_ports": {
+              "$ref": "tcp-resources-v1.schema.json#/$defs/port_set"
+            }
+          }
         }
       }
     },
@@ -64,8 +81,8 @@
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://authority.invalid/contracts/endpoint-observation-v2.schema.json",
-  "title": "SignedEndpointObservationV2",
+  "$id": "https://authority.invalid/contracts/endpoint-observation-v3.schema.json",
+  "title": "SignedEndpointObservationV3",
   "$defs": {
     "identifier": {
       "type": "string",

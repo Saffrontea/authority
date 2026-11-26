@@ -8,10 +8,6 @@
       "version": 1,
       "sha256": "09a116610d571586206eb58ab43c8ab0613ed03f3c9f544d53ff853d1a21d897"
     },
-    "artifacts/endpoint-observation-v2.schema.json": {
-      "version": 2,
-      "sha256": "0ca157b31e3567701817559fb1d44e9f15792d5e026150d7566ae086c0771123"
-    },
     "artifacts/generation-binding-v1.schema.json": {
       "version": 1,
       "sha256": "1984538062de71725442ff95da337d49393f9c8f239a7e8f00dae4b9bb1a74f1"
@@ -38,7 +34,7 @@
     },
     "artifacts/policy-plan-evaluated-v2.schema.json": {
       "version": 2,
-      "sha256": "4cdfa229b96fb5ab49ee981584062f59d97b15707b78b86c4ef24e6e991d6ead"
+      "sha256": "e848e97ea7e878f11e1aa8e8df539e0313ba9b1ec87726fd4856af0a69cadc94"
     },
     "artifacts/signed-decision-revocation-notice-v1.schema.json": {
       "version": 1,
@@ -79,6 +75,10 @@
     "artifacts/tcp-resources-v1.schema.json": {
       "version": 1,
       "sha256": "d85e8c5274f5dae9889d423af59a543b2348a1fa14d1258b06b69f3a3687eea2"
+    },
+    "artifacts/endpoint-observation-v3.schema.json": {
+      "version": 2,
+      "sha256": "5389f2446466c47f4c148bcccef5f6e3d81e8ffdcc85d5d6789b735cfe94f4ef"
     }
   }
 }
