@@ -7,6 +7,7 @@ issuer_pid=''
 node_pid=''
 replica_pids=()
 cleaned_up=0
+"${SCRIPT_DIR}/prepare-operator-key.sh"
 control_origin=${AUTHORITY_POC_CONTROL_ORIGIN:-http://localhost:3000}
 issuer_origin=${AUTHORITY_POC_ISSUER_ORIGIN:-http://localhost:3001}
 node_origin=${AUTHORITY_POC_NODE_ORIGIN:-http://localhost:3002}

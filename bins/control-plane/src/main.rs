@@ -13,7 +13,7 @@ mod ui;
 use authority_credential_crypto_openssl::OpenSslEd25519Signer;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
-use state::{AppState, EnrollmentConfig};
+use state::{AppState, EnrollmentConfig, SigningAuthority};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -40,12 +40,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
     let signer = load_or_generate_signer(&config.signing_key_id, &config.signing_key_file)?;
     write_public_key(&signer, &config.signing_public_key_file)?;
+    let operator_pem = fs::read(&config.operator_public_key_file)?;
+    let operator_key = openssl::pkey::PKey::public_key_from_pem(&operator_pem)?;
+    if operator_key.raw_public_key()? == signer.public_key_raw()? {
+        return Err("operator key must differ from control-plane grant signing key".into());
+    }
+    let operator = authority_credential_crypto_openssl::OpenSslEd25519Verifier::from_pem(
+        &config.operator_key_id,
+        &operator_pem,
+    )?;
     let state = AppState::new(
         pool,
         webauthn,
         config.domain_id,
         &config.bootstrap_token,
-        signer,
+        SigningAuthority {
+            grants: signer,
+            operator,
+        },
         EnrollmentConfig {
             target_identity_file: config.target_identity_file,
             client_wireguard_public_key: config.client_wireguard_public_key,

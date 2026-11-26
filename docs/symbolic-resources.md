@@ -80,9 +80,10 @@ Cleanup must test installations against the store's current fences, including
 when an older notice is redelivered; the incoming minimum alone is insufficient.
 
 `POST /v1/identity-revocations` accepts a root-signed V1 management command
-(subject or device selector). The existing control-plane signing root is an
-explicit administrator trust assumption, not a user capability. `authority-admin`
-signs a short-lived command using `AUTHORITY_SIGNING_KEY_FILE`:
+(subject or device selector). A separate operator signing root is an explicit administrator trust
+assumption. The control plane reads only `AUTHORITY_OPERATOR_PUBLIC_KEY_FILE`
+and `AUTHORITY_OPERATOR_KEY_ID`; it rejects reuse of its grant signing key. `authority-admin`
+signs a short-lived command using `AUTHORITY_OPERATOR_KEY_FILE`:
 
 ```sh
 authority-admin http://localhost:3000 DOMAIN_UUID subject USER_UUID compromised

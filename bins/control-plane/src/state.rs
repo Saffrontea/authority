@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use authority_credential_crypto_openssl::OpenSslEd25519Signer;
+use authority_credential_crypto_openssl::{OpenSslEd25519Signer, OpenSslEd25519Verifier};
 use sqlx::PgPool;
 use uuid::Uuid;
 use webauthn_rs::{
@@ -20,10 +20,15 @@ struct Inner {
     webauthn: Webauthn,
     domain_id: Uuid,
     bootstrap_digest: [u8; 32],
-    signer: OpenSslEd25519Signer,
+    signing: SigningAuthority,
     enrollment: EnrollmentConfig,
     network_grant_ttl_seconds: i64,
     ssh_authorization_ttl_seconds: i64,
+}
+
+pub struct SigningAuthority {
+    pub grants: OpenSslEd25519Signer,
+    pub operator: OpenSslEd25519Verifier,
 }
 
 pub struct EnrollmentConfig {
@@ -55,7 +60,7 @@ impl AppState {
         webauthn: Webauthn,
         domain_id: Uuid,
         bootstrap_token: &str,
-        signer: OpenSslEd25519Signer,
+        signing: SigningAuthority,
         enrollment: EnrollmentConfig,
         authorization_ttls: (i64, i64),
     ) -> Self {
@@ -65,7 +70,7 @@ impl AppState {
             webauthn,
             domain_id,
             bootstrap_digest: openssl::sha::sha256(bootstrap_token.as_bytes()),
-            signer,
+            signing,
             enrollment,
             network_grant_ttl_seconds,
             ssh_authorization_ttl_seconds,
@@ -105,7 +110,11 @@ impl AppState {
     }
 
     pub fn signer(&self) -> &OpenSslEd25519Signer {
-        &self.0.signer
+        &self.0.signing.grants
+    }
+
+    pub fn operator_verifier(&self) -> &OpenSslEd25519Verifier {
+        &self.0.signing.operator
     }
 
     pub fn network_grant_ttl_seconds(&self) -> i64 {

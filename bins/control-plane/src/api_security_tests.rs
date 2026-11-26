@@ -6,6 +6,7 @@ use authority_issuer_core::AuthorizationSigner;
 struct SessionFixture {
     state: AppState,
     signer: OpenSslEd25519Signer,
+    operator: OpenSslEd25519Signer,
     token: String,
     digest: [u8; 32],
     user: Uuid,
@@ -31,12 +32,21 @@ impl SessionFixture {
         .unwrap()
         .build()
         .unwrap();
+        let operator = OpenSslEd25519Signer::generate("test-operator").unwrap();
+        let verifier = authority_credential_crypto_openssl::OpenSslEd25519Verifier::from_pem(
+            "test-operator",
+            &operator.public_key_to_pem().unwrap(),
+        )
+        .unwrap();
         let state = AppState::new(
             pool,
             webauthn,
             domain,
             "test-bootstrap",
-            OpenSslEd25519Signer::generate("test-control").unwrap(),
+            crate::state::SigningAuthority {
+                grants: OpenSslEd25519Signer::generate("test-control").unwrap(),
+                operator: verifier,
+            },
             EnrollmentConfig {
                 target_identity_file: "/unused/test-identity".into(),
                 client_wireguard_public_key: "test-key".into(),
@@ -52,6 +62,7 @@ impl SessionFixture {
         Self {
             state,
             signer,
+            operator,
             token,
             digest,
             user,
@@ -546,6 +557,7 @@ async fn malformed_access_identifiers_and_oversized_fingerprints_are_rejected_be
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL migrations"]
+#[allow(clippy::too_many_lines)] // Exercise authentication, replay and both identity recovery paths together.
 async fn root_identity_revocation_is_authenticated_idempotent_and_does_not_revive_sessions() {
     use authority_contracts_model::administration::{
         IdentityRevocationCommandV1, IdentitySelector,
@@ -573,7 +585,22 @@ async fn root_identity_revocation_is_authenticated_idempotent_and_does_not_reviv
             expires_at: now + 30,
         };
         let signed =
-            authority_issuer_core::fence::sign_command(command, fixture.state.signer()).unwrap();
+            authority_issuer_core::fence::sign_command(command, &fixture.operator).unwrap();
+        let mut cp_signed = signed.clone();
+        cp_signed.signature = encode_base64url(
+            &fixture
+                .state
+                .signer()
+                .sign(&signed.command.signing_preimage().unwrap())
+                .unwrap(),
+        );
+        assert_eq!(
+            crate::identity_revocation::revoke(State(fixture.state.clone()), Json(cp_signed))
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
         let mut forged = signed.clone();
         forged.command.reason = "forged".into();
         assert_eq!(
@@ -596,7 +623,7 @@ async fn root_identity_revocation_is_authenticated_idempotent_and_does_not_reviv
         let mut changed = signed.command.clone();
         changed.reason = "different_intent".into();
         let changed =
-            authority_issuer_core::fence::sign_command(changed, fixture.state.signer()).unwrap();
+            authority_issuer_core::fence::sign_command(changed, &fixture.operator).unwrap();
         assert_eq!(
             crate::identity_revocation::revoke(State(fixture.state.clone()), Json(changed))
                 .await
@@ -632,5 +659,66 @@ async fn root_identity_revocation_is_authenticated_idempotent_and_does_not_reviv
     let generations: (i64, i64) = sqlx::query_as("SELECT u.generation,d.generation FROM identity.users u JOIN device.devices d ON d.owner_user_id=u.id WHERE u.id=$1 AND d.id=$2")
         .bind(fixture.user).bind(fixture.device).fetch_one(fixture.state.pool()).await.unwrap();
     assert_eq!(generations, (3, 3));
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL migrations"]
+async fn identity_delivery_reports_missing_origin_and_expiry_instead_of_hiding_them() {
+    use authority_contracts_model::administration::{
+        IdentityRevocationCommandV1, IdentitySelector,
+    };
+    let fixture = SessionFixture::new(crate::access_policy::tests::lxc_pool(3).await).await;
+    let device = Uuid::new_v4();
+    let target = Uuid::new_v4();
+    sqlx::query("INSERT INTO device.devices(id,domain_id,owner_kind,owner_domain_id,device_public_key,wireguard_public_key,status) VALUES($1,$2,'domain',$2,$3,$3,'active')")
+        .bind(device).bind(fixture.state.domain_id()).bind(device.as_bytes().to_vec()).execute(fixture.state.pool()).await.unwrap();
+    let bytes = target.as_bytes();
+    let address = format!("127.{}.{}.{}", bytes[13], bytes[14], bytes[15]);
+    sqlx::query("INSERT INTO device.nodes(id,device_id,hostname,mesh_address,status) VALUES($1,$2,'delivery-test',$3::inet,'active')")
+        .bind(target).bind(device).bind(address).execute(fixture.state.pool()).await.unwrap();
+    notice(&fixture, target, fixture.user, fixture.device).await;
+    let now = unix_timestamp().unwrap();
+    let signed = authority_issuer_core::fence::sign_command(
+        IdentityRevocationCommandV1 {
+            version: 1,
+            domain_id: fixture.state.domain_id().to_string(),
+            selector: IdentitySelector::Subject {
+                subject_user_id: fixture.user.to_string(),
+            },
+            nonce: "B".repeat(43),
+            reason: "compromised".into(),
+            issued_at: now,
+            expires_at: now + 30,
+        },
+        &fixture.operator,
+    )
+    .unwrap();
+    let Json(first) =
+        crate::identity_revocation::revoke(State(fixture.state.clone()), Json(signed.clone()))
+            .await
+            .unwrap();
+    assert_eq!(first["completed"], false);
+    assert_eq!(first["blocked_receivers"], 1);
+    assert_eq!(first["deliveries"][0]["status"], "missing_origin");
+    sqlx::query("UPDATE device.nodes SET enforcement_origin='http://127.0.0.1:1' WHERE id=$1")
+        .bind(target)
+        .execute(fixture.state.pool())
+        .await
+        .unwrap();
+    let Json(pending) =
+        crate::identity_revocation::revoke(State(fixture.state.clone()), Json(signed.clone()))
+            .await
+            .unwrap();
+    assert_eq!(pending["blocked_receivers"], 0);
+    assert_eq!(pending["deliveries"][0]["status"], "pending");
+    sqlx::query("UPDATE policy.scoped_revocation_notices SET expires_at=clock_timestamp()-interval '1 second' WHERE domain_id=$1").bind(fixture.state.domain_id()).execute(fixture.state.pool()).await.unwrap();
+    let Json(expired) =
+        crate::identity_revocation::revoke(State(fixture.state.clone()), Json(signed))
+            .await
+            .unwrap();
+    assert_eq!(expired["completed"], false);
+    assert_eq!(expired["blocked_receivers"], 1);
+    assert_eq!(expired["deliveries"][0]["status"], "expired");
     fixture.cleanup().await;
 }

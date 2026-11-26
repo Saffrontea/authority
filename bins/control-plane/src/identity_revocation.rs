@@ -5,8 +5,7 @@ use authority_contracts_model::{
     administration::{IdentitySelector, SignedIdentityRevocationCommandV1},
     fence::{RevocationSelector, ScopedRevocationNoticeV3},
 };
-use authority_credential_crypto_openssl::OpenSslEd25519Verifier;
-use authority_issuer_core::{AuthorizationSigner, sign_revocation_notice_v2};
+use authority_issuer_core::sign_revocation_notice_v2;
 use axum::{Json, extract::State};
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
@@ -19,18 +18,10 @@ pub async fn revoke(
     State(state): State<AppState>,
     Json(envelope): Json<SignedIdentityRevocationCommandV1>,
 ) -> Result<Json<Value>, ApiError> {
-    let verifier = OpenSslEd25519Verifier::from_pem(
-        state.signer().key_id(),
-        &state
-            .signer()
-            .public_key_to_pem()
-            .map_err(ApiError::internal)?,
-    )
-    .map_err(ApiError::internal)?;
     let now = authority_mtls_core::unix_timestamp().map_err(ApiError::internal)?;
     authority_issuer_core::fence::verify_command(
         &envelope,
-        &verifier,
+        state.operator_verifier(),
         &state.domain_id().to_string(),
         now,
     )
@@ -277,6 +268,22 @@ async fn publish_pki(
 async fn status(state: &AppState, nonce: &str, mut value: Value) -> Result<Value, ApiError> {
     let pending:i64=sqlx::query_scalar("SELECT (SELECT count(*) FROM policy.scoped_revocation_notices WHERE domain_id=$1 AND operation_nonce=$2 AND completed_at IS NULL)+(SELECT count(*) FROM policy.identity_revocation_children c JOIN policy.revocation_members m USING(sequence) LEFT JOIN policy.revocation_receipts r ON r.sequence=m.sequence AND r.instance_id=m.instance_id WHERE c.domain_id=$1 AND c.operation_nonce=$2 AND r.instance_id IS NULL AND m.lease_until>clock_timestamp())")
         .bind(state.domain_id()).bind(nonce).fetch_one(state.pool()).await.map_err(ApiError::database)?;
+    let rows = sqlx::query("SELECT r.sequence,r.target_node_id,r.expires_at::text AS expires_at,CASE WHEN r.completed_at IS NOT NULL THEN 'completed' WHEN r.expires_at<=clock_timestamp() THEN 'expired' WHEN n.id IS NULL THEN 'missing_target' WHEN n.enforcement_origin IS NULL THEN 'missing_origin' ELSE 'pending' END AS status FROM policy.scoped_revocation_notices r LEFT JOIN device.nodes n ON n.id=r.target_node_id WHERE r.domain_id=$1 AND r.operation_nonce=$2 ORDER BY r.sequence")
+        .bind(state.domain_id()).bind(nonce).fetch_all(state.pool()).await.map_err(ApiError::database)?;
+    let mut blocked = 0;
+    let mut deliveries = Vec::new();
+    for row in rows {
+        let status: String = row.try_get("status").map_err(ApiError::database)?;
+        if matches!(
+            status.as_str(),
+            "expired" | "missing_target" | "missing_origin"
+        ) {
+            blocked += 1;
+        }
+        deliveries.push(json!({"sequence":row.try_get::<i64,_>("sequence").map_err(ApiError::database)?, "target_node_id":row.try_get::<Uuid,_>("target_node_id").map_err(ApiError::database)?, "status":status,"expires_at":row.try_get::<String,_>("expires_at").map_err(ApiError::database)?}));
+    }
+    value["blocked_receivers"] = json!(blocked);
+    value["deliveries"] = json!(deliveries);
     value["completed"] = json!(pending == 0);
     value["pending_receivers"] = json!(pending);
     Ok(value)

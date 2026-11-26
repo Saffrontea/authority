@@ -182,6 +182,8 @@ See [Ability planning](docs/ability-planning.md) for the model, current access
 integration, search bounds and scoped-ability migration.
 TCP policies support symbolic port intervals and IPv4 ranges; exact resource/time
 subtraction also drives TCP permission evaluation and authority comparison.
+[Operator administration](docs/operator-administration.md) covers the separate
+operator key and blocked delivery recovery.
 [Symbolic resources and identity revocation](docs/symbolic-resources.md) documents
 their wire syntax, tested guarantees and current adapter limits.
 Subject/device revocation uses signed identity generations, shared PostgreSQL issuance

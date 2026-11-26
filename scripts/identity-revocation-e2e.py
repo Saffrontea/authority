@@ -131,7 +131,7 @@ with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
                 response.read()
                 streams.append(connection)
             old_token = browser("done({value:sessionStorage.getItem('authority-session')});")
-            environment = {**os.environ, 'AUTHORITY_SIGNING_KEY_FILE':str(root / '.secrets/control-plane-ed25519.pem')}
+            environment = {**os.environ, 'AUTHORITY_OPERATOR_KEY_FILE':str(root / '.secrets/operator-ed25519.pem')}
             result = subprocess.run([str(root / 'target/debug/authority-admin'), control, domain, selector,
                 device if selector == 'device' else subject], env=environment, check=True, capture_output=True, text=True, timeout=35)
             receipt = json.loads(result.stdout)

@@ -20,6 +20,8 @@ pub struct Config {
     pub rp_origin: Url,
     pub bootstrap_token: String,
     pub signing_key_id: String,
+    pub operator_key_id: String,
+    pub operator_public_key_file: PathBuf,
     pub signing_key_file: PathBuf,
     pub signing_public_key_file: PathBuf,
     pub target_identity_file: PathBuf,
@@ -32,6 +34,7 @@ pub struct Config {
 }
 
 impl Config {
+    #[allow(clippy::too_many_lines)] // Validate all deployment inputs before constructing service state.
     pub fn from_env() -> Result<Self, String> {
         let bind = value("AUTHORITY_BIND", "127.0.0.1:3000")?
             .parse()
@@ -52,6 +55,9 @@ impl Config {
             "AUTHORITY_BOOTSTRAP_TOKEN",
             "AUTHORITY_BOOTSTRAP_TOKEN_FILE",
         )?;
+        let operator_key_id = value("AUTHORITY_OPERATOR_KEY_ID", "operator-key-1")?;
+        let operator_public_key_file =
+            PathBuf::from(required("AUTHORITY_OPERATOR_PUBLIC_KEY_FILE")?);
         let signing_key_id = value("AUTHORITY_SIGNING_KEY_ID", "control-plane-key-1")?;
         let signing_key_file = PathBuf::from(required("AUTHORITY_SIGNING_KEY_FILE")?);
         let signing_public_key_file = PathBuf::from(required("AUTHORITY_SIGNING_PUBLIC_KEY_FILE")?);
@@ -123,6 +129,8 @@ impl Config {
             rp_origin,
             bootstrap_token,
             signing_key_id,
+            operator_key_id,
+            operator_public_key_file,
             signing_key_file,
             signing_public_key_file,
             target_identity_file,

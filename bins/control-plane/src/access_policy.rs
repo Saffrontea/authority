@@ -74,6 +74,19 @@ pub async fn authorize(
             SelectionFailure::policy(&request, selection, DenialReason::DeviceMismatch),
         )));
     }
+    let origin: Option<String> = first.try_get("enforcement_origin")?;
+    if origin
+        .as_deref()
+        .is_none_or(|origin| crate::config::validate_network_agent_origin(origin).is_err())
+    {
+        return Ok(AuthorizationOutcome::Denied(Box::new(
+            SelectionFailure::policy(
+                &request,
+                selection,
+                DenialReason::EnforcementOriginUnavailable,
+            ),
+        )));
+    }
     let checked = crate::endpoint_observation::snapshot(first, &request);
     let envelope = match checked {
         Ok(envelope) => envelope,
@@ -212,7 +225,7 @@ async fn snapshot_rows(
                 EXTRACT(EPOCH FROM policy.revoked_at)::bigint AS revoked_at, \
                 CEIL(EXTRACT(EPOCH FROM policy.valid_from))::bigint AS valid_from, \
                 FLOOR(EXTRACT(EPOCH FROM policy.valid_until))::bigint AS valid_until, \
-                host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
+                target.enforcement_origin AS enforcement_origin, host(target.mesh_address) AS target_mesh_address, client.domain_id AS device_domain_id, \
                 client.owner_user_id AS device_owner_user_id, \
                 client.status = 'active' AND subject.status = 'active' AS device_active, subject.generation AS subject_generation, client.generation AS device_generation, \
                 target.status = 'active' AND target_device.status = 'active' \
@@ -765,5 +778,34 @@ pub(crate) mod tests {
             }
             tx.rollback().await.unwrap();
         }
+    }
+    #[tokio::test]
+    #[ignore = "requires migrated LXC PostgreSQL and demo policies"]
+    async fn missing_delivery_origin_denies_issuance_before_reading_observation() {
+        let pool = lxc_pool(2).await;
+        let (request, _) = live_tcp_request(&pool).await;
+        let mut tx = begin_authorization(&pool).await.unwrap();
+        sqlx::query("UPDATE device.nodes SET enforcement_origin=NULL WHERE id=$1")
+            .bind(request.target_node_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let result = authorize(
+            &mut tx,
+            request,
+            &RequestedAccess::default(),
+            LifetimeLimits {
+                ssh_seconds: 60,
+                network_seconds: 300,
+            },
+            &SelectionOptions::exact(Route::Direct),
+        )
+        .await
+        .unwrap();
+        tx.rollback().await.unwrap();
+        let AuthorizationOutcome::Denied(failure) = result else {
+            panic!("grant issued without a revocation delivery origin")
+        };
+        assert_eq!(failure.code(), "enforcement_origin_unavailable");
     }
 }

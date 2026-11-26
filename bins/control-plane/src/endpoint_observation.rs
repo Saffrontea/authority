@@ -535,7 +535,18 @@ mod postgres_tests {
                 webauthn,
                 domain,
                 "test-bootstrap",
-                OpenSslEd25519Signer::generate("cp-test").unwrap(),
+                crate::state::SigningAuthority {
+                    grants: OpenSslEd25519Signer::generate("cp-test").unwrap(),
+                    operator:
+                        authority_credential_crypto_openssl::OpenSslEd25519Verifier::from_pem(
+                            "operator",
+                            &OpenSslEd25519Signer::generate("operator")
+                                .unwrap()
+                                .public_key_to_pem()
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                },
                 EnrollmentConfig {
                     target_identity_file: "/unused/test-node".into(),
                     client_wireguard_public_key: "unused".into(),

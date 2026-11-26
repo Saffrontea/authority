@@ -36,8 +36,8 @@ async fn reconcile_scoped(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use sqlx::Row;
     let mut tx = authority_mtls_core::database::begin(state.pool()).await?;
-    let row=sqlx::query("SELECT r.sequence,r.envelope,n.enforcement_origin AS origin,d.device_public_key AS node_key FROM policy.scoped_revocation_notices r JOIN device.nodes n ON n.id=r.target_node_id JOIN device.devices d ON d.id=n.device_id AND d.domain_id=r.domain_id WHERE r.completed_at IS NULL AND r.expires_at>clock_timestamp() AND n.enforcement_origin IS NOT NULL AND (r.lease_until IS NULL OR r.lease_until<=clock_timestamp()) ORDER BY r.sequence FOR UPDATE OF r SKIP LOCKED LIMIT 1")
-        .fetch_optional(&mut *tx).await?;
+    let row=sqlx::query("SELECT r.sequence,r.envelope,n.enforcement_origin AS origin,d.device_public_key AS node_key FROM policy.scoped_revocation_notices r JOIN device.nodes n ON n.id=r.target_node_id JOIN device.devices d ON d.id=n.device_id AND d.domain_id=r.domain_id WHERE r.domain_id=$1 AND r.completed_at IS NULL AND r.expires_at>clock_timestamp() AND n.enforcement_origin IS NOT NULL AND (r.lease_until IS NULL OR r.lease_until<=clock_timestamp()) ORDER BY r.sequence FOR UPDATE OF r SKIP LOCKED LIMIT 1")
+        .bind(state.domain_id()).fetch_optional(&mut *tx).await?;
     let Some(row) = row else {
         return Ok(());
     };
