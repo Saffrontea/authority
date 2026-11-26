@@ -5,6 +5,8 @@
 //! layer labels alone are not abilities. All prerequisites of a hyperedge must hold.
 //! Derivations are mandatory effects of composition, never optional grants.
 
+pub mod authority;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use thiserror::Error;
