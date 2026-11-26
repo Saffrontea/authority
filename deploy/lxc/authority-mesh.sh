@@ -730,6 +730,32 @@ main() {
       attach "${TARGET_NAME}" systemctl restart authority-network-agent.service
       reconnect_client
       ;;
+    test-ssh-cgroup)
+      attach "${TARGET_NAME}" /usr/bin/python3 - <<'CGROUP'
+import os, subprocess, time
+unit = 'authority-cgroup-proof.service'
+run = lambda *args: subprocess.check_output(args, text=True).strip()
+subprocess.run(['systemd-run','--quiet','--collect','--unit',unit,'--slice=authority-proof.slice','--property=Type=exec','/bin/sleep','30'],check=True)
+fd = None
+try:
+    group = run('systemctl','show',unit,'--property=ControlGroup','--value')
+    assert '/authority-proof.slice/' in group and group.endswith('/' + unit), group
+    path = '/sys/fs/cgroup' + group
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    assert 'populated 1' in open(path + '/cgroup.events').read()
+    subprocess.run(['systemctl','stop',unit],check=True)
+    original = path
+    deadline = time.monotonic() + 3
+    while os.readlink(f'/proc/self/fd/{fd}') != original + ' (deleted)' and time.monotonic() < deadline:
+        time.sleep(.05)
+    assert os.readlink(f'/proc/self/fd/{fd}') == original + ' (deleted)', 'pinned cgroup deletion not confirmed'
+    assert not os.path.exists(path), 'stopped cgroup was not removed'
+    print('Pinned cgroup v2: non-default slice discovered, populated live inode verified, removal confirmed through original FD')
+finally:
+    if fd is not None: os.close(fd)
+    subprocess.run(['systemctl','stop',unit],check=False,capture_output=True)
+CGROUP
+      ;;
     test-tcp-cidr)
       attach "${TARGET_NAME}" /usr/bin/python3 - <<'KERNEL'
 import subprocess

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
 authority-contracts-model.workspace = true
 authority-credential-crypto-openssl.workspace = true
 authority-device-auth-core.workspace = true

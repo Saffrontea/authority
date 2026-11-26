@@ -1,3 +1,4 @@
+mod cgroup;
 mod fence;
 mod observation;
 mod ssh;

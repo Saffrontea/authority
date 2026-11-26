@@ -138,3 +138,20 @@ commands a one-second deadline; batched SSH stop jobs are
 submitted without blocking and completion waits for empty service cgroups.
 Ambiguous kernel timeouts retain repair work: TCP rules are rebuilt from tracked
 grants, and uncertain WG peers are withdrawn before any cleanup acknowledgment.
+
+SSH admission pins the session's cgroup v2 directory after comparing systemd's
+`ControlGroup`, `/proc/<pid>/cgroup`, the PID start time and actual
+`cgroup.procs` membership. The mount must be cgroup2; paths are resolved beneath
+its directory FD without symlinks. Alternate slices are discovered rather than
+assumed. Unsupported mounts/namespaces refuse admission.
+
+Cleanup reads `cgroup.events` relative to that pinned FD. An absent or malformed
+file keeps cleanup pending; `NotFound` is never a receipt. Completion requires
+`populated 0`, or confirmed deletion of the previously verified, pinned cgroup2
+inode. Deletion uses its link count or the exact original `/proc/self/fd` target
+plus the kernel-added ` (deleted)` suffix; older kernfs versions retain stale
+link counts. Linux permits removing a cgroup2 directory only after its live processes
+and child cgroups are gone ([kernel documentation](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html)).
+The pinned inode prevents a replacement directory at the same path from proving
+cleanup of the original session. systemd/procfs admission checks run outside the
+lease-renewal mutex.

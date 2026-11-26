@@ -17,6 +17,7 @@ pub(super) struct Session {
     token: String,
     deadline: Instant,
     revoked: bool,
+    group: super::cgroup::SessionGroup,
 }
 
 #[derive(Default)]
@@ -94,6 +95,18 @@ fn unit(pid: u32, start: u64) -> String {
 }
 
 pub(super) fn reconcile(state: &AppState) -> Result<(), String> {
+    reconcile_with(state, |names| {
+        super::bounded_command("/usr/bin/systemctl")
+            .args(["stop", "--no-block", "--no-ask-password"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .args(names)
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+fn reconcile_with(state: &AppState, stop: impl FnOnce(&[String]) -> bool) -> Result<(), String> {
     let stopped: Vec<_> = {
         let mut ssh = state.0.ssh_state.lock().map_err(|e| e.to_string())?;
         let mut stopped = Vec::new();
@@ -102,10 +115,10 @@ pub(super) fn reconcile(state: &AppState) -> Result<(), String> {
                 || Instant::now() >= session.deadline
                 || !allowed(state, &ssh, &session.identity)?
             {
-                stopped.push(id);
+                stopped.push((id, session.group.clone()));
             }
         }
-        for id in &stopped {
+        for (id, _) in &stopped {
             ssh.sessions
                 .get_mut(id)
                 .ok_or("SSH session disappeared")?
@@ -119,35 +132,21 @@ pub(super) fn reconcile(state: &AppState) -> Result<(), String> {
     // Submit stop jobs together; never hold the renewal mutex across a command.
     let names: Vec<_> = stopped
         .iter()
-        .map(|&(pid, start)| unit(pid, start))
+        .map(|&((pid, start), _)| unit(pid, start))
         .collect();
-    let submitted = super::bounded_command("/usr/bin/systemctl")
-        .args(["stop", "--no-block", "--no-ask-password"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .args(&names)
-        .status()
-        .map_err(|e| e.to_string());
+    let submitted = stop(&names);
     let mut removed = Vec::new();
-    for (&id, name) in stopped.iter().zip(names) {
-        // The service cgroup includes the sshd monitor and every descendant.
-        // A queued systemd job is not yet a cleanup receipt.
-        let events = std::path::Path::new("/sys/fs/cgroup/system.slice")
-            .join(name)
-            .join("cgroup.events");
-        match std::fs::read_to_string(events) {
-            Ok(events) if events.lines().any(|line| line == "populated 0") => removed.push(id),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => removed.push(id),
-            Ok(_) => {}
-            Err(error) => return Err(error.to_string()),
+    for (id, group) in &stopped {
+        if group.empty()? {
+            removed.push(*id);
         }
     }
     let mut ssh = state.0.ssh_state.lock().map_err(|e| e.to_string())?;
     for id in removed {
         ssh.sessions.remove(&id);
     }
-    if stopped.iter().any(|id| ssh.sessions.contains_key(id)) {
-        if !submitted.is_ok_and(|status| status.success()) {
+    if stopped.iter().any(|(id, _)| ssh.sessions.contains_key(id)) {
+        if !submitted {
             return Err("SSH stop submission failed".into());
         }
         return Err("SSH cleanup pending".into());
@@ -163,6 +162,18 @@ async fn admit(
     if request.pid < 2 || request.start == 0 {
         return Err(ApiError::conflict("invalid_ssh_process"));
     }
+    // systemd/procfs I/O never holds the lease-renewal mutex.
+    let pid = request.pid;
+    let start = request.start;
+    let group = tokio::task::spawn_blocking(move || {
+        super::cgroup::SessionGroup::capture(pid, start, &unit(pid, start))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(|cause| {
+        tracing::warn!(%cause, "SSH cgroup admission failed");
+        ApiError::unavailable("ssh_control_group_unavailable")
+    })?;
     let mut ssh = state.0.ssh_state.lock().map_err(ApiError::internal)?;
     if !allowed(&state, &ssh, &request.identity).map_err(ApiError::internal)? {
         return Err(ApiError::conflict("ssh_authority_revoked"));
@@ -171,7 +182,9 @@ async fn admit(
         if existing.revoked || Instant::now() >= existing.deadline {
             return Err(ApiError::conflict("ssh_process_lease_expired"));
         }
-        if existing.identity != request.identity {
+        if existing.identity != request.identity
+            || !existing.group.same(&group).map_err(ApiError::internal)?
+        {
             return Err(ApiError::conflict("ssh_process_already_bound"));
         }
         return Ok(Json(json!({"token":existing.token})));
@@ -189,6 +202,7 @@ async fn admit(
             token: token.clone(),
             deadline: Instant::now() + Duration::from_secs(2),
             revoked: false,
+            group,
         },
     );
     Ok(Json(json!({"token":token})))
@@ -342,17 +356,18 @@ mod tests {
             not_before: now,
             expires_at: now + 60,
         };
+        let group = super::super::cgroup::SessionGroup::fixture(directory.path());
         for pid in 2..202 {
-            let _ = admit(
-                State(state.clone()),
-                Json(Admission {
+            state.0.ssh_state.lock().unwrap().sessions.insert(
+                (pid, 1),
+                Session {
                     identity: identity.clone(),
-                    pid,
-                    start: 1,
-                }),
-            )
-            .await
-            .unwrap();
+                    token: format!("token-{pid}"),
+                    deadline: Instant::now() + Duration::from_secs(2),
+                    revoked: false,
+                    group: group.clone(),
+                },
+            );
         }
         let barrier = Arc::new(Barrier::new(2));
         let blocked_state = state.clone();
@@ -390,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn collected_session_cgroups_complete_cleanup_even_if_systemd_forgot_the_unit() {
+    fn missing_cgroup_events_keeps_revocation_pending_until_verified_empty() {
         let directory = tempfile::tempdir().unwrap();
         let (state, _) = state(directory.path());
         let now = crate::unix_timestamp().unwrap();
@@ -414,9 +429,16 @@ mod tests {
                 token: "unused".into(),
                 deadline: Instant::now(),
                 revoked: true,
+                group: super::super::cgroup::SessionGroup::fixture(directory.path()),
             },
         );
-        reconcile(&state).unwrap();
+        assert!(reconcile_with(&state, |_| true).is_err());
+        assert_eq!(state.0.ssh_state.lock().unwrap().sessions.len(), 1);
+        std::fs::write(directory.path().join("cgroup.events"), "populated 1\n").unwrap();
+        assert!(reconcile_with(&state, |_| true).is_err());
+        assert_eq!(state.0.ssh_state.lock().unwrap().sessions.len(), 1);
+        std::fs::write(directory.path().join("cgroup.events"), "populated 0\n").unwrap();
+        reconcile_with(&state, |_| false).unwrap();
         assert!(state.0.ssh_state.lock().unwrap().sessions.is_empty());
     }
 

@@ -68,6 +68,7 @@ def login(old_token):
 
 with tempfile.TemporaryDirectory(prefix='authority-identity-e2e-') as directory:
     directory = Path(directory)
+    subprocess.run([str(root / 'scripts/authority-agent.sh'),'run','_mesh:test-ssh-cgroup'],check=True,stdout=subprocess.DEVNULL)
     subprocess.run([str(root / 'scripts/authority-agent.sh'),'run','_mesh:test-tcp-cidr'],check=True,stdout=subprocess.DEVNULL)
     initial = issue()
     fixture = {**initial['ssh_authorization']['generation'], 'target_node_id': initial['ssh_authorization']['authorization']['target_node_id']}

@@ -290,6 +290,7 @@ dependencies = [
  "axum",
  "openssl",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
